@@ -33,5 +33,5 @@ Initial release.
 - `examples/gaussian_example.py` — minimal runnable demo on a 2-D Gaussian likelihood.
 - Version managed by `setuptools-scm` from git tags.
 
-[Unreleased]: https://github.com/your-org/bilby-laplace/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/your-org/bilby-laplace/releases/tag/v0.1.0
+[Unreleased]: https://github.com/GregoryAshton/bilby-laplace/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/GregoryAshton/bilby-laplace/releases/tag/v0.1.0
