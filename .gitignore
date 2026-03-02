@@ -1,0 +1,14 @@
+# setuptools-scm auto-generated; do not commit
+src/bilby_laplace/_version.py
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+*.so
+
+# Common runtime outputs
+outdir/
+*.png
