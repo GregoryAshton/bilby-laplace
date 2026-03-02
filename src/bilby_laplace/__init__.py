@@ -1,4 +1,9 @@
 from .matrix import FisherMatrixPosteriorEstimator
 from .sampler import Fisher
 
-__all__ = ["Fisher", "FisherMatrixPosteriorEstimator"]
+try:
+    from ._version import __version__
+except ImportError:
+    __version__ = "unknown"
+
+__all__ = ["Fisher", "FisherMatrixPosteriorEstimator", "__version__"]
