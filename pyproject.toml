@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bilby-laplace"
+dynamic = ["version"]
+description = "Bilby sampler plugin: Laplace approximation with rejection/importance resampling"
+requires-python = ">=3.9"
+dependencies = [
+    "bilby",
+    "numpy",
+    "scipy>=1.9",
+    "pandas",
+    "tqdm",
+    "packaging",
+]
+
+[project.entry-points."bilby.samplers"]
+"bilby.laplace" = "bilby_laplace.sampler:Fisher"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+# Write a version file so the package version is available at runtime
+# without needing git.
+write_to = "src/bilby_laplace/_version.py"

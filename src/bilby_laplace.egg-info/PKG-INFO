@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: bilby-laplace
+Version: 0.1.0
+Summary: Bilby sampler plugin: Laplace approximation with rejection/importance resampling
+Requires-Python: >=3.9
+Requires-Dist: bilby
+Requires-Dist: numpy
+Requires-Dist: scipy>=1.9
+Requires-Dist: pandas
+Requires-Dist: tqdm
+Requires-Dist: packaging
