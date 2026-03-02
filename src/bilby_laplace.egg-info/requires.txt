@@ -1,6 +1,0 @@
-bilby
-numpy
-scipy>=1.9
-pandas
-tqdm
-packaging

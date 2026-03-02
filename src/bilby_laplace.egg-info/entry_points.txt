@@ -1,2 +1,0 @@
-[bilby.samplers]
-bilby.laplace = bilby_laplace.sampler:Fisher

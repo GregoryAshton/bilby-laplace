@@ -5,7 +5,7 @@ src/bilby_laplace/_version.py
 dist/
 build/
 *.egg-info/
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *.so
 
