@@ -1,15 +1,14 @@
 """
-Minimal example: Fisher sampler on a 2D Gaussian likelihood.
+Comparison example: Laplace vs dynesty on a 2D Gaussian likelihood.
 
 Usage
 -----
     python examples/gaussian_example.py
-    python examples/gaussian_example.py --also-dynesty   # comparison run
 """
 
-import argparse
 import numpy as np
 import bilby
+
 
 # ---------------------------------------------------------------------------
 # Likelihood
@@ -39,7 +38,7 @@ class GaussianLikelihood(bilby.core.likelihood.Likelihood):
 # Main
 # ---------------------------------------------------------------------------
 
-def main(also_dynesty: bool = False):
+def main():
     likelihood = GaussianLikelihood()
 
     priors = bilby.core.prior.PriorDict(
@@ -51,16 +50,15 @@ def main(also_dynesty: bool = False):
 
     injection_parameters = {"x": 1.0, "y": -0.5}
 
-    # --- Fisher run ---
-    result_fisher = bilby.run_sampler(
+    # --- Laplace run ---
+    result_laplace = bilby.run_sampler(
         likelihood=likelihood,
         priors=priors,
-        sampler="fisher",
+        sampler="laplace",
         injection_parameters=injection_parameters,
         outdir="outdir",
-        label="gaussian_fisher",
+        label="gaussian_laplace",
         clean=True,
-        # Fisher-specific kwargs:
         resample="rejection",
         target_nsamples=5000,
         batch_nsamples=500,
@@ -68,40 +66,33 @@ def main(also_dynesty: bool = False):
         use_injection_for_maxL=True,
     )
 
-    print("\n=== Fisher result ===")
-    print(f"Posterior shape : {result_fisher.posterior.shape}")
-    print(result_fisher.posterior[["x", "y"]].describe())
-    print("run_statistics  :", result_fisher.meta_data.get("run_statistics"))
-
-    result_fisher.plot_corner(
-        truths=injection_parameters,
-        filename="outdir/gaussian_fisher_corner.png",
+    # --- Dynesty run ---
+    result_dynesty = bilby.run_sampler(
+        likelihood=likelihood,
+        priors=priors,
+        sampler="dynesty",
+        injection_parameters=injection_parameters,
+        outdir="outdir",
+        label="gaussian_dynesty",
+        clean=True,
+        nlive=500,
     )
 
-    # --- Optional dynesty comparison ---
-    if also_dynesty:
-        result_dynesty = bilby.run_sampler(
-            likelihood=likelihood,
-            priors=priors,
-            sampler="dynesty",
-            injection_parameters=injection_parameters,
-            outdir="outdir",
-            label="gaussian_dynesty",
-            nlive=200,
-            clean=True,
-        )
-        result_dynesty.plot_corner(
-            truths=injection_parameters,
-            filename="outdir/gaussian_dynesty_corner.png",
-        )
+    # --- Comparison plot ---
+    bilby.core.result.plot_multiple(
+        [result_laplace, result_dynesty],
+        labels=["Laplace", "Dynesty"],
+        filename="outdir/gaussian_comparison_corner.png",
+        titles=False,
+    )
+
+    # --- Summary ---
+    for label, result in [("Laplace", result_laplace), ("Dynesty", result_dynesty)]:
+        print(f"\n=== {label} ===")
+        print(result.posterior[["x", "y"]].describe())
+        if "run_statistics" in result.meta_data:
+            print("run_statistics:", result.meta_data["run_statistics"])
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--also-dynesty",
-        action="store_true",
-        help="Also run dynesty for comparison",
-    )
-    args = parser.parse_args()
-    main(also_dynesty=args.also_dynesty)
+    main()
