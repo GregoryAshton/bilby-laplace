@@ -39,8 +39,8 @@ def kish_log_effective_sample_size(ln_weights):
     return log_ess
 
 
-class Fisher(Sampler):
-    """Bilby sampler using Fisher Information Matrix as proposal distribution.
+class Laplace(Sampler):
+    """Bilby sampler implementing the Laplace approximation.
 
     Estimates the maximum likelihood with scipy optimisation, computes the
     inverse Fisher Information Matrix (iFIM) as a Gaussian proposal covariance,
@@ -75,7 +75,7 @@ class Fisher(Sampler):
         If True, raise SamplerError when sampling fails; otherwise just log.
     """
 
-    sampler_name = "fisher"
+    sampler_name = "laplace"
     sampling_seed_key = "seed"
     default_kwargs = dict(
         resample="rejection",

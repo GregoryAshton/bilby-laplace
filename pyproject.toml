@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.entry-points."bilby.samplers"]
-"bilby.laplace" = "bilby_laplace.sampler:Fisher"
+"bilby.laplace" = "bilby_laplace.sampler:Laplace"
 
 [tool.setuptools.packages.find]
 where = ["src"]
