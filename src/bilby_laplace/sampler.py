@@ -272,7 +272,7 @@ class Laplace(Sampler):
             if self.kwargs["fail_on_error"]:
                 raise SamplerError(msg)
             else:
-                logger.info(msg)
+                logger.debug(msg)
 
         logpi = np.real(np.array(logpi))
         return samples, logl, logpi, discard_inef
