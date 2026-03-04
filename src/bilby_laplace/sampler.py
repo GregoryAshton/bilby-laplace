@@ -61,7 +61,9 @@ class Laplace(Sampler):
     prior_nsamples : int
         Number of prior draws used in the maximum-likelihood search.
     minimization_method : str
-        scipy.optimize.minimize method (default ``'Nelder-Mead'``).
+        Optimization method. Default is ``'differential_evolution'`` (global
+        optimizer; recommended for real data). Set to ``'Nelder-Mead'`` to use
+        the legacy multi-start local optimizer.
     fd_eps : float
         Finite-difference step size relative to prior width.
     plot_diagnostic : bool
@@ -82,7 +84,7 @@ class Laplace(Sampler):
         target_nsamples=10000,
         batch_nsamples=1000,
         prior_nsamples=100,
-        minimization_method="Nelder-Mead",
+        minimization_method="differential_evolution",
         fd_eps=1e-6,
         plot_diagnostic=False,
         cov_scaling=1,

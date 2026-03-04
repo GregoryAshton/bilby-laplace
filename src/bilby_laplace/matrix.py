@@ -4,7 +4,7 @@ from packaging import version
 import numpy as np
 import pandas as pd
 import scipy.linalg
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 import tqdm
 
 from bilby.core.utils import random, logger
@@ -58,10 +58,12 @@ class FisherMatrixPosteriorEstimator:
         self.n_prior_samples = n_prior_samples
         self.N = len(self.parameter_names)
 
-        # Construct prior samples at initialisation so that the prior is not stored
-        self.prior_samples = [
-            priors.sample_subset(self.parameter_names) for _ in range(n_prior_samples)
-        ]
+        # Construct prior samples at initialisation so that the prior is not stored.
+        # Skip when using differential_evolution, which doesn't need starting points.
+        if minimization_method != "differential_evolution":
+            self.prior_samples = [
+                priors.sample_subset(self.parameter_names) for _ in range(n_prior_samples)
+            ]
         self.prior_bounds_min = np.array(
             [priors[key].minimum for key in self.parameter_names]
         )
@@ -225,31 +227,57 @@ class FisherMatrixPosteriorEstimator:
         shift_sample[y_key] = vy + y_coef * dvy
         return shift_sample
 
+    def _maximize_likelihood_differential_evolution(self):
+        def neg_log_like(x):
+            return -self.log_likelihood_from_array(x)
+
+        return differential_evolution(neg_log_like, bounds=self.prior_bounds)
+
     def _maximize_likelihood_from_initial_sample(self, initial_sample):
         x0 = list(initial_sample.values())
 
         def neg_log_like(x):
             return -self.log_likelihood_from_array(x)
 
+        # differential_evolution is not a valid method for scipy.optimize.minimize;
+        # fall back to Nelder-Mead when used with an initial starting point.
+        local_method = (
+            "Nelder-Mead"
+            if self.minimization_method == "differential_evolution"
+            else self.minimization_method
+        )
         return minimize(
             neg_log_like,
             x0,
             bounds=self.prior_bounds,
-            method=self.minimization_method,
+            method=local_method,
         )
 
     def get_maximum_likelihood_sample(self, initial_sample=None):
         """Attempt optimization of the maximum likelihood.
 
-        Uses scipy optimization starting from prior draws to avoid local optima.
-        Works well when the posterior is narrow relative to the prior. May struggle
-        in high dimensions or with wide posteriors.
+        By default uses differential evolution, a global optimizer that searches
+        the full prior-bounded space and does not require a starting point. This
+        makes it robust on real data where the posterior peak may be far from
+        random prior draws.
+
+        If ``initial_sample`` is provided, a single local minimization is run
+        from that starting point using ``self.minimization_method``.
+
+        When ``minimization_method`` is not ``'differential_evolution'`` and no
+        ``initial_sample`` is given, the legacy multi-start Nelder-Mead strategy
+        is used: ``n_prior_samples`` random prior draws are each used as starting
+        points for a local optimizer and the best result is returned.
         """
         if initial_sample:
             logger.info(
                 f"Maximising the likelihood from initial sample {initial_sample}"
             )
             minout = self._maximize_likelihood_from_initial_sample(initial_sample)
+        elif self.minimization_method == "differential_evolution":
+            logger.info("Maximising the likelihood using differential evolution")
+            minout = self._maximize_likelihood_differential_evolution()
+            logger.info(f"Differential evolution result: {minout.message}")
         else:
             logger.info(
                 f"Maximising the likelihood using {self.n_prior_samples} prior samples"
