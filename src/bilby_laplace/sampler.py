@@ -52,8 +52,10 @@ class Laplace(Sampler):
     priors : bilby.core.prior.PriorDict or dict
     outdir : str
     label : str
-    resample : str
-        Resampling method: ``'rejection'`` (default) or ``'importance'``.
+    resample : str or None
+        Resampling method: ``'rejection'`` (default), ``'importance'``, or
+        ``None`` / ``'None'`` to skip resampling entirely and return raw
+        Laplace-approximation samples.
     target_nsamples : int
         Target number of posterior samples.
     batch_nsamples : int
@@ -157,82 +159,95 @@ class Laplace(Sampler):
         )
         logger.info(msg)
 
-        nsamples = 0
         target_nsamples = self.kwargs["target_nsamples"]
         batch_nsamples = self.kwargs["batch_nsamples"]
         resample = self.kwargs["resample"]
-        all_g_samples = []
-        all_samples = []
-        all_logl = []
-        all_weights = []
-        efficiency = 0.0
+        if resample == "None":
+            resample = None
 
-        logger.info(
-            f"Starting sampling in batches of {batch_nsamples} "
-            f"to produce {target_nsamples} samples"
-        )
-        pbar = tqdm.tqdm(
-            total=target_nsamples,
-            desc=f"{resample.capitalize()} sampling",
-            file=sys.stdout,
-            initial=0,
-        )
+        if resample is None:
+            logger.info(
+                f"Pure Laplace approximation: drawing {target_nsamples} samples directly"
+            )
+            samples_array = random.rng.multivariate_normal(mean, cov, target_nsamples)
+            samples = pd.DataFrame(samples_array, columns=fisher_mpe.parameter_names)
+            logl = np.full(target_nsamples, np.nan)
+            g_samples = samples
+            efficiency = 100.0
+        else:
+            nsamples = 0
+            all_g_samples = []
+            all_samples = []
+            all_logl = []
+            all_weights = []
+            efficiency = 0.0
 
-        _resample_methods = dict(
-            rejection=self._rejection_sample,
-            importance=self._importance_sample,
-        )
+            logger.info(
+                f"Starting sampling in batches of {batch_nsamples} "
+                f"to produce {target_nsamples} samples"
+            )
+            pbar = tqdm.tqdm(
+                total=target_nsamples,
+                desc=f"{resample.capitalize()} sampling",
+                file=sys.stdout,
+                initial=0,
+            )
 
-        while nsamples < target_nsamples:
-            g_samples, g_logl, g_logpi, discard_inef = (
-                self._draw_samples_from_generating_distribution(
-                    mean, cov, fisher_mpe, batch_nsamples
+            _resample_methods = dict(
+                rejection=self._rejection_sample,
+                importance=self._importance_sample,
+            )
+
+            while nsamples < target_nsamples:
+                g_samples, g_logl, g_logpi, discard_inef = (
+                    self._draw_samples_from_generating_distribution(
+                        mean, cov, fisher_mpe, batch_nsamples
+                    )
                 )
-            )
 
-            if resample in _resample_methods:
-                weights = self._calculate_weights(g_samples, g_logl, g_logpi, mean, cov)
-                samples, logl = _resample_methods[resample](g_samples, g_logl, weights)
-                efficiency = 100.0 * len(samples) / len(g_samples)
-            else:
-                logger.info("No resampling applied")
-                samples = g_samples
-                logl = g_logl
-                weights = np.ones_like(g_logl)
-                efficiency = 100.0
+                if resample in _resample_methods:
+                    weights = self._calculate_weights(g_samples, g_logl, g_logpi, mean, cov)
+                    samples, logl = _resample_methods[resample](g_samples, g_logl, weights)
+                    efficiency = 100.0 * len(samples) / len(g_samples)
+                else:
+                    logger.info("No resampling applied")
+                    samples = g_samples
+                    logl = g_logl
+                    weights = np.ones_like(g_logl)
+                    efficiency = 100.0
 
-            nsamples += len(samples)
-            pbar.set_postfix(
-                {
-                    "eff": f"{efficiency:.3f}%",
-                    "de": f"{discard_inef:.1f}%",
-                    "cs": f"{cov_scaling:.2f}",
-                },
-                refresh=False,
-            )
-            if len(samples) > self.ndim:
-                pbar.update(len(samples))
-                all_g_samples.append(g_samples)
-                all_samples.append(samples)
-                all_logl.append(logl)
-                all_weights.append(weights)
-            else:
-                pbar.update(0)
+                nsamples += len(samples)
+                pbar.set_postfix(
+                    {
+                        "eff": f"{efficiency:.3f}%",
+                        "de": f"{discard_inef:.1f}%",
+                        "cs": f"{cov_scaling:.2f}",
+                    },
+                    refresh=False,
+                )
+                if len(samples) > 0:
+                    pbar.update(len(samples))
+                    all_g_samples.append(g_samples)
+                    all_samples.append(samples)
+                    all_logl.append(logl)
+                    all_weights.append(weights)
+                else:
+                    pbar.update(0)
 
-        pbar.close()
+            pbar.close()
 
-        g_samples = pd.concat(all_g_samples, ignore_index=True)
-        samples = pd.concat(all_samples, ignore_index=True)
-        logl = np.concatenate(all_logl)
-        weights = np.concatenate(all_weights)
-        efficiency = 100.0 * len(samples) / len(g_samples)
+            g_samples = pd.concat(all_g_samples, ignore_index=True)
+            samples = pd.concat(all_samples, ignore_index=True)
+            logl = np.concatenate(all_logl)
+            weights = np.concatenate(all_weights)
+            efficiency = 100.0 * len(samples) / len(g_samples)
 
-        logger.info(f"Finished sampling: total efficiency is {efficiency:.3f}%")
+            logger.info(f"Finished sampling: total efficiency is {efficiency:.3f}%")
 
-        if self.kwargs["plot_diagnostic"]:
-            self.create_resample_diagnostic(
-                samples, g_samples, mean, weights, method=resample
-            )
+            if self.kwargs["plot_diagnostic"]:
+                self.create_resample_diagnostic(
+                    samples, g_samples, mean, weights, method=resample
+                )
 
         end_time = datetime.datetime.now()
         self.sampling_time = end_time - self.start_time
