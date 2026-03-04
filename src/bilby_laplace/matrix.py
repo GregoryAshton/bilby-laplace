@@ -24,6 +24,7 @@ class FisherMatrixPosteriorEstimator:
         minimization_method="Nelder-Mead",
         fd_eps=1e-6,
         n_prior_samples=100,
+        use_unit_cube=True,
     ):
         """A class to estimate posteriors using a Fisher Information Matrix approach
 
@@ -43,6 +44,10 @@ class FisherMatrixPosteriorEstimator:
         n_prior_samples: int
             The number of prior samples to draw and use to attempt estimation
             of the maximum likelihood sample.
+        use_unit_cube: bool
+            If True (default), compute the FIM in unit-cube space via the prior
+            CDFs. This avoids boundary clipping when the MAP is near a prior
+            edge, giving unbiased curvature estimates.
         """
         self.likelihood = likelihood
 
@@ -56,7 +61,9 @@ class FisherMatrixPosteriorEstimator:
         self.minimization_method = minimization_method
         self.fd_eps = fd_eps
         self.n_prior_samples = n_prior_samples
+        self.use_unit_cube = use_unit_cube
         self.N = len(self.parameter_names)
+        self.priors_dict = {key: priors[key] for key in self.parameter_names}
 
         # Construct prior samples at initialisation so that the prior is not stored.
         # Skip when using differential_evolution, which doesn't need starting points.
@@ -121,7 +128,47 @@ class FisherMatrixPosteriorEstimator:
 
         return wrapped_logl_arb(x_array)
 
+    def _to_unit_cube(self, x_array):
+        return np.array([self.priors_dict[k].cdf(float(x_array[i]))
+                         for i, k in enumerate(self.parameter_names)])
+
+    def _from_unit_cube(self, u_array):
+        return np.array([self.priors_dict[k].rescale(float(np.clip(u_array[i], 0.0, 1.0)))
+                         for i, k in enumerate(self.parameter_names)])
+
+    def _jacobian_diag(self, x_array):
+        """Diagonal of dθ/du = 1/p(θ) at the given parameter values."""
+        return np.array([1.0 / self.priors_dict[k].prob(float(x_array[i]))
+                         for i, k in enumerate(self.parameter_names)])
+
+    def log_likelihood_in_unit_cube(self, u_array):
+        """L̃(u) = L(θ(u)); same shape contract as log_likelihood_from_array."""
+        def wrapped(u):
+            x = self._from_unit_cube(u)
+            return self.log_likelihood(array_to_dict(self.parameter_names, x))
+        return np.apply_along_axis(wrapped, 0, u_array)
+
+    def _second_deriv_unit_cube(self, u_map, ii, jj):
+        """Finite-difference second derivative of L̃ in unit-cube coords."""
+        h = self.fd_eps
+        ei = np.zeros(self.N); ei[ii] = h
+        ej = np.zeros(self.N); ej[jj] = h
+        if ii == jj:
+            return (self.log_likelihood_in_unit_cube(u_map + ei)
+                    - 2 * self.log_likelihood_in_unit_cube(u_map)
+                    + self.log_likelihood_in_unit_cube(u_map - ei)) / h**2
+        else:
+            return (self.log_likelihood_in_unit_cube(u_map + ei + ej)
+                    - self.log_likelihood_in_unit_cube(u_map + ei - ej)
+                    - self.log_likelihood_in_unit_cube(u_map - ei + ej)
+                    + self.log_likelihood_in_unit_cube(u_map - ei - ej)) / (4 * h**2)
+
     def calculate_FIM(self, sample):
+        if self.use_unit_cube:
+            return self._calculate_FIM_unit_cube(sample)
+        return self._calculate_FIM_parameter_space(sample)
+
+    def _calculate_FIM_parameter_space(self, sample):
         if version.parse(scipy.__version__) < version.parse("1.15"):
             logger.info("Scipy version < 1.15, using finite-difference fallback")
             FIM = np.zeros((self.N, self.N))
@@ -142,6 +189,26 @@ class FisherMatrixPosteriorEstimator:
             FIM = -res.ddf
             logger.debug(f"Estimated FIM:\n{FIM}")
             return FIM
+
+    def _calculate_FIM_unit_cube(self, sample):
+        x_array = np.array([sample[key] for key in self.parameter_names])
+        u_map = self._to_unit_cube(x_array)
+
+        if version.parse(scipy.__version__) < version.parse("1.15"):
+            logger.info("Scipy < 1.15: finite-difference FIM in unit cube")
+            FIM_u = np.zeros((self.N, self.N))
+            for ii in range(self.N):
+                for jj in range(self.N):
+                    FIM_u[ii, jj] = -self._second_deriv_unit_cube(u_map, ii, jj)
+        else:
+            import scipy.differentiate as sd
+            logger.info("scipy.differentiate hessian in unit cube")
+            res = sd.hessian(self.log_likelihood_in_unit_cube, u_map, initial_step=0.5)
+            FIM_u = -res.ddf
+            logger.debug(f"FIM (unit cube):\n{FIM_u}")
+
+        J_inv = 1.0 / self._jacobian_diag(x_array)   # = p(θ_MAP)
+        return J_inv[:, None] * FIM_u * J_inv[None, :]
 
     def calculate_iFIM(self, sample):
         FIM = self.calculate_FIM(sample)

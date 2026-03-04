@@ -90,6 +90,7 @@ class Laplace(Sampler):
         cov_scaling=1,
         use_injection_for_maxL=True,
         fail_on_error=False,
+        use_unit_cube=True,
     )
 
     def __init__(
@@ -132,6 +133,7 @@ class Laplace(Sampler):
             minimization_method=self.kwargs["minimization_method"],
             n_prior_samples=self.kwargs["prior_nsamples"],
             fd_eps=self.kwargs["fd_eps"],
+            use_unit_cube=self.kwargs["use_unit_cube"],
         )
 
         # Choose starting point for max-likelihood search
