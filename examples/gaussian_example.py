@@ -24,9 +24,9 @@ class GaussianLikelihood(bilby.core.likelihood.Likelihood):
         self.sigma_x = sigma_x
         self.sigma_y = sigma_y
 
-    def log_likelihood(self):
-        x = self.parameters["x"]
-        y = self.parameters["y"]
+    def log_likelihood(self, parameters=None):
+        x = parameters["x"]
+        y = parameters["y"]
         return (
             -0.5 * ((x - self.mu_x) / self.sigma_x) ** 2
             - 0.5 * ((y - self.mu_y) / self.sigma_y) ** 2
