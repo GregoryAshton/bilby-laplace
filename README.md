@@ -2,14 +2,14 @@
 
 A [Bilby](https://bilby-dev.github.io/bilby/) sampler plugin that estimates posteriors
 via the **Laplace approximation** — a Gaussian fitted at the maximum likelihood point
-using the Fisher Information Matrix — followed by rejection or importance resampling to
+using the Fisher Information Matrix — followed by resampling to
 correct for non-Gaussianity.
 
 The method is fast, scales well to moderate dimensions, and produces asymptotically
-exact posterior samples when the true posterior is close to Gaussian. It is particularly
+exact posterior samples when the true posterior is close to Gaussian.
 useful as a cheap cross-check against nested sampling results.
 
-The implementation is derived from
+NOTE: This is currently in development and derived from
 [bilby PR #933](https://github.com/bilby-dev/bilby/pull/933) (Gregory Ashton).
 
 ---
@@ -89,22 +89,3 @@ All keyword arguments are passed through `bilby.run_sampler`:
 | `use_injection_for_maxL` | `True` | Use `injection_parameters` as starting point if set |
 | `plot_diagnostic` | `False` | Save a corner diagnostic plot of proposal vs posterior |
 | `fail_on_error` | `False` | Raise an error (vs. log a warning) when sampling fails |
-
----
-
-## Example
-
-```bash
-python examples/gaussian_example.py
-python examples/gaussian_example.py --also-dynesty   # comparison run
-```
-
----
-
-## Limitations
-
-- Works best when the posterior is approximately Gaussian and narrow relative to the
-  prior. In highly non-Gaussian or multimodal problems, efficiency will be low.
-- The Nelder-Mead max-likelihood search can fail in high dimensions (≳ 15 parameters).
-  Provide `injection_parameters` (or a good starting point) to help.
-- Evidence (`ln_Z`) is not computed; use nested sampling for evidence estimation.
