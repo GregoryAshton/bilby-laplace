@@ -12,3 +12,11 @@ build/
 # Common runtime outputs
 outdir/
 *.png
+*.npz
+
+# macOS
+.DS_Store
+
+# Vim
+*.swp
+*.swo
