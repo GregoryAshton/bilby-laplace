@@ -77,14 +77,30 @@ class FisherMatrixPosteriorEstimator:
                 raise ValueError(f"Prior width is ill-formed for {key}")
             self.prior_width_dict[key] = width
 
+        # Collect fixed parameter values (floats or DeltaFunction priors) so
+        # that every likelihood call receives a complete parameter dict.  This
+        # is required when the likelihood uses internal marginalisation (e.g.
+        # bilby's GravitationalWaveTransient), which still needs the fixed
+        # reference values (e.g. geocent_time) even though they are not sampled.
+        self.fixed_parameters = {}
+        for key, val in priors.items():
+            if key in self.parameter_names:
+                continue
+            if isinstance(val, (int, float)):
+                self.fixed_parameters[key] = float(val)
+            elif hasattr(val, "peak"):  # DeltaFunction prior
+                self.fixed_parameters[key] = float(val.peak)
+
     def log_likelihood(self, sample):
         if not isinstance(sample, dict):
             if isinstance(sample, pd.DataFrame) and len(sample) == 1:
                 sample = sample.to_dict()
             else:
                 raise ValueError("sample must be a dict or single-row DataFrame")
-        self.likelihood.parameters.update(sample)
-        return self.likelihood.log_likelihood()
+        # Merge fixed values first so that sampled values always take priority.
+        return self.likelihood.log_likelihood(
+            parameters={**self.fixed_parameters, **sample}
+        )
 
     def log_likelihood_from_array(self, x_array):
         def wrapped_logl(x_array):
