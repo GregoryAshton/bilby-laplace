@@ -24,6 +24,26 @@ except ImportError:
         fig.savefig(filename, **kwargs)
 
 
+class GaussianFlow:
+    """Minimal aspire-compatible Flow wrapping a multivariate Gaussian.
+
+    Implements the ``log_prob`` and ``sample_and_log_prob`` interface required
+    by aspire's SMC sampler as the ``prior_flow`` argument.
+    """
+
+    def __init__(self, mean, cov):
+        self._mean = mean
+        self._cov = cov
+        self._dist = multivariate_normal(mean=mean, cov=cov)
+
+    def log_prob(self, x):
+        return self._dist.logpdf(np.asarray(x))
+
+    def sample_and_log_prob(self, n_samples):
+        x = random.rng.multivariate_normal(self._mean, self._cov, n_samples)
+        return x, self._dist.logpdf(x)
+
+
 def kish_log_effective_sample_size(ln_weights):
     """Kish effective sample size from log unnormalised weights.
 
@@ -77,6 +97,28 @@ class Laplace(Sampler):
         point for the max-likelihood search.
     fail_on_error : bool
         If True, raise SamplerError when sampling fails; otherwise just log.
+    smc_kwargs : dict or None
+        Configuration for SMC sampling (only used when ``resample='smc'``).
+        Recognised keys:
+
+        ``backend`` : str
+            Aspire SMC backend: ``'emcee'`` (default), ``'minipcn'``, or
+            ``'blackjax'``.
+        ``n_samples`` : int
+            Number of SMC particles (default 1000).
+        ``n_final_samples`` : int
+            Number of output samples after final resampling.  Defaults to
+            ``target_nsamples`` if not set.
+        ``target_efficiency`` : float
+            Target ESS/N ratio for the adaptive β schedule (default 0.5).
+        ``sampler_kwargs`` : dict
+            Passed verbatim to the MCMC mutation kernel, e.g.
+            ``{'nsteps': 20}`` for the emcee backend.
+
+        Any other keys are forwarded directly to ``aspire_sampler.sample()``,
+        so all aspire parameters (``min_beta_step``, ``max_beta_step``,
+        ``max_n_steps``, ``store_sample_history``, ``beta_tolerance``, …)
+        are accessible this way.
     """
 
     sampler_name = "laplace"
@@ -93,6 +135,7 @@ class Laplace(Sampler):
         use_injection_for_maxL=True,
         fail_on_error=False,
         use_unit_cube=True,
+        smc_kwargs=None,
     )
 
     def __init__(
@@ -174,6 +217,12 @@ class Laplace(Sampler):
             logl = np.full(target_nsamples, np.nan)
             g_samples = samples
             efficiency = 100.0
+        elif resample == "smc":
+            samples, logl = self._smc_sample(mean, cov, fisher_mpe)
+            g_samples = samples
+            efficiency = 100.0
+            if self.kwargs["plot_diagnostic"]:
+                self.create_smc_diagnostic(samples, mean, cov)
         else:
             nsamples = 0
             all_g_samples = []
@@ -350,6 +399,85 @@ class Laplace(Sampler):
 
         return samples, logl
 
+    def _smc_sample(self, mean, cov, fisher_mpe):
+        """Run SMC via aspire, annealing from the Laplace proposal to the
+        true posterior.
+
+        The SMC path is::
+
+            log π_β(x) = log N(x|MAP, iFIM⁻¹) + β · log_lik_correction(x)
+
+        where ``log_lik_correction = log L_bilby + log π_bilby − log N``,
+        so that at β=1 we recover the true posterior.
+        """
+        import importlib
+
+        from scipy.stats import multivariate_normal as mvn
+
+        parameter_names = fisher_mpe.parameter_names
+        proposal = mvn(mean=mean, cov=cov)
+
+        def log_prior_aspire(samples):
+            return proposal.logpdf(np.asarray(samples.x))
+
+        def log_lik_aspire(samples):
+            x = np.asarray(samples.x)  # (N, D)
+            df = pd.DataFrame(x, columns=parameter_names)
+            log_pi = np.real(
+                np.array(self.priors.ln_prob(df, axis=0))
+            )
+            log_l = np.full(len(x), -np.inf)
+            in_prior = np.isfinite(log_pi)
+            if np.any(in_prior):
+                log_l[in_prior] = (
+                    fisher_mpe.log_likelihood_from_array(x[in_prior].T)
+                )
+            log_q = proposal.logpdf(x)
+            return log_l + log_pi - log_q
+
+        prior_flow = GaussianFlow(mean, cov)
+
+        _backends = {
+            "emcee": "aspire.samplers.smc.emcee.EmceeSMC",
+            "minipcn": "aspire.samplers.smc.minipcn.MiniPCNSMC",
+            "blackjax": "aspire.samplers.smc.blackjax.BlackJAXSMC",
+        }
+
+        # Copy so we can pop without mutating the user's dict
+        smc_kw = dict(self.kwargs.get("smc_kwargs") or {})
+        backend = smc_kw.pop("backend", "emcee")
+        if backend not in _backends:
+            raise ValueError(
+                f"Unknown SMC backend {backend!r}. "
+                f"Choose from {list(_backends)}"
+            )
+        module_path, class_name = _backends[backend].rsplit(".", 1)
+        SMCClass = getattr(importlib.import_module(module_path), class_name)
+
+        logger.info(f"Initialising aspire {backend} SMC sampler")
+        sampler = SMCClass(
+            log_likelihood=log_lik_aspire,
+            log_prior=log_prior_aspire,
+            dims=len(parameter_names),
+            prior_flow=prior_flow,
+            xp=np,
+            parameters=parameter_names,
+        )
+
+        # Apply defaults for keys not set by the user
+        smc_kw.setdefault("n_samples", 1000)
+        smc_kw.setdefault("n_final_samples", self.kwargs["target_nsamples"])
+        smc_kw.setdefault("adaptive", True)
+        smc_kw.setdefault("target_efficiency", 0.5)
+        result = sampler.sample(**smc_kw)
+
+        x_out = np.asarray(result.x)
+        samples = pd.DataFrame(x_out, columns=parameter_names)
+        # Recompute the true bilby log-likelihood on the SMC output samples
+        # (result.log_likelihood holds log_lik_aspire, the correction term)
+        logl = fisher_mpe.log_likelihood_from_array(x_out.T)
+        return samples, logl
+
     def create_resample_diagnostic(self, samples, raw_samples, mean, weights, method):
         """Produce a corner plot comparing the proposal and resampled posteriors."""
         import corner
@@ -421,6 +549,72 @@ class Laplace(Sampler):
         fig.suptitle(f"Resampling method: {method}")
 
         filename = f"{self.outdir}/{self.label}_resample_{method}.png"
+        safe_save_figure(fig=fig, filename=filename, dpi=150)
+        plt.close(fig)
+        return fig
+
+    def create_smc_diagnostic(self, samples, mean, cov):
+        """Produce a corner plot comparing the Laplace proposal and SMC output."""
+        import corner
+        import matplotlib.pyplot as plt
+        import matplotlib.lines as mpllines
+
+        labels = [k.replace("_", " ") for k in self.search_parameter_keys]
+        corner_kwargs = dict(
+            bins=50,
+            smooth=0.7,
+            max_n_ticks=5,
+            truths=mean,
+            truth_color="C3",
+            labels=labels,
+        )
+
+        # Draw reference samples from the Laplace proposal
+        n = len(samples)
+        laplace_samples = random.rng.multivariate_normal(mean, cov, n)
+
+        g_color, g_ls = "k", "--"
+        f_color, f_ls = "C0", "-"
+
+        fig = corner.corner(
+            laplace_samples,
+            color=g_color,
+            contour_kwargs={"linestyles": g_ls, "alpha": 0.8},
+            hist_kwargs={"density": True, "ls": g_ls, "alpha": 0.8},
+            no_fill_contours=True,
+            plot_density=False,
+            plot_datapoints=False,
+            fill_contours=False,
+            levels=(1 - np.exp(-0.5), 1 - np.exp(-2), 1 - np.exp(-9 / 2.0)),
+            **corner_kwargs,
+        )
+        fig = corner.corner(
+            samples[self.search_parameter_keys].values,
+            color=f_color,
+            contour_kwargs={"linestyles": f_ls, "alpha": 0.8},
+            contourf_kwargs={"alpha": 0.8},
+            hist_kwargs={"density": True, "ls": f_ls, "alpha": 0.8},
+            no_fill_contours=True,
+            fig=fig,
+            plot_density=True,
+            plot_datapoints=False,
+            fill_contours=False,
+            levels=(1 - np.exp(-0.5), 1 - np.exp(-2), 1 - np.exp(-9 / 2.0)),
+            range=[1] * self.ndim,
+            **corner_kwargs,
+        )
+
+        axes = np.array(fig.get_axes())
+        axes[0].legend(
+            [
+                mpllines.Line2D([0], [0], color=g_color, linestyle=g_ls),
+                mpllines.Line2D([0], [0], color=f_color, linestyle=f_ls),
+            ],
+            ["Initial (Laplace)", "Final (SMC)"],
+        )
+        fig.suptitle("Resampling method: SMC")
+
+        filename = f"{self.outdir}/{self.label}_resample_smc.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
         return fig

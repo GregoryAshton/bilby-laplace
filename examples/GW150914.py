@@ -18,7 +18,7 @@ for details on accessing data on the LIGO Data Grid instead.
 import argparse
 import numpy as np
 import bilby
-from bilby.core.prior import Constraint, Cosine, PowerLaw, Sine, Uniform
+from bilby.core.prior import Constraint, PowerLaw, Sine, Uniform
 from bilby.gw.prior import (
     AlignedSpin,
     BBHPriorDict,
@@ -26,6 +26,9 @@ from bilby.gw.prior import (
     UniformInComponentsMassRatio,
 )
 from gwpy.timeseries import TimeSeries
+
+from aspire.utils import configure_logger
+configure_logger()
 
 logger = bilby.core.utils.logger
 outdir = "outdir"
@@ -90,8 +93,8 @@ priors = BBHPriorDict(
             unit="Mpc",
             latex_label="$d_L$",
         ),
-        dec=Cosine(name="dec"),
-        ra=Uniform(name="ra", minimum=0, maximum=2 * np.pi, boundary="periodic"),
+        zenith=Sine(name="zenith"),
+        azimuth=Uniform(name="azimuth", minimum=0, maximum=2 * np.pi, boundary="periodic"),
         #theta_jn=Sine(name="theta_jn"),
         theta_jn=1.4,
         #psi=Uniform(name="psi", minimum=0, maximum=np.pi, boundary="periodic"),
@@ -101,6 +104,8 @@ priors = BBHPriorDict(
             minimum=trigger_time - 0.1,
             maximum=trigger_time + 0.1,
             name="geocent_time",
+            latex_label=r"$t_{\rm geo}$",
+            unit="$s$",
         ),
     )
 )
@@ -123,28 +128,39 @@ likelihood = bilby.gw.likelihood.GravitationalWaveTransient(
     phase_marginalization=True,
     distance_marginalization=True,
     jitter_time=False,
+    reference_frame="H1L1",
 )
-
 
 # Run the sampler
 def run_laplace(args):
     return bilby.run_sampler(
         likelihood=likelihood,
         priors=priors,
-        sampler="laplace",
         outdir=outdir,
         label=f"{base_label}_laplace",
-        target_nsamples=2000,
-        batch_nsamples=100,
-        resample="rejection",
         use_injection_for_maxL=False,
         conversion_function=bilby.gw.conversion.generate_all_bbh_parameters,
         result_class=bilby.gw.result.CBCResult,
         plot_diagnostic=True,
         clean=True,
-        cov_scaling=1,
-        extension="hdf5"
-    )
+        cov_scaling=3,
+        extension="hdf5",
+        sampler="laplace",
+        resample="smc",
+        smc_kwargs=dict(
+            backend="minipcn",
+            n_samples=1000,
+            n_final_samples=5000,
+            target_efficiency=[0.5, 0.8],
+            adaptive=True,
+            sampler_kwargs=dict(
+                n_steps=5,
+                target_acceptance_rate=0.234,
+                step_fn="tpcn",
+                verbose=True,
+            ),
+        ),
+)
 
 
 def run_dynesty(args):
