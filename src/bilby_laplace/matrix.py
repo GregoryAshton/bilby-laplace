@@ -142,9 +142,34 @@ class FisherMatrixPosteriorEstimator:
                          for i, k in enumerate(self.parameter_names)])
 
     def _jacobian_diag(self, x_array):
-        """Diagonal of dθ/du = 1/p(θ) at the given parameter values."""
-        return np.array([1.0 / self.priors_dict[k].prob(float(x_array[i]))
-                         for i, k in enumerate(self.parameter_names)])
+        """Diagonal of dθ/du = 1/p(θ) at the given parameter values.
+
+        If the MAP sits exactly on a prior boundary where p(θ)=0, the
+        parameter is nudged inward by a small fraction of its prior
+        width so that the Jacobian remains finite.
+        """
+        result = np.empty(self.N)
+        for i, k in enumerate(self.parameter_names):
+            p = self.priors_dict[k].prob(float(x_array[i]))
+            if p == 0:
+                nudge = 1e-6 * self.prior_width_dict[k]
+                x_lo = x_array[i] + nudge
+                x_hi = x_array[i] - nudge
+                p = max(
+                    self.priors_dict[k].prob(float(x_lo)),
+                    self.priors_dict[k].prob(float(x_hi)),
+                )
+                if p == 0:
+                    raise ValueError(
+                        f"Prior probability is zero for {k}={x_array[i]:.6g} "
+                        f"even after nudging; the MAP may be outside the prior"
+                    )
+                logger.warning(
+                    f"MAP value {k}={x_array[i]:.6g} is on the prior "
+                    f"boundary (p=0); nudging for Jacobian computation"
+                )
+            result[i] = 1.0 / p
+        return result
 
     def log_likelihood_in_unit_cube(self, u_array):
         """L̃(u) = L(θ(u)); same shape contract as log_likelihood_from_array."""
