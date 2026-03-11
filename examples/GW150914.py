@@ -18,7 +18,7 @@ Usage
     python examples/GW150914.py --rejection
     python examples/GW150914.py --importance
     python examples/GW150914.py --dynesty
-    python examples/GW150914.py --plot-combined
+    python examples/GW150914.py --compare
 """
 
 import argparse
@@ -231,8 +231,9 @@ def run_dynesty():
     )
 
 
-def plot_combined():
-    """Load all result files in outdir and make a comparison corner plot."""
+def compare():
+    """Load all result files in outdir, make a comparison corner plot,
+    and print an evidence comparison table."""
     pattern = os.path.join(outdir, f"{base_label}_*_result.*")
     result_files = sorted(glob.glob(pattern))
     if not result_files:
@@ -257,6 +258,24 @@ def plot_combined():
             logger.info(f"Loaded {f} ({label})")
         except Exception as exc:
             logger.warning(f"Could not load {f}: {exc}")
+
+    # Evidence comparison table
+    print("\n" + "=" * 60)
+    print("Evidence comparison")
+    print("=" * 60)
+    print(f"{'Method':<25} {'log Z':>10} {'± σ':>10} {'time':>10}")
+    print("-" * 60)
+    for r, lab in zip(results, labels):
+        log_z = getattr(r, "log_evidence", np.nan)
+        log_z_err = getattr(r, "log_evidence_err", np.nan)
+        secs = r.sampling_time.total_seconds()
+        if log_z is None:
+            log_z = np.nan
+        if log_z_err is None:
+            log_z_err = np.nan
+        name = r.label.replace(f"{base_label}_", "")
+        print(f"{name:<25} {log_z:>10.2f} {log_z_err:>10.2f} {secs:>9.1f}s")
+    print("=" * 60 + "\n")
 
     if len(results) < 2:
         logger.warning(
@@ -309,9 +328,9 @@ if __name__ == "__main__":
         help="Run dynesty nested sampling",
     )
     parser.add_argument(
-        "--plot-combined",
+        "--compare",
         action="store_true",
-        help="Load all existing results and produce a comparison corner plot",
+        help="Load all existing results, print evidence table, and plot",
     )
     args = parser.parse_args()
 
@@ -325,9 +344,9 @@ if __name__ == "__main__":
         run_smc().plot_corner()
     if args.dynesty:
         run_dynesty().plot_corner()
-    if args.plot_combined:
-        plot_combined()
+    if args.compare:
+        compare()
 
     if not any([args.laplace, args.rejection, args.importance, args.smc,
-                args.dynesty, args.plot_combined]):
+                args.dynesty, args.compare]):
         parser.print_help()
