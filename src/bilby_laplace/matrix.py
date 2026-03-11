@@ -240,6 +240,48 @@ class FisherMatrixPosteriorEstimator:
         J_inv = 1.0 / self._jacobian_diag(x_array)   # = p(θ_MAP)
         return J_inv[:, None] * FIM_u * J_inv[None, :]
 
+    def log_evidence_laplace(self, sample, iFIM):
+        """Laplace approximation to the log evidence.
+
+        Parameters
+        ----------
+        sample : dict
+            MAP parameter values.
+        iFIM : array
+            Inverse Fisher Information Matrix (covariance at the MAP).
+
+        Returns
+        -------
+        log_evidence : float
+            log Z ≈ log L(θ_MAP) + log π(θ_MAP) + (d/2) log(2π)
+                    + (1/2) log det(iFIM)
+        """
+        d = len(self.parameter_names)
+        log_l_map = self.log_likelihood(sample)
+        log_pi_map = sum(
+            np.log(self.priors_dict[k].prob(float(sample[k])))
+            for k in self.parameter_names
+        )
+        sign, log_det = np.linalg.slogdet(iFIM)
+        if sign <= 0:
+            logger.warning(
+                "iFIM has non-positive determinant; "
+                "Laplace evidence estimate may be unreliable"
+            )
+        log_z = (
+            log_l_map
+            + log_pi_map
+            + 0.5 * d * np.log(2 * np.pi)
+            + 0.5 * log_det
+        )
+        logger.info(
+            f"Laplace log-evidence: {log_z:.2f} "
+            f"(log L_MAP={log_l_map:.2f}, "
+            f"log π_MAP={log_pi_map:.2f}, "
+            f"det term={0.5 * log_det:.2f})"
+        )
+        return log_z
+
     def calculate_iFIM(self, sample):
         FIM = self.calculate_FIM(sample)
 

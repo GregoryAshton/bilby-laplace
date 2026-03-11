@@ -247,6 +247,13 @@ class Laplace(Sampler):
         )
         logger.info(msg)
 
+        # Laplace evidence (always available)
+        log_evidence_laplace = fisher_mpe.log_evidence_laplace(
+            maxL_sample_dict, iFIM
+        )
+        log_evidence = log_evidence_laplace
+        log_evidence_err = np.nan
+
         target_nsamples = self.kwargs["target_nsamples"]
         batch_nsamples = self.kwargs["batch_nsamples"]
         resample = self.kwargs["resample"]
@@ -275,7 +282,12 @@ class Laplace(Sampler):
                 )
             else:
                 proposal_flow = GaussianFlow(mean, cov)
-            samples, logl = self._smc_sample(proposal_flow, fisher_mpe)
+            samples, logl, smc_log_z, smc_log_z_err = (
+                self._smc_sample(proposal_flow, fisher_mpe)
+            )
+            if smc_log_z is not None:
+                log_evidence = float(smc_log_z)
+                log_evidence_err = float(smc_log_z_err)
             g_samples = samples
             efficiency = 100.0
             if self.kwargs["plot_diagnostic"]:
@@ -286,6 +298,7 @@ class Laplace(Sampler):
             all_samples = []
             all_logl = []
             all_weights = []
+            all_ln_weights_raw = []
             efficiency = 0.0
 
             logger.info(
@@ -313,14 +326,26 @@ class Laplace(Sampler):
                 )
 
                 if resample in _resample_methods:
-                    weights = self._calculate_weights(g_samples, g_logl, g_logpi, mean, cov)
-                    samples, logl = _resample_methods[resample](g_samples, g_logl, weights)
-                    efficiency = 100.0 * len(samples) / len(g_samples)
+                    weights, ln_w_raw = (
+                        self._calculate_weights(
+                            g_samples, g_logl,
+                            g_logpi, mean, cov,
+                        )
+                    )
+                    samples, logl = (
+                        _resample_methods[resample](
+                            g_samples, g_logl, weights
+                        )
+                    )
+                    efficiency = (
+                        100.0 * len(samples) / len(g_samples)
+                    )
                 else:
                     logger.info("No resampling applied")
                     samples = g_samples
                     logl = g_logl
                     weights = np.ones_like(g_logl)
+                    ln_w_raw = np.zeros_like(g_logl)
                     efficiency = 100.0
 
                 nsamples += len(samples)
@@ -337,26 +362,69 @@ class Laplace(Sampler):
                     all_samples.append(samples)
                     all_logl.append(logl)
                     all_weights.append(weights)
+                    all_ln_weights_raw.append(ln_w_raw)
                 else:
                     pbar.update(0)
 
             pbar.close()
 
-            g_samples = pd.concat(all_g_samples, ignore_index=True)
-            samples = pd.concat(all_samples, ignore_index=True)
+            g_samples = pd.concat(
+                all_g_samples, ignore_index=True
+            )
+            samples = pd.concat(
+                all_samples, ignore_index=True
+            )
             logl = np.concatenate(all_logl)
             weights = np.concatenate(all_weights)
-            efficiency = 100.0 * len(samples) / len(g_samples)
+            ln_weights_raw = np.concatenate(
+                all_ln_weights_raw
+            )
+            efficiency = (
+                100.0 * len(samples) / len(g_samples)
+            )
+
+            # IS evidence: Z = <w> = (1/N) sum(w_i)
+            # In log space: log Z = logsumexp(ln_w) - log(N)
+            finite = np.isfinite(ln_weights_raw)
+            if np.any(finite):
+                n_total = len(ln_weights_raw)
+                log_z_is = (
+                    logsumexp(ln_weights_raw[finite])
+                    - np.log(n_total)
+                )
+                # Variance via delta method on log weights
+                ln_w_f = ln_weights_raw[finite]
+                log_z2 = (
+                    logsumexp(2 * ln_w_f)
+                    - 2 * np.log(n_total)
+                )
+                # var(Z)/Z^2 => sigma(log Z)
+                var_ratio = np.exp(log_z2 - 2 * log_z_is)
+                var_ratio -= 1.0 / n_total
+                if var_ratio > 0:
+                    log_evidence_err = np.sqrt(
+                        var_ratio
+                    )
+                else:
+                    log_evidence_err = 0.0
+                log_evidence = log_z_is
+                logger.info(
+                    f"IS log-evidence: "
+                    f"{log_z_is:.2f} +/- "
+                    f"{log_evidence_err:.2f}"
+                )
 
             logger.info(
-                f"Sampling complete: {len(samples)} samples "
-                f"accepted from {len(g_samples)} proposals "
+                f"Sampling complete: {len(samples)} "
+                f"samples accepted from "
+                f"{len(g_samples)} proposals "
                 f"({efficiency:.1f}% acceptance rate)"
             )
 
             if self.kwargs["plot_diagnostic"]:
                 self.create_resample_diagnostic(
-                    samples, g_samples, mean, weights, method=resample
+                    samples, g_samples, mean,
+                    weights, method=resample,
                 )
 
         end_time = datetime.datetime.now()
@@ -365,18 +433,40 @@ class Laplace(Sampler):
         if self.use_ratio:
             logl -= self.likelihood.noise_log_likelihood()
 
+        logger.info(
+            f"Log-evidence summary: "
+            f"Laplace={log_evidence_laplace:.2f}, "
+            f"final={log_evidence:.2f} "
+            f"+/- {log_evidence_err:.2f}"
+        )
+
         self._generate_result(
-            samples, logl, efficiency=efficiency, nlikelihood=len(g_samples)
+            samples, logl,
+            log_evidence=log_evidence,
+            log_evidence_err=log_evidence_err,
+            log_evidence_laplace=log_evidence_laplace,
+            efficiency=efficiency,
+            nlikelihood=len(g_samples),
         )
 
         return self.result
 
-    def _generate_result(self, samples, log_likelihood_evaluations, **run_stats):
+    def _generate_result(
+        self, samples, log_likelihood_evaluations,
+        log_evidence=np.nan, log_evidence_err=np.nan,
+        **run_stats,
+    ):
         posterior = samples[self.search_parameter_keys].copy()
         posterior["log_likelihood"] = log_likelihood_evaluations
         self.result.posterior = posterior
-        self.result.log_likelihood_evaluations = log_likelihood_evaluations
-        run_stats["sampling_time_s"] = self.sampling_time.total_seconds()
+        self.result.log_likelihood_evaluations = (
+            log_likelihood_evaluations
+        )
+        self.result.log_evidence = log_evidence
+        self.result.log_evidence_err = log_evidence_err
+        run_stats["sampling_time_s"] = (
+            self.sampling_time.total_seconds()
+        )
         self.result.meta_data["run_statistics"] = run_stats
 
     def _draw_samples_from_generating_distribution(
@@ -407,25 +497,30 @@ class Laplace(Sampler):
         return samples, logl, logpi, discard_inef
 
     def _calculate_weights(self, g_samples, g_logl, g_logpi, mean, cov):
-        g_logl_norm = multivariate_normal.logpdf(g_samples, mean=mean, cov=cov)
+        g_logl_norm = multivariate_normal.logpdf(
+            g_samples, mean=mean, cov=cov
+        )
 
-        ln_weights = g_logl + g_logpi - g_logl_norm
+        ln_weights_raw = g_logl + g_logpi - g_logl_norm
 
         # Remove impossible samples for ESS calculation
-        finite_mask = np.isfinite(ln_weights)
-        ln_weights_viable = ln_weights[finite_mask]
+        finite_mask = np.isfinite(ln_weights_raw)
+        ln_weights_viable = ln_weights_raw[finite_mask]
 
         # Scale so max weight is 1 (avoids overflow in exp)
+        ln_weights = ln_weights_raw.copy()
         if len(ln_weights_viable) > 0:
             ln_weights -= np.max(ln_weights_viable)
 
-        self.ess = int(np.floor(np.exp(kish_log_effective_sample_size(ln_weights_viable))))
+        self.ess = int(np.floor(np.exp(
+            kish_log_effective_sample_size(ln_weights_viable)
+        )))
         logger.debug(
             f"Effective sample size: {self.ess} "
             f"out of {len(g_samples)} proposals"
         )
 
-        return np.exp(ln_weights)
+        return np.exp(ln_weights), ln_weights_raw
 
     def _rejection_sample(self, g_samples, g_logl, weights):
         logger.debug(f"Rejection resampling {len(g_samples)} proposals")
@@ -581,10 +676,22 @@ class Laplace(Sampler):
 
         x_out = np.asarray(result.x)
         samples = pd.DataFrame(x_out, columns=parameter_names)
-        # Recompute the true bilby log-likelihood on the SMC output samples
-        # (result.log_likelihood holds log_lik_aspire, the correction term)
+        # Recompute the true bilby log-likelihood on the SMC output
+        # (result.log_likelihood holds log_lik_aspire, the correction)
         logl = fisher_mpe.log_likelihood_from_array(x_out.T)
-        return samples, logl
+
+        # Extract evidence estimate from aspire
+        smc_log_z = getattr(result, "log_evidence", None)
+        smc_log_z_err = getattr(
+            result, "log_evidence_error", np.nan
+        )
+        if smc_log_z is not None:
+            logger.info(
+                f"SMC log-evidence: {smc_log_z:.2f} "
+                f"+/- {smc_log_z_err:.2f}"
+            )
+
+        return samples, logl, smc_log_z, smc_log_z_err
 
     def _validate_covariance(self, fisher_mpe, mean, cov):
         """Validate the covariance by checking likelihood along
