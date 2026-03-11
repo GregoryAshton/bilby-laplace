@@ -241,7 +241,7 @@ class Laplace(Sampler):
         cov = cov_scaling * iFIM
         cov = self._validate_covariance(fisher_mpe, mean, cov)
 
-        msg = "Generation distribution:\n " + "\n ".join(
+        msg = "Gaussian proposal (MAP +/- 1-sigma):\n " + "\n ".join(
             f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}"
             for (key, val), var in zip(maxL_sample_dict.items(), np.diag(cov))
         )
@@ -255,7 +255,8 @@ class Laplace(Sampler):
 
         if resample is None:
             logger.info(
-                f"Pure Laplace approximation: drawing {target_nsamples} samples directly"
+                f"Drawing {target_nsamples} samples from "
+                f"Gaussian approximation (no resampling)"
             )
             samples_array = random.rng.multivariate_normal(mean, cov, target_nsamples)
             samples = pd.DataFrame(samples_array, columns=fisher_mpe.parameter_names)
@@ -288,8 +289,9 @@ class Laplace(Sampler):
             efficiency = 0.0
 
             logger.info(
-                f"Starting sampling in batches of {batch_nsamples} "
-                f"to produce {target_nsamples} samples"
+                f"Drawing {target_nsamples} samples using "
+                f"{resample} resampling "
+                f"(batch size {batch_nsamples})"
             )
             pbar = tqdm.tqdm(
                 total=target_nsamples,
@@ -324,9 +326,8 @@ class Laplace(Sampler):
                 nsamples += len(samples)
                 pbar.set_postfix(
                     {
-                        "eff": f"{efficiency:.3f}%",
-                        "de": f"{discard_inef:.1f}%",
-                        "cs": f"{cov_scaling:.2f}",
+                        "acceptance": f"{efficiency:.1f}%",
+                        "out-of-prior": f"{discard_inef:.1f}%",
                     },
                     refresh=False,
                 )
@@ -347,7 +348,11 @@ class Laplace(Sampler):
             weights = np.concatenate(all_weights)
             efficiency = 100.0 * len(samples) / len(g_samples)
 
-            logger.info(f"Finished sampling: total efficiency is {efficiency:.3f}%")
+            logger.info(
+                f"Sampling complete: {len(samples)} samples "
+                f"accepted from {len(g_samples)} proposals "
+                f"({efficiency:.1f}% acceptance rate)"
+            )
 
             if self.kwargs["plot_diagnostic"]:
                 self.create_resample_diagnostic(
@@ -392,7 +397,7 @@ class Laplace(Sampler):
                 samples.values[in_prior].T
             )
         else:
-            msg = "Sampling has failed: no viable samples left"
+            msg = "All proposal samples fell outside the prior"
             if self.kwargs["fail_on_error"]:
                 raise SamplerError(msg)
             else:
@@ -415,12 +420,15 @@ class Laplace(Sampler):
             ln_weights -= np.max(ln_weights_viable)
 
         self.ess = int(np.floor(np.exp(kish_log_effective_sample_size(ln_weights_viable))))
-        logger.debug(f"Calculated weights; effective sample size = {self.ess}")
+        logger.debug(
+            f"Effective sample size: {self.ess} "
+            f"out of {len(g_samples)} proposals"
+        )
 
         return np.exp(ln_weights)
 
     def _rejection_sample(self, g_samples, g_logl, weights):
-        logger.debug(f"Rejection sampling from {len(g_samples)} proposal samples")
+        logger.debug(f"Rejection resampling {len(g_samples)} proposals")
 
         w_max = np.max(weights)
         uniform = random.rng.uniform(0, w_max, len(g_samples))
@@ -430,7 +438,10 @@ class Laplace(Sampler):
         logl = g_logl[accepted]
 
         if len(samples) < self.ndim:
-            msg = "Number of accepted samples less than ndim: sampling may have failed"
+            msg = (
+                f"Only {len(samples)} samples accepted "
+                f"(fewer than {self.ndim} parameters)"
+            )
             if self.kwargs["fail_on_error"]:
                 raise SamplerError(msg)
             else:
@@ -439,13 +450,14 @@ class Laplace(Sampler):
         return samples, logl
 
     def _importance_sample(self, g_samples, g_logl, weights):
-        logger.debug(f"Importance sampling from {len(g_samples)} proposal samples")
+        logger.debug(f"Importance resampling {len(g_samples)} proposals")
 
         normalized_weights = weights / np.sum(weights)
         if self.ess < self.ndim:
             msg = (
-                "Effective sample size less than ndim: "
-                "sampling has failed"
+                f"Effective sample size ({self.ess}) is "
+                f"fewer than the number of parameters "
+                f"({self.ndim})"
             )
             if self.kwargs["fail_on_error"]:
                 raise SamplerError(msg)
@@ -454,8 +466,8 @@ class Laplace(Sampler):
 
         if self.ess > len(g_samples):
             logger.warning(
-                f"ESS ({self.ess}) exceeds batch size "
-                f"({len(g_samples)}); clamping to batch size"
+                f"Effective sample size ({self.ess}) exceeds "
+                f"batch size ({len(g_samples)}); clamping"
             )
             n_draw = len(g_samples)
         else:
@@ -467,14 +479,11 @@ class Laplace(Sampler):
         ):
             self._importance_ess_warned = True
             logger.warning(
-                f"Per-batch ESS ({n_draw}) is much smaller "
-                f"than target_nsamples ({target}). Multiple "
-                f"batches will be concatenated with "
-                f"replacement-induced duplicates, so the "
-                f"effective final sample size may be less "
-                f"than target_nsamples. Consider increasing "
-                f"batch_nsamples or using cov_scaling to "
-                f"improve the proposal overlap."
+                f"Only {n_draw} effective samples per batch "
+                f"(target is {target}). The final samples "
+                f"will contain duplicates from repeated "
+                f"draws. Consider increasing batch_nsamples "
+                f"or cov_scaling to improve the proposal."
             )
 
         idxs = random.rng.choice(
@@ -536,7 +545,7 @@ class Laplace(Sampler):
         module_path, class_name = _backends[backend].rsplit(".", 1)
         SMCClass = getattr(importlib.import_module(module_path), class_name)
 
-        logger.info(f"Initialising aspire {backend} SMC sampler")
+        logger.info(f"Starting SMC sampling (backend: {backend})")
         sampler = SMCClass(
             log_likelihood=log_lik_aspire,
             log_prior=log_prior_aspire,
@@ -611,20 +620,18 @@ class Laplace(Sampler):
                 eigvals[i] *= inflation
                 any_inflated = True
                 logger.info(
-                    f"Inflating covariance axis {i}: "
-                    f"drop {actual_drop:.4f} vs "
-                    f"expected {expected_drop:.1f}, "
-                    f"factor {inflation:.1f}x"
+                    f"Widening proposal along axis {i}: "
+                    f"posterior is {inflation:.1f}x wider "
+                    f"than Gaussian approximation"
                 )
             elif actual_drop <= 0:
                 # Likelihood flat or rising — inflate
                 eigvals[i] *= 4.0
                 any_inflated = True
                 logger.info(
-                    f"Inflating covariance axis {i}: "
-                    f"likelihood did not drop at 1-sigma "
-                    f"(drop={actual_drop:.4f}), "
-                    f"factor 4.0x"
+                    f"Widening proposal along axis {i}: "
+                    f"likelihood is flat at 1-sigma, "
+                    f"expanding by 4x"
                 )
 
         if any_inflated:
@@ -679,7 +686,8 @@ class Laplace(Sampler):
         """
         parameter_names = fisher_mpe.parameter_names
         logger.info(
-            f"Searching for up to {n_modes} mode(s)"
+            f"Searching for up to {n_modes} posterior "
+            f"mode(s)"
         )
 
         # --- 1. Find primary mode with DE ---
@@ -690,8 +698,8 @@ class Laplace(Sampler):
         best_logl = -result.fun
         best_dict = dict(zip(parameter_names, best_mean))
         logger.info(
-            f"DE converged: log L = {best_logl:.2f}, "
-            f"{result.message}"
+            f"Primary mode found: "
+            f"log-likelihood = {best_logl:.2f}"
         )
 
         try:
@@ -715,8 +723,9 @@ class Laplace(Sampler):
         # --- 2. Multi-start search for secondary modes ---
         n_starts = self.kwargs["mode_search_nsamples"]
         logger.info(
-            f"Evaluating {n_starts} LHS prior samples "
-            f"to find secondary modes"
+            f"Evaluating {n_starts} prior samples "
+            f"(Latin hypercube) to search for "
+            f"secondary modes"
         )
 
         # Latin hypercube in [0,1]^D, then map to prior
@@ -763,8 +772,9 @@ class Laplace(Sampler):
             p_mean = np.array(polished.x)
             p_logl = -polished.fun
             logger.debug(
-                f"Polished candidate {n_polished}: "
-                f"log L = {p_logl:.2f}, {polished.message}"
+                f"Candidate {n_polished}: "
+                f"log-likelihood = {p_logl:.2f} "
+                f"after local optimisation"
             )
 
             # Re-check after polishing
@@ -775,7 +785,7 @@ class Laplace(Sampler):
             if is_dup:
                 logger.debug(
                     f"Candidate {n_polished} converged to "
-                    f"existing mode; skipping"
+                    f"a known mode; skipping"
                 )
                 continue
 
@@ -788,13 +798,13 @@ class Laplace(Sampler):
                 )
                 found_modes.append((p_mean, p_cov, p_logl))
                 logger.info(
-                    f"Mode {len(found_modes) - 1}: "
-                    f"log L = {p_logl:.2f}"
+                    f"Secondary mode {len(found_modes) - 1} "
+                    f"found: log-likelihood = {p_logl:.2f}"
                 )
             except Exception as exc:
                 logger.warning(
-                    f"iFIM failed for candidate "
-                    f"{n_polished}, skipping: {exc}"
+                    f"Could not compute covariance for "
+                    f"candidate {n_polished}: {exc}"
                 )
 
         # --- 3. Sort and summarise ---
@@ -805,15 +815,20 @@ class Laplace(Sampler):
     @staticmethod
     def _log_mode_summary(found_modes, parameter_names):
         """Log a table summarising the discovered modes."""
-        header = f"{'Mode':<6} {'log L':>10}  " + "  ".join(
-            f"{p:>12}" for p in parameter_names
+        header = (
+            f"{'Mode':<6} {'log-likelihood':>14}  "
+            + "  ".join(f"{p:>12}" for p in parameter_names)
         )
         rows = []
         for i, (mean, _cov, logl) in enumerate(found_modes):
-            vals = "  ".join(f"{v:>+12.4f}" for v in mean)
-            rows.append(f"  {i:<4d} {logl:>10.2f}  {vals}")
+            vals = "  ".join(
+                f"{v:>+12.4f}" for v in mean
+            )
+            rows.append(
+                f"  {i:<4d} {logl:>14.2f}  {vals}"
+            )
         logger.info(
-            f"Found {len(found_modes)} mode(s):\n"
+            f"Summary of {len(found_modes)} mode(s):\n"
             f"  {header}\n" + "\n".join(rows)
         )
 

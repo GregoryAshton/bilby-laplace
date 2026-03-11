@@ -175,7 +175,7 @@ class FisherMatrixPosteriorEstimator:
 
     def _calculate_FIM_parameter_space(self, sample):
         if version.parse(scipy.__version__) < version.parse("1.15"):
-            logger.info("Scipy version < 1.15, using finite-difference fallback")
+            logger.info("Computing Fisher matrix (finite differences, scipy < 1.15)")
             FIM = np.zeros((self.N, self.N))
             for ii, ii_key in enumerate(self.parameter_names):
                 for jj, jj_key in enumerate(self.parameter_names):
@@ -187,7 +187,7 @@ class FisherMatrixPosteriorEstimator:
             import scipy.differentiate as sd
 
             logger.info(
-                "Using scipy.differentiate to estimate the Fisher information matrix (FIM)"
+                "Computing Fisher matrix (scipy.differentiate)"
             )
             point = np.array([sample[key] for key in self.parameter_names])
             res = sd.hessian(self.log_likelihood_from_array, point, initial_step=0.5)
@@ -200,14 +200,14 @@ class FisherMatrixPosteriorEstimator:
         u_map = self._to_unit_cube(x_array)
 
         if version.parse(scipy.__version__) < version.parse("1.15"):
-            logger.info("Scipy < 1.15: finite-difference FIM in unit cube")
+            logger.info("Computing Fisher matrix in unit cube (finite differences, scipy < 1.15)")
             FIM_u = np.zeros((self.N, self.N))
             for ii in range(self.N):
                 for jj in range(self.N):
                     FIM_u[ii, jj] = -self._second_deriv_unit_cube(u_map, ii, jj)
         else:
             import scipy.differentiate as sd
-            logger.info("scipy.differentiate hessian in unit cube")
+            logger.info("Computing Fisher matrix in unit cube (scipy.differentiate)")
             res = sd.hessian(self.log_likelihood_in_unit_cube, u_map, initial_step=0.5)
             FIM_u = -res.ddf
             logger.debug(f"FIM (unit cube):\n{FIM_u}")
@@ -235,8 +235,9 @@ class FisherMatrixPosteriorEstimator:
         if np.any(eigvals < 0):
             n_neg = int(np.sum(eigvals < 0))
             logger.warning(
-                f"iFIM has {n_neg} negative eigenvalue(s); "
-                f"projecting to nearest positive-definite matrix"
+                f"Covariance matrix has {n_neg} negative "
+                f"eigenvalue(s); projecting to nearest "
+                f"positive-definite matrix"
             )
             eigvals = np.maximum(eigvals, 0.0)
             # Floor must be large enough for Cholesky to succeed
@@ -354,16 +355,20 @@ class FisherMatrixPosteriorEstimator:
         """
         if initial_sample:
             logger.info(
-                f"Maximising the likelihood from initial sample {initial_sample}"
+                "Finding maximum likelihood from "
+                "initial parameters"
             )
             minout = self._maximize_likelihood_from_initial_sample(initial_sample)
         elif self.minimization_method == "differential_evolution":
-            logger.info("Maximising the likelihood using differential evolution")
+            logger.info(
+                "Finding maximum likelihood using "
+                "differential evolution"
+            )
             minout = self._maximize_likelihood_differential_evolution()
-            logger.info(f"Differential evolution result: {minout.message}")
         else:
             logger.info(
-                f"Maximising the likelihood using {self.n_prior_samples} prior samples"
+                f"Finding maximum likelihood from "
+                f"{self.n_prior_samples} starting points"
             )
             max_logL = -np.inf
             logL_list = []
@@ -382,11 +387,16 @@ class FisherMatrixPosteriorEstimator:
                 raise ValueError("Maximisation of the likelihood failed")
 
             logger.info(
-                f"Finished with {100 * successes / self.n_prior_samples:.1f}% success rate | "
-                f"Maximum log-likelihood {max_logL:.4f} | "
-                f"(max-mu)/sigma= {(max_logL - np.mean(logL_list)) / np.std(logL_list):.2f}"
+                f"Optimisation complete: "
+                f"{100 * successes / self.n_prior_samples:.0f}% "
+                f"of starts converged, "
+                f"best log-likelihood = {max_logL:.4f}"
             )
 
         self.minimization_metadata = minout
-        logger.info(f"Maximum likelihood estimation: {minout.message}")
+        maxL = -minout.fun
+        logger.info(
+            f"Maximum likelihood found: "
+            f"log-likelihood = {maxL:.4f}"
+        )
         return {key: val for key, val in zip(self.parameter_names, minout.x)}
