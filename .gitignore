@@ -20,3 +20,6 @@ outdir/
 # Vim
 *.swp
 *.swo
+
+# Examples
+*outdir*
