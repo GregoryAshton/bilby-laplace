@@ -27,8 +27,8 @@ from bilby.gw.prior import (
 )
 from gwpy.timeseries import TimeSeries
 
-from aspire.utils import configure_logger
-configure_logger()
+#from aspire.utils import configure_logger
+#configure_logger()
 
 logger = bilby.core.utils.logger
 outdir = "outdir"
@@ -143,14 +143,15 @@ def run_laplace(args):
         result_class=bilby.gw.result.CBCResult,
         plot_diagnostic=True,
         clean=True,
-        cov_scaling=3,
+        cov_scaling=1,
+        n_modes=2,
         extension="hdf5",
         sampler="laplace",
         resample="smc",
         smc_kwargs=dict(
             backend="minipcn",
             n_samples=1000,
-            n_final_samples=5000,
+            n_final_samples=1000,
             target_efficiency=[0.5, 0.8],
             adaptive=True,
             sampler_kwargs=dict(

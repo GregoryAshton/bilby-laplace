@@ -111,17 +111,22 @@ class FisherMatrixPosteriorEstimator:
             parameters={**self.fixed_parameters, **sample}
         )
 
-    def log_likelihood_from_array(self, x_array):
+    def log_likelihood_from_array(self, x_array, clip_to_bounds=False):
         def wrapped_logl(x_array):
-            # Map points outside the bounds to the bounds
-            x_array = x_array.copy()
-            idxs = x_array < self.prior_bounds_min
-            x_array[idxs] = self.prior_bounds_min[idxs]
+            if clip_to_bounds:
+                x_array = x_array.copy()
+                idxs = x_array < self.prior_bounds_min
+                x_array[idxs] = self.prior_bounds_min[idxs]
+                idxs = x_array > self.prior_bounds_max
+                x_array[idxs] = self.prior_bounds_max[idxs]
+            else:
+                if np.any(x_array < self.prior_bounds_min) or \
+                        np.any(x_array > self.prior_bounds_max):
+                    return -np.inf
 
-            idxs = x_array > self.prior_bounds_max
-            x_array[idxs] = self.prior_bounds_max[idxs]
-
-            return self.log_likelihood(array_to_dict(self.parameter_names, x_array))
+            return self.log_likelihood(
+                array_to_dict(self.parameter_names, x_array)
+            )
 
         def wrapped_logl_arb(x_array):
             return np.apply_along_axis(wrapped_logl, 0, x_array)
@@ -223,11 +228,22 @@ class FisherMatrixPosteriorEstimator:
 
         iFIM = scipy.linalg.inv(FIM)
 
-        # Ensure iFIM is positive definite
-        min_eig = np.min(np.real(np.linalg.eigvals(iFIM)))
-        if min_eig < 0:
-            logger.warning("Scaling the iFIM to ensure it is positive definite")
-            iFIM -= 10 * min_eig * np.eye(*iFIM.shape)
+        # Ensure iFIM is positive definite using nearest-PD
+        # projection: zero out negative eigenvalues rather than
+        # inflating every diagonal element.
+        eigvals, eigvecs = np.linalg.eigh(iFIM)
+        if np.any(eigvals < 0):
+            n_neg = int(np.sum(eigvals < 0))
+            logger.warning(
+                f"iFIM has {n_neg} negative eigenvalue(s); "
+                f"projecting to nearest positive-definite matrix"
+            )
+            eigvals = np.maximum(eigvals, 0.0)
+            # Floor must be large enough for Cholesky to succeed
+            eigvals = np.maximum(eigvals, 1e-6 * np.max(eigvals))
+            iFIM = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            # Re-symmetrise to remove floating-point drift
+            iFIM = 0.5 * (iFIM + iFIM.T)
 
         return iFIM
 
