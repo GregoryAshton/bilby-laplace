@@ -452,7 +452,16 @@ class Laplace(Sampler):
     def _importance_sample(self, g_samples, g_logl, weights):
         logger.debug(f"Importance resampling {len(g_samples)} proposals")
 
-        normalized_weights = weights / np.sum(weights)
+        weight_sum = np.sum(weights)
+        if weight_sum == 0 or not np.isfinite(weight_sum):
+            msg = "All importance weights are zero or non-finite"
+            if self.kwargs["fail_on_error"]:
+                raise SamplerError(msg)
+            else:
+                logger.debug(msg)
+            return g_samples.iloc[:0].reset_index(drop=True), g_logl[:0]
+
+        normalized_weights = weights / weight_sum
         if self.ess < self.ndim:
             msg = (
                 f"Effective sample size ({self.ess}) is "
@@ -513,20 +522,28 @@ class Laplace(Sampler):
         def log_prior_aspire(samples):
             return proposal_flow.log_prob(np.asarray(samples.x))
 
+        # Large finite penalty for out-of-prior samples.  Using -inf
+        # would cause NaN inside aspire's weight calculation where
+        # 0 * (-inf) = NaN at the initial beta=0 step.
+        _LOG_ZERO = -1e30
+
         def log_lik_aspire(samples):
             x = np.asarray(samples.x)  # (N, D)
             df = pd.DataFrame(x, columns=parameter_names)
             log_pi = np.real(
                 np.array(self.priors.ln_prob(df, axis=0))
             )
-            log_l = np.full(len(x), -np.inf)
+            log_l = np.full(len(x), _LOG_ZERO)
             in_prior = np.isfinite(log_pi)
             if np.any(in_prior):
                 log_l[in_prior] = (
                     fisher_mpe.log_likelihood_from_array(x[in_prior].T)
                 )
+            log_pi[~in_prior] = _LOG_ZERO
             log_q = proposal_flow.log_prob(x)
-            return log_l + log_pi - log_q
+            result = log_l + log_pi - log_q
+            result[~np.isfinite(result)] = _LOG_ZERO
+            return result
 
         _backends = {
             "emcee": "aspire.samplers.smc.emcee.EmceeSMC",

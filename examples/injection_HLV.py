@@ -1,24 +1,20 @@
 #!/usr/bin/env python
 
 """
-Parameter estimation on GW150914 using the Laplace sampler.
+Parameter estimation on a simulated BBH signal injected into Gaussian noise.
 
-The Laplace approximation runs in minutes rather than hours. It works well
-for the more Gaussian parameters (chirp mass, mass ratio, inclination) but
-will be less accurate for parameters with non-Gaussian or multi-modal
-posteriors (sky location, distance).
-
-Data is fetched from GWOSC via gwpy. See
-https://gwpy.github.io/docs/stable/timeseries/remote-access.html
-for details on accessing data on the LIGO Data Grid instead.
+Uses a three-detector HLV (Hanford-Livingston-Virgo) network with bilby's
+built-in injection infrastructure.  No real data download is needed -- the
+interferometers are initialised with their design power spectral densities
+and Gaussian noise is generated internally.
 
 Usage
 -----
-    python examples/GW150914.py --smc
-    python examples/GW150914.py --rejection
-    python examples/GW150914.py --importance
-    python examples/GW150914.py --dynesty
-    python examples/GW150914.py --plot-combined
+    python examples/injection_HLV.py --rejection
+    python examples/injection_HLV.py --smc
+    python examples/injection_HLV.py --importance
+    python examples/injection_HLV.py --dynesty
+    python examples/injection_HLV.py --plot-combined
 """
 
 import argparse
@@ -27,110 +23,120 @@ import os
 
 import numpy as np
 import bilby
-from bilby.core.prior import Constraint, PowerLaw, Sine, Uniform
+from bilby.core.prior import Constraint, Sine, Uniform
 from bilby.gw.prior import (
     AlignedSpin,
     BBHPriorDict,
     UniformInComponentsChirpMass,
     UniformInComponentsMassRatio,
 )
-from gwpy.timeseries import TimeSeries
 
 logger = bilby.core.utils.logger
-outdir = "outdir_GW150914"
-base_label = "GW150914"
+outdir = "outdir_injection_HLV"
+base_label = "injection_HLV"
 
 # ---------------------------------------------------------------------------
-# Data
+# Injection parameters
 # ---------------------------------------------------------------------------
-trigger_time = 1126259462.4
-detectors = ["H1", "L1"]
-maximum_frequency = 512
-minimum_frequency = 20
-roll_off = 0.4
+injection_parameters = dict(
+    chirp_mass=28.0,
+    mass_ratio=0.8,
+    chi_1=0.05,
+    chi_2=-0.02,
+    luminosity_distance=800.0,
+    theta_jn=0.4,
+    psi=2.659,
+    phase=1.3,
+    geocent_time=1126259642.413,
+    ra=1.375,
+    dec=-1.2108,
+    zenith=0.0,
+    azimuth=0.0,
+)
+
+# ---------------------------------------------------------------------------
+# Detector setup
+# ---------------------------------------------------------------------------
 duration = 4
-post_trigger_duration = 2
-end_time = trigger_time + post_trigger_duration
-start_time = end_time - duration
+sampling_frequency = 2048
+minimum_frequency = 20
+maximum_frequency = 1024
 
-psd_duration = 16 * duration
-psd_start_time = start_time - psd_duration
-psd_end_time = start_time
+waveform_arguments = dict(
+    waveform_approximant="IMRPhenomPv2",
+    reference_frequency=50,
+    minimum_frequency=minimum_frequency,
+)
 
-ifo_list = bilby.gw.detector.InterferometerList([])
-for det in detectors:
-    logger.info(f"Downloading analysis data for ifo {det}")
-    ifo = bilby.gw.detector.get_empty_interferometer(det)
-    data = TimeSeries.fetch_open_data(det, start_time, end_time, cache=True)
-    ifo.strain_data.set_from_gwpy_timeseries(data)
+waveform_generator = bilby.gw.WaveformGenerator(
+    duration=duration,
+    sampling_frequency=sampling_frequency,
+    frequency_domain_source_model=bilby.gw.source.lal_binary_black_hole,
+    parameter_conversion=bilby.gw.conversion.convert_to_lal_binary_black_hole_parameters,
+    waveform_arguments=waveform_arguments,
+)
 
-    logger.info(f"Downloading PSD data for ifo {det}")
-    psd_data = TimeSeries.fetch_open_data(det, psd_start_time, psd_end_time, cache=True)
-    psd_alpha = 2 * roll_off / duration
-    psd = psd_data.psd(
-        fftlength=duration, overlap=0, window=("tukey", psd_alpha), method="median"
-    )
-    ifo.power_spectral_density = bilby.gw.detector.PowerSpectralDensity(
-        frequency_array=psd.frequencies.value, psd_array=psd.value
-    )
-    ifo.maximum_frequency = maximum_frequency
-    ifo.minimum_frequency = minimum_frequency
-    ifo_list.append(ifo)
+ifo_list = bilby.gw.detector.InterferometerList(["H1", "L1", "V1"])
+ifo_list.set_strain_data_from_power_spectral_densities(
+    sampling_frequency=sampling_frequency,
+    duration=duration,
+    start_time=injection_parameters["geocent_time"] - duration + 2,
+)
+ifo_list.inject_signal(
+    parameters=injection_parameters,
+    waveform_generator=waveform_generator,
+)
 
 # ---------------------------------------------------------------------------
 # Priors
 # ---------------------------------------------------------------------------
 priors = BBHPriorDict(
     dictionary=dict(
-        #chirp_mass=UniformInComponentsChirpMass(
-        #name="chirp_mass", minimum=25, maximum=35, unit="$M_{\\odot}$"
-        #),
-        chirp_mass=31.2,
-        #mass_ratio=UniformInComponentsMassRatio(
-        #name="mass_ratio", minimum=0.125, maximum=1
-        #),
-        mass_ratio=1,
+        chirp_mass=UniformInComponentsChirpMass(
+            name="chirp_mass", minimum=25, maximum=35, unit=r"$M_{\odot}$"
+        ),
+        mass_ratio=UniformInComponentsMassRatio(
+            name="mass_ratio", minimum=0.125, maximum=1
+        ),
         mass_1=Constraint(name="mass_1", minimum=10, maximum=80),
         mass_2=Constraint(name="mass_2", minimum=10, maximum=80),
-        chi_1=0, #AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.99)),
-        chi_2=0, #AlignedSpin(name="chi_2", a_prior=Uniform(minimum=0, maximum=0.99)),
-        luminosity_distance=PowerLaw(
+        chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.99)),
+        chi_2=AlignedSpin(name="chi_2", a_prior=Uniform(minimum=0, maximum=0.99)),
+        luminosity_distance=bilby.core.prior.PowerLaw(
             alpha=2,
             name="luminosity_distance",
-            minimum=50,
-            maximum=2000,
+            minimum=100,
+            maximum=3000,
             unit="Mpc",
-            latex_label="$d_L$",
+            latex_label=r"$d_L$",
         ),
-        zenith=Sine(name="zenith"),
-        azimuth=Uniform(name="azimuth", minimum=0, maximum=2 * np.pi, boundary="periodic"),
-        #theta_jn=Sine(name="theta_jn"),
-        theta_jn=1.4,
-        #psi=Uniform(name="psi", minimum=0, maximum=np.pi, boundary="periodic"),
-        psi = 0.5,
-        phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic"),
+        theta_jn=Sine(name="theta_jn"),
+        psi=Uniform(
+            name="psi", minimum=0, maximum=np.pi, boundary="periodic"
+        ),
+        phase=Uniform(
+            name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic"
+        ),
         geocent_time=Uniform(
-            minimum=trigger_time - 0.1,
-            maximum=trigger_time + 0.1,
+            minimum=injection_parameters["geocent_time"] - 0.1,
+            maximum=injection_parameters["geocent_time"] + 0.1,
             name="geocent_time",
             latex_label=r"$t_{\rm geo}$",
             unit="$s$",
+        ),
+        zenith=Sine(name="zenith"),
+        azimuth=Uniform(
+            name="azimuth",
+            minimum=0,
+            maximum=2 * np.pi,
+            boundary="periodic",
         ),
     )
 )
 
 # ---------------------------------------------------------------------------
-# Waveform generator and likelihood
+# Likelihood
 # ---------------------------------------------------------------------------
-waveform_generator = bilby.gw.WaveformGenerator(
-    frequency_domain_source_model=bilby.gw.source.lal_binary_black_hole,
-    parameter_conversion=bilby.gw.conversion.convert_to_lal_binary_black_hole_parameters,
-    waveform_arguments={
-        "waveform_approximant": "IMRPhenomPv2",
-        "reference_frequency": 50,
-    },
-)
-
 likelihood = bilby.gw.likelihood.GravitationalWaveTransient(
     ifo_list,
     waveform_generator,
@@ -149,13 +155,15 @@ _common_laplace = dict(
     likelihood=likelihood,
     priors=priors,
     outdir=outdir,
-    use_injection_for_maxL=False,
+    injection_parameters=injection_parameters,
+    use_injection_for_maxL=True,
     conversion_function=bilby.gw.conversion.generate_all_bbh_parameters,
     result_class=bilby.gw.result.CBCResult,
     plot_diagnostic=True,
     clean=True,
-    cov_scaling=1,
     sampler="laplace",
+    target_nsamples=1000,
+    cov_scaling=1,
     extension="hdf5",
 )
 
@@ -207,7 +215,6 @@ def run_smc():
         **_common_laplace,
         label=f"{base_label}_smc",
         resample="smc",
-        n_modes=2,
         smc_kwargs=_smc_kwargs,
     )
 
@@ -219,7 +226,8 @@ def run_dynesty():
         sampler="dynesty",
         outdir=outdir,
         label=f"{base_label}_dynesty",
-        nlive=250,
+        injection_parameters=injection_parameters,
+        nlive=500,
         check_point_delta_t=1800,
         check_point_plot=True,
         npool=1,
@@ -281,7 +289,7 @@ def plot_combined():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Parameter estimation on GW150914"
+        description="BBH injection in Gaussian noise (HLV network)"
     )
     parser.add_argument(
         "--laplace",
