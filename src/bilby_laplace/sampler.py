@@ -143,24 +143,21 @@ class Laplace(Sampler):
         Configuration for SMC sampling (only used when ``resample='smc'``).
         Recognised keys:
 
-        ``backend`` : str
-            Aspire SMC backend: ``'emcee'`` (default), ``'minipcn'``, or
-            ``'blackjax'``.
-        ``n_samples`` : int
-            Number of SMC particles (default 1000).
+        ``sampler`` : str
+            Aspire posterior sampler: ``'importance'`` (default), ``'smc'``,
+            or any other strategy accepted by
+            ``aspire.Aspire.sample_posterior``.
+        ``n_initial_samples`` : int
+            Number of initial samples drawn from the Laplace proposal and
+            passed to ``aspire.fit()`` (default 1000).
         ``n_final_samples`` : int
-            Number of output samples after final resampling.  Defaults to
-            ``target_nsamples`` if not set.
-        ``target_efficiency`` : float
-            Target ESS/N ratio for the adaptive β schedule (default 0.5).
-        ``sampler_kwargs`` : dict
-            Passed verbatim to the MCMC mutation kernel, e.g.
-            ``{'nsteps': 20}`` for the emcee backend.
+            Number of output samples requested from
+            ``aspire.sample_posterior()``.  Defaults to ``target_nsamples``
+            if not set.
 
-        Any other keys are forwarded directly to ``aspire_sampler.sample()``,
-        so all aspire parameters (``min_beta_step``, ``max_beta_step``,
-        ``max_n_steps``, ``store_sample_history``, ``beta_tolerance``, …)
-        are accessible this way.
+        Any other keys are forwarded directly to
+        ``aspire.Aspire.sample_posterior()``, so all aspire parameters are
+        accessible this way.
     """
 
     sampler_name = "laplace"
@@ -599,95 +596,62 @@ class Laplace(Sampler):
         return samples, logl
 
     def _smc_sample(self, proposal_flow, fisher_mpe):
-        """Run SMC via aspire, annealing from *proposal_flow* to the true
-        posterior.
+        """Run posterior sampling via aspire, starting from the Laplace proposal.
 
-        The SMC path is::
-
-            log π_β(x) = log q(x) + β · log_lik_correction(x)
-
-        where ``q`` is the proposal (a single Gaussian or a Gaussian mixture)
-        and ``log_lik_correction = log L_bilby + log π_bilby − log q``,
-        so that at β=1 we recover the true posterior.
+        Initial samples are drawn from the Gaussian (or mixture) proposal and
+        passed to ``aspire.fit()``.  ``aspire.sample_posterior()`` then
+        refines these toward the true posterior.
         """
-        import importlib
+        from aspire import Aspire
+        from aspire.samples import Samples
+        from aspire_bilby.utils import get_aspire_functions
 
         parameter_names = fisher_mpe.parameter_names
 
-        def log_prior_aspire(samples):
-            return proposal_flow.log_prob(np.asarray(samples.x))
-
-        # Large finite penalty for out-of-prior samples.  Using -inf
-        # would cause NaN inside aspire's weight calculation where
-        # 0 * (-inf) = NaN at the initial beta=0 step.
-        _LOG_ZERO = -1e30
-
-        def log_lik_aspire(samples):
-            x = np.asarray(samples.x)  # (N, D)
-            df = pd.DataFrame(x, columns=parameter_names)
-            log_pi = np.real(
-                np.array(self.priors.ln_prob(df, axis=0))
-            )
-            log_l = np.full(len(x), _LOG_ZERO)
-            in_prior = np.isfinite(log_pi)
-            if np.any(in_prior):
-                log_l[in_prior] = (
-                    fisher_mpe.log_likelihood_from_array(x[in_prior].T)
-                )
-            log_pi[~in_prior] = _LOG_ZERO
-            log_q = proposal_flow.log_prob(x)
-            result = log_l + log_pi - log_q
-            result[~np.isfinite(result)] = _LOG_ZERO
-            return result
-
-        _backends = {
-            "emcee": "aspire.samplers.smc.emcee.EmceeSMC",
-            "minipcn": "aspire.samplers.smc.minipcn.MiniPCNSMC",
-            "blackjax": "aspire.samplers.smc.blackjax.BlackJAXSMC",
+        prior_bounds = {
+            key: (self.priors[key].minimum, self.priors[key].maximum)
+            for key in parameter_names
         }
+
+        functions = get_aspire_functions(self.likelihood, self.priors, parameter_names)
+
+        aspire_sampler = Aspire(
+            log_likelihood=functions.log_likelihood,
+            log_prior=functions.log_prior,
+            dims=len(parameter_names),
+            parameters=parameter_names,
+            prior_bounds=prior_bounds,
+        )
 
         # Copy so we can pop without mutating the user's dict
         smc_kw = dict(self.kwargs.get("smc_kwargs") or {})
-        backend = smc_kw.pop("backend", "emcee")
-        if backend not in _backends:
-            raise ValueError(
-                f"Unknown SMC backend {backend!r}. "
-                f"Choose from {list(_backends)}"
-            )
-        module_path, class_name = _backends[backend].rsplit(".", 1)
-        SMCClass = getattr(importlib.import_module(module_path), class_name)
-
-        logger.info(f"Starting SMC sampling (backend: {backend})")
-        sampler = SMCClass(
-            log_likelihood=log_lik_aspire,
-            log_prior=log_prior_aspire,
-            dims=len(parameter_names),
-            prior_flow=proposal_flow,
-            xp=np,
-            parameters=parameter_names,
+        sampler_type = smc_kw.pop("sampler", "importance")
+        n_initial = smc_kw.pop("n_initial_samples", 1000)
+        n_final = smc_kw.pop(
+            "n_final_samples", self.kwargs["target_nsamples"]
         )
 
-        # Apply defaults for keys not set by the user
-        smc_kw.setdefault("n_samples", 1000)
-        smc_kw.setdefault("n_final_samples", self.kwargs["target_nsamples"])
-        smc_kw.setdefault("adaptive", True)
-        smc_kw.setdefault("target_efficiency", 0.5)
-        result = sampler.sample(**smc_kw)
+        # Draw initial samples from the Laplace proposal and fit aspire
+        initial_theta, _ = proposal_flow.sample_and_log_prob(n_initial)
+        initial_samples = Samples(
+            initial_theta, parameters=parameter_names
+        )
+        aspire_sampler.fit(initial_samples)
+
+        logger.info(f"Starting Aspire sampling (sampler: {sampler_type})")
+        result, self._smc_history = aspire_sampler.sample_posterior(
+            n_final, sampler=sampler_type, return_history=True, **smc_kw
+        )
 
         x_out = np.asarray(result.x)
         samples = pd.DataFrame(x_out, columns=parameter_names)
-        # Recompute the true bilby log-likelihood on the SMC output
-        # (result.log_likelihood holds log_lik_aspire, the correction)
         logl = fisher_mpe.log_likelihood_from_array(x_out.T)
 
-        # Extract evidence estimate from aspire
         smc_log_z = getattr(result, "log_evidence", None)
-        smc_log_z_err = getattr(
-            result, "log_evidence_error", np.nan
-        )
+        smc_log_z_err = getattr(result, "log_evidence_error", np.nan)
         if smc_log_z is not None:
             logger.info(
-                f"SMC log-evidence: {smc_log_z:.2f} "
+                f"Aspire log-evidence: {smc_log_z:.2f} "
                 f"+/- {smc_log_z_err:.2f}"
             )
 
@@ -1032,7 +996,7 @@ class Laplace(Sampler):
         axes[0].legend(lines, labels)
         fig.suptitle(f"Resampling method: {method}")
 
-        filename = f"{self.outdir}/{self.label}_resample_{method}.png"
+        filename = f"{self.outdir}/{self.label}_smc_diagnostic-resample_{method}.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
         return fig
@@ -1128,7 +1092,35 @@ class Laplace(Sampler):
         axes_grid[0, 0].legend(legend_handles, legend_labels, fontsize="small")
         fig.suptitle("Resampling method: SMC")
 
-        filename = f"{self.outdir}/{self.label}_resample_smc.png"
+        filename = f"{self.outdir}/{self.label}_smc_diagnostic-resample.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
+
+        # History diagnostics (beta schedule, ESS, acceptance, etc.)
+        history = getattr(self, "_smc_history", None)
+        if history is not None and history.beta:
+            fig_stats, _ = plt.subplots(6, 1, sharex=True, figsize=(8, 14))
+            fig_stats = history.plot(fig=fig_stats)
+            fig_stats.suptitle("SMC diagnostics")
+            fig_stats.tight_layout()
+            safe_save_figure(
+                fig=fig_stats,
+                filename=f"{self.outdir}/{self.label}_smc_diagnostic-stats.png",
+                dpi=150,
+            )
+            plt.close(fig_stats)
+
+            if history.sample_history:
+                fig_bands = history.plot_quantile_bands(
+                    parameters=self.search_parameter_keys
+                )
+                fig_bands.suptitle("SMC parameter evolution")
+                fig_bands.tight_layout()
+                safe_save_figure(
+                    fig=fig_bands,
+                    filename=f"{self.outdir}/{self.label}_smc_diagnostic-evolution.png",
+                    dpi=150,
+                )
+                plt.close(fig_bands)
+
         return fig
