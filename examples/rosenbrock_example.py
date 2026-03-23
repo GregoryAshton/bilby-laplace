@@ -1,11 +1,21 @@
 """
-Comparison example: Laplace vs dynesty on a 2D Gaussian likelihood.
+Comparison example: Laplace vs dynesty on a 2D Rosenbrock likelihood.
+
+The Rosenbrock (banana) function is a standard non-Gaussian test: its
+narrow curved valley makes it a challenging target for Laplace-based
+methods, providing a useful illustration of where the approximation breaks
+down compared to SMC or nested sampling.
+
+The log-likelihood is:
+    log L(x, y) = -[(1 - x)^2 + 100 (y - x^2)^2] / scale
+
+where ``scale`` controls the width of the distribution.
 
 Usage
 -----
-    python examples/gaussian_example.py --sampler laplace rejection smc dynesty
-    python examples/gaussian_example.py --sampler smc
-    python examples/gaussian_example.py --compare
+    python examples/rosenbrock_example.py --sampler laplace rejection smc dynesty
+    python examples/rosenbrock_example.py --sampler smc
+    python examples/rosenbrock_example.py --compare
 """
 
 import argparse
@@ -18,46 +28,48 @@ import bilby
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
-outdir = "outdir_gaussian_example"
-base_label = "gaussian"
+outdir = "outdir_rosenbrock_example"
+base_label = "rosenbrock"
 
 # ---------------------------------------------------------------------------
 # Likelihood
 # ---------------------------------------------------------------------------
 
 
-class GaussianLikelihood(bilby.core.likelihood.Likelihood):
-    """2-D correlated Gaussian likelihood."""
+class RosenbrockLikelihood(bilby.core.likelihood.Likelihood):
+    """2-D Rosenbrock (banana) likelihood.
 
-    def __init__(self, mu_x=1.0, mu_y=-0.5, sigma_x=0.3, sigma_y=0.5, rho=0.7):
+    Parameters
+    ----------
+    scale : float
+        Controls the width of the distribution. Larger values give a
+        broader, easier posterior. Default is 1.0.
+    """
+
+    def __init__(self, scale=1.0):
         super().__init__(parameters={"x": None, "y": None})
-        self.mu = np.array([mu_x, mu_y])
-        cov = np.array([
-            [sigma_x**2, rho * sigma_x * sigma_y],
-            [rho * sigma_x * sigma_y, sigma_y**2],
-        ])
-        self._inv_cov = np.linalg.inv(cov)
-        self._log_norm = -0.5 * np.log(np.linalg.det(2 * np.pi * cov))
+        self.scale = scale
 
     def log_likelihood(self, parameters=None):
-        d = np.array([parameters["x"], parameters["y"]]) - self.mu
-        return -0.5 * d @ self._inv_cov @ d + self._log_norm
+        x = parameters["x"]
+        y = parameters["y"]
+        return -((1 - x) ** 2 + 100 * (y - x ** 2) ** 2) / self.scale
 
 
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
 
-likelihood = GaussianLikelihood()
+likelihood = RosenbrockLikelihood(scale=1.0)
 
 priors = bilby.core.prior.PriorDict(
     dict(
-        x=bilby.core.prior.Uniform(-5, 5, "x"),
-        y=bilby.core.prior.Uniform(-5, 5, "y"),
+        x=bilby.core.prior.Uniform(-2, 2, "x"),
+        y=bilby.core.prior.Uniform(-1, 3, "y"),
     )
 )
 
-injection_parameters = {"x": 1.0, "y": -0.5}
+injection_parameters = {"x": 1.0, "y": 1.0}
 
 # ---------------------------------------------------------------------------
 # Shared sampler kwargs
@@ -84,6 +96,7 @@ def run_laplace():
         **_common_laplace,
         label=f"{base_label}_laplace",
         resample="None",
+        cov_scaling=1,
     )
 
 
@@ -92,8 +105,24 @@ def run_rejection():
         **_common_laplace,
         label=f"{base_label}_rejection",
         resample="rejection",
+        cov_scaling=10,
     )
 
+
+
+_smc_kwargs = dict(
+    sampler="minipcn_smc",
+    n_initial_samples=10000,
+    n_final_samples=5000,
+    target_efficiency=[0.5, 0.8],
+    adaptive=True,
+    sampler_kwargs=dict(
+        n_steps=1000,
+        target_acceptance_rate=0.234,
+        step_fn="tpcn",
+        verbose=True,
+    ),
+)
 
 
 def run_smc():
@@ -101,6 +130,8 @@ def run_smc():
         **_common_laplace,
         label=f"{base_label}_smc",
         resample="smc",
+        smc_kwargs=_smc_kwargs,
+        cov_scaling=5,
     )
 
 
@@ -196,7 +227,7 @@ _run_fns = dict(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Laplace vs dynesty on a 2D Gaussian likelihood"
+        description="Laplace vs dynesty on a 2D Rosenbrock likelihood"
     )
     parser.add_argument(
         "--sampler",
