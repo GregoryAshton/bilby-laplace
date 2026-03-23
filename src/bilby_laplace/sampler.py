@@ -180,7 +180,7 @@ class Laplace(Sampler):
         If True, produce a corner diagnostic plot after resampling.
     cov_scaling : float
         Multiplicative scale applied to the iFIM covariance.
-    use_injection_for_maxL : bool
+    use_injection_for_map : bool
         If True and injection_parameters are set, use them as the starting
         point for the max-likelihood search.
     fail_on_error : bool
@@ -230,7 +230,7 @@ class Laplace(Sampler):
         fd_eps=1e-6,
         plot_diagnostic=False,
         cov_scaling=1,
-        use_injection_for_maxL=True,
+        use_injection_for_map=True,
         fail_on_error=False,
         use_unit_cube=True,
         n_modes=1,
@@ -281,8 +281,8 @@ class Laplace(Sampler):
             use_unit_cube=self.kwargs["use_unit_cube"],
         )
 
-        # Choose starting point for max-likelihood search
-        if self.injection_parameters and self.kwargs["use_injection_for_maxL"]:
+        # Choose starting point for MAP search
+        if self.injection_parameters and self.kwargs["use_injection_for_map"]:
             initial_sample = {
                 key: self.injection_parameters[key]
                 for key in fisher_mpe.parameter_names
@@ -291,15 +291,15 @@ class Laplace(Sampler):
         else:
             initial_sample = None
 
-        maxL_sample_dict = fisher_mpe.get_maximum_likelihood_sample(initial_sample)
-        mean = np.array(list(maxL_sample_dict.values()))
-        iFIM = fisher_mpe.calculate_iFIM(maxL_sample_dict)
+        map_sample_dict = fisher_mpe.get_MAP_sample(initial_sample)
+        mean = np.array(list(map_sample_dict.values()))
+        iFIM = fisher_mpe.calculate_iFIM(map_sample_dict)
         cov = cov_scaling * iFIM
         cov = self._validate_covariance(fisher_mpe, mean, cov)
 
         msg = "Gaussian proposal (MAP +/- 1-sigma):\n " + "\n ".join(
             f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}"
-            for (key, val), var in zip(maxL_sample_dict.items(), np.diag(cov))
+            for (key, val), var in zip(map_sample_dict.items(), np.diag(cov))
         )
         logger.info(msg)
 
@@ -320,7 +320,7 @@ class Laplace(Sampler):
 
         # Laplace evidence (always available)
         log_evidence_laplace = fisher_mpe.log_evidence_laplace(
-            maxL_sample_dict, iFIM
+            map_sample_dict, iFIM
         )
         log_evidence = log_evidence_laplace
         log_evidence_err = np.nan
@@ -343,11 +343,11 @@ class Laplace(Sampler):
                 log_evidence_err = float(smc_log_z_err)
         elif resample == "rejection":
             samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = (
-                self._run_rejection_sampling(proposal, fisher_mpe, maxL_sample_dict)
+                self._run_rejection_sampling(proposal, fisher_mpe, map_sample_dict)
             )
         else:
             samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = (
-                self._run_importance_sampling(proposal, fisher_mpe, maxL_sample_dict)
+                self._run_importance_sampling(proposal, fisher_mpe, map_sample_dict)
             )
 
         end_time = datetime.datetime.now()
@@ -450,7 +450,7 @@ class Laplace(Sampler):
         ln_r = logl + logpi - log_g
         return ln_r, logl
 
-    def _run_rejection_sampling(self, proposal, fisher_mpe, maxL_sample_dict):
+    def _run_rejection_sampling(self, proposal, fisher_mpe, map_sample_dict):
         """Draw samples from the proposal using rejection sampling.
 
         The acceptance probability for a proposal θ is L(θ)π(θ) / (M·g(θ)),
@@ -470,7 +470,7 @@ class Laplace(Sampler):
         ln_M = (
             float(fisher_mpe.log_likelihood_from_array(mean))
             + sum(
-                np.log(max(self.priors[k].prob(float(maxL_sample_dict[k])), 1e-300))
+                np.log(max(self.priors[k].prob(float(map_sample_dict[k])), 1e-300))
                 for k in fisher_mpe.parameter_names
             )
             - float(proposal.logpdf(mean.reshape(1, -1))[0])
@@ -565,7 +565,7 @@ class Laplace(Sampler):
 
         return samples, logl, g_samples, efficiency, log_evidence, log_evidence_err
 
-    def _run_importance_sampling(self, proposal, fisher_mpe, maxL_sample_dict):
+    def _run_importance_sampling(self, proposal, fisher_mpe, map_sample_dict):
         """Draw samples from the proposal using importance resampling.
 
         Accumulates batches until ``target_nsamples`` are collected by

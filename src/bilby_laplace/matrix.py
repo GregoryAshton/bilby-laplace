@@ -106,6 +106,20 @@ class FisherMatrixPosteriorEstimator:
             parameters={**self.fixed_parameters, **sample}
         )
 
+    def log_prior(self, sample):
+        """Evaluate log-prior for a parameter dict (sampled parameters only)."""
+        return sum(
+            np.log(self.priors_dict[k].prob(float(sample[k])))
+            for k in self.parameter_names
+        )
+
+    def log_posterior(self, sample):
+        """Evaluate log-posterior = log-likelihood + log-prior."""
+        lp = self.log_prior(sample)
+        if not np.isfinite(lp):
+            return -np.inf
+        return self.log_likelihood(sample) + lp
+
     def log_likelihood_from_array(self, x_array, clip_to_bounds=False):
         def wrapped_logl(x_array):
             if clip_to_bounds:
@@ -127,6 +141,17 @@ class FisherMatrixPosteriorEstimator:
             return np.apply_along_axis(wrapped_logl, 0, x_array)
 
         return wrapped_logl_arb(x_array)
+
+    def log_posterior_from_array(self, x_array):
+        """Evaluate log-posterior from a parameter array (or column-stacked arrays)."""
+        def wrapped(x_array):
+            if np.any(x_array < self.prior_bounds_min) or \
+                    np.any(x_array > self.prior_bounds_max):
+                return -np.inf
+            return self.log_posterior(
+                array_to_dict(self.parameter_names, x_array)
+            )
+        return np.apply_along_axis(wrapped, 0, x_array)
 
     def _to_unit_cube(self, x_array):
         return np.array([self.priors_dict[k].cdf(float(x_array[i]))
@@ -173,20 +198,27 @@ class FisherMatrixPosteriorEstimator:
             return self.log_likelihood(array_to_dict(self.parameter_names, x))
         return np.apply_along_axis(wrapped, 0, u_array)
 
+    def log_posterior_in_unit_cube(self, u_array):
+        """log p(θ(u)|d) = log L(θ(u)) + log π(θ(u)); in unit-cube coords."""
+        def wrapped(u):
+            x = self._from_unit_cube(u)
+            return self.log_posterior(array_to_dict(self.parameter_names, x))
+        return np.apply_along_axis(wrapped, 0, u_array)
+
     def _second_deriv_unit_cube(self, u_map, ii, jj):
-        """Finite-difference second derivative of L̃ in unit-cube coords."""
+        """Finite-difference second derivative of log-posterior in unit-cube coords."""
         h = self.fd_eps
         ei = np.zeros(self.N); ei[ii] = h
         ej = np.zeros(self.N); ej[jj] = h
         if ii == jj:
-            return (self.log_likelihood_in_unit_cube(u_map + ei)
-                    - 2 * self.log_likelihood_in_unit_cube(u_map)
-                    + self.log_likelihood_in_unit_cube(u_map - ei)) / h**2
+            return (self.log_posterior_in_unit_cube(u_map + ei)
+                    - 2 * self.log_posterior_in_unit_cube(u_map)
+                    + self.log_posterior_in_unit_cube(u_map - ei)) / h**2
         else:
-            return (self.log_likelihood_in_unit_cube(u_map + ei + ej)
-                    - self.log_likelihood_in_unit_cube(u_map + ei - ej)
-                    - self.log_likelihood_in_unit_cube(u_map - ei + ej)
-                    + self.log_likelihood_in_unit_cube(u_map - ei - ej)) / (4 * h**2)
+            return (self.log_posterior_in_unit_cube(u_map + ei + ej)
+                    - self.log_posterior_in_unit_cube(u_map + ei - ej)
+                    - self.log_posterior_in_unit_cube(u_map - ei + ej)
+                    + self.log_posterior_in_unit_cube(u_map - ei - ej)) / (4 * h**2)
 
     def calculate_FIM(self, sample):
         if self.use_unit_cube:
@@ -195,7 +227,7 @@ class FisherMatrixPosteriorEstimator:
 
     def _calculate_FIM_parameter_space(self, sample):
         if version.parse(scipy.__version__) < version.parse("1.15"):
-            logger.info("Computing Fisher matrix (finite differences, scipy < 1.15)")
+            logger.info("Computing Hessian of log-posterior (finite differences, scipy < 1.15)")
             FIM = np.zeros((self.N, self.N))
             for ii, ii_key in enumerate(self.parameter_names):
                 for jj, jj_key in enumerate(self.parameter_names):
@@ -207,12 +239,12 @@ class FisherMatrixPosteriorEstimator:
             import scipy.differentiate as sd
 
             logger.info(
-                "Computing Fisher matrix (scipy.differentiate)"
+                "Computing Hessian of log-posterior (scipy.differentiate)"
             )
             point = np.array([sample[key] for key in self.parameter_names])
-            res = sd.hessian(self.log_likelihood_from_array, point, initial_step=0.5)
+            res = sd.hessian(self.log_posterior_from_array, point, initial_step=0.5)
             FIM = -res.ddf
-            logger.debug(f"Estimated FIM:\n{FIM}")
+            logger.debug(f"Estimated Hessian:\n{FIM}")
             return FIM
 
     def _calculate_FIM_unit_cube(self, sample):
@@ -220,17 +252,17 @@ class FisherMatrixPosteriorEstimator:
         u_map = self._to_unit_cube(x_array)
 
         if version.parse(scipy.__version__) < version.parse("1.15"):
-            logger.info("Computing Fisher matrix in unit cube (finite differences, scipy < 1.15)")
+            logger.info("Computing Hessian of log-posterior in unit cube (finite differences, scipy < 1.15)")
             FIM_u = np.zeros((self.N, self.N))
             for ii in range(self.N):
                 for jj in range(self.N):
                     FIM_u[ii, jj] = -self._second_deriv_unit_cube(u_map, ii, jj)
         else:
             import scipy.differentiate as sd
-            logger.info("Computing Fisher matrix in unit cube (scipy.differentiate)")
-            res = sd.hessian(self.log_likelihood_in_unit_cube, u_map, initial_step=0.1)
+            logger.info("Computing Hessian of log-posterior in unit cube (scipy.differentiate)")
+            res = sd.hessian(self.log_posterior_in_unit_cube, u_map, initial_step=0.01)
             FIM_u = -res.ddf
-            logger.debug(f"FIM (unit cube):\n{FIM_u}")
+            logger.debug(f"Hessian (unit cube):\n{FIM_u}")
 
         J_inv = 1.0 / self._jacobian_diag(x_array)   # = p(θ_MAP)
         return J_inv[:, None] * FIM_u * J_inv[None, :]
@@ -354,9 +386,9 @@ class FisherMatrixPosteriorEstimator:
 
         dx = 0.5 * (p[ii] - m[ii])
 
-        loglp = self.log_likelihood(p)
-        logl = self.log_likelihood(sample)
-        loglm = self.log_likelihood(m)
+        loglp = self.log_posterior(p)
+        logl = self.log_posterior(sample)
+        loglm = self.log_posterior(m)
 
         return (loglp - 2 * logl + loglm) / dx**2
 
@@ -369,10 +401,10 @@ class FisherMatrixPosteriorEstimator:
         dx = 0.5 * (pp[ii] - mm[ii])
         dy = 0.5 * (pp[jj] - mm[jj])
 
-        loglpp = self.log_likelihood(pp)
-        loglpm = self.log_likelihood(pm)
-        loglmp = self.log_likelihood(mp)
-        loglmm = self.log_likelihood(mm)
+        loglpp = self.log_posterior(pp)
+        loglpm = self.log_posterior(pm)
+        loglmp = self.log_posterior(mp)
+        loglmm = self.log_posterior(mm)
 
         return (loglpp - loglpm - loglmp + loglmm) / (4 * dx * dy)
 
@@ -393,17 +425,17 @@ class FisherMatrixPosteriorEstimator:
         shift_sample[y_key] = vy + y_coef * dvy
         return shift_sample
 
-    def _maximize_likelihood_differential_evolution(self):
-        def neg_log_like(x):
-            return -self.log_likelihood_from_array(x)
+    def _maximize_posterior_differential_evolution(self):
+        def neg_log_post(x):
+            return -self.log_posterior_from_array(x)
 
-        return differential_evolution(neg_log_like, bounds=self.prior_bounds)
+        return differential_evolution(neg_log_post, bounds=self.prior_bounds)
 
-    def _maximize_likelihood_from_initial_sample(self, initial_sample):
+    def _maximize_posterior_from_initial_sample(self, initial_sample):
         x0 = list(initial_sample.values())
 
-        def neg_log_like(x):
-            return -self.log_likelihood_from_array(x)
+        def neg_log_post(x):
+            return -self.log_posterior_from_array(x)
 
         # differential_evolution is not a valid method for scipy.optimize.minimize;
         # fall back to Nelder-Mead when used with an initial starting point.
@@ -413,22 +445,23 @@ class FisherMatrixPosteriorEstimator:
             else self.minimization_method
         )
         return minimize(
-            neg_log_like,
+            neg_log_post,
             x0,
             bounds=self.prior_bounds,
             method=local_method,
         )
 
     def get_maximum_likelihood_sample(self, initial_sample=None):
-        """Attempt optimization of the maximum likelihood.
+        """Backwards-compatible alias for :meth:`get_MAP_sample`."""
+        return self.get_MAP_sample(initial_sample)
 
-        By default uses differential evolution, a global optimizer that searches
-        the full prior-bounded space and does not require a starting point. This
-        makes it robust on real data where the posterior peak may be far from
-        random prior draws.
+    def get_MAP_sample(self, initial_sample=None):
+        """Find the maximum a posteriori (MAP) estimate.
 
-        If ``initial_sample`` is provided, a single local minimization is run
-        from that starting point using ``self.minimization_method``.
+        Maximizes log-likelihood + log-prior. By default uses differential
+        evolution, a global optimizer that searches the full prior-bounded
+        space. If ``initial_sample`` is provided, a single local minimization
+        is run from that starting point.
 
         When ``minimization_method`` is not ``'differential_evolution'`` and no
         ``initial_sample`` is given, the legacy multi-start Nelder-Mead strategy
@@ -437,48 +470,48 @@ class FisherMatrixPosteriorEstimator:
         """
         if initial_sample:
             logger.info(
-                "Finding maximum likelihood from "
-                "initial parameters"
+                "Finding MAP from initial parameters"
             )
-            minout = self._maximize_likelihood_from_initial_sample(initial_sample)
+            minout = self._maximize_posterior_from_initial_sample(initial_sample)
         elif self.minimization_method == "differential_evolution":
             logger.info(
-                "Finding maximum likelihood using "
-                "differential evolution"
+                "Finding MAP using differential evolution"
             )
-            minout = self._maximize_likelihood_differential_evolution()
+            minout = self._maximize_posterior_differential_evolution()
         else:
             logger.info(
-                f"Finding maximum likelihood from "
+                f"Finding MAP from "
                 f"{self.n_prior_samples} starting points"
             )
-            max_logL = -np.inf
-            logL_list = []
+            max_logP = -np.inf
+            logP_list = []
             successes = 0
             for sample in tqdm.tqdm(self.prior_samples):
-                out = self._maximize_likelihood_from_initial_sample(sample)
-                logL = -out.fun
-                logL_list.append(logL)
+                out = self._maximize_posterior_from_initial_sample(sample)
+                logP = -out.fun
+                logP_list.append(logP)
                 if out.success:
                     successes += 1
-                if logL > max_logL:
-                    max_logL = logL
+                if logP > max_logP:
+                    max_logP = logP
                     minout = out
 
-            if np.isinf(max_logL):
-                raise ValueError("Maximisation of the likelihood failed")
+            if np.isinf(max_logP):
+                raise ValueError("Maximisation of the posterior failed")
 
             logger.info(
                 f"Optimisation complete: "
                 f"{100 * successes / self.n_prior_samples:.0f}% "
                 f"of starts converged, "
-                f"best log-likelihood = {max_logL:.4f}"
+                f"best log-posterior = {max_logP:.4f}"
             )
 
         self.minimization_metadata = minout
-        maxL = -minout.fun
+        map_sample = {key: val for key, val in zip(self.parameter_names, minout.x)}
+        log_l = self.log_likelihood(map_sample)
+        log_pi = self.log_prior(map_sample)
         logger.info(
-            f"Maximum likelihood found: "
-            f"log-likelihood = {maxL:.4f}"
+            f"MAP found: log-posterior = {-minout.fun:.4f} "
+            f"(log-L = {log_l:.4f}, log-prior = {log_pi:.4f})"
         )
-        return {key: val for key, val in zip(self.parameter_names, minout.x)}
+        return map_sample
