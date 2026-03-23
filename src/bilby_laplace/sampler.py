@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
-from scipy.stats import multivariate_normal
+from scipy.stats import multivariate_normal, truncnorm
 import tqdm
 
 from bilby.core.sampler.base_sampler import Sampler, signal_wrapper
@@ -22,6 +22,65 @@ try:
 except ImportError:
     def safe_save_figure(fig, filename, **kwargs):
         fig.savefig(filename, **kwargs)
+
+
+class GaussianProposal:
+    """Unconstrained multivariate Gaussian proposal.
+
+    Wraps ``scipy.stats.multivariate_normal`` with the common ``sample`` /
+    ``logpdf`` interface used by the rejection and importance sampling loops.
+    """
+
+    def __init__(self, mean, cov):
+        self.mean = mean
+        self._dist = multivariate_normal(mean=mean, cov=cov)
+
+    def sample(self, n):
+        return random.rng.multivariate_normal(self.mean, self._dist.cov, n)
+
+    def logpdf(self, x):
+        return self._dist.logpdf(np.atleast_2d(x))
+
+
+class TruncatedMVNProposal:
+    """Per-marginal independent truncated Gaussian proposal.
+
+    Each parameter is sampled independently from a truncated normal
+    distribution whose scale is the marginal standard deviation
+    ``sqrt(cov[i, i])`` and whose support is clipped to the prior bounds.
+    The log-pdf is the sum of the per-marginal truncated normal log-pdfs.
+
+    Sampling is always efficient regardless of how much wider the Gaussian
+    is than the prior: every draw lands within the prior support.  Off-
+    diagonal covariance elements are not used in sampling or the log-pdf;
+    inter-parameter correlations are recovered through the likelihood during
+    the acceptance step.
+    """
+
+    def __init__(self, mean, cov, lower, upper):
+        self.mean = mean
+        self._sigma = np.sqrt(np.diag(cov))
+        self._ndim = len(mean)
+        # Standardised bounds for truncnorm: a = (lo - μ)/σ, b = (hi - μ)/σ
+        self._a = (lower - mean) / self._sigma
+        self._b = (upper - mean) / self._sigma
+        self._dists = [
+            truncnorm(a=self._a[i], b=self._b[i],
+                      loc=mean[i], scale=self._sigma[i])
+            for i in range(self._ndim)
+        ]
+
+    def sample(self, n):
+        return np.column_stack([
+            d.rvs(n, random_state=random.rng) for d in self._dists
+        ])
+
+    def logpdf(self, x):
+        x = np.atleast_2d(x)
+        return np.sum(
+            [d.logpdf(x[:, i]) for i, d in enumerate(self._dists)],
+            axis=0,
+        )
 
 
 class GaussianFlow:
@@ -93,7 +152,7 @@ class Laplace(Sampler):
 
     Estimates the maximum likelihood with scipy optimisation, computes the
     inverse Fisher Information Matrix (iFIM) as a Gaussian proposal covariance,
-    then draws posterior samples via rejection or importance resampling.
+    then draws posterior samples via a resample method (if requested).
 
     Parameters
     ----------
@@ -102,13 +161,13 @@ class Laplace(Sampler):
     outdir : str
     label : str
     resample : str or None
-        Resampling method: ``'rejection'`` (default), ``'importance'``, or
-        ``None`` / ``'None'`` to skip resampling entirely and return raw
+        Resampling method: ``'rejection'`` (default), ``'importance'``, ``'smc'``, or ``None`` / ``'None'`` to skip resampling entirely and return raw
         Laplace-approximation samples.
     target_nsamples : int
         Target number of posterior samples.
     batch_nsamples : int
-        Samples drawn per batch from the proposal distribution.
+        For methods that draw samples in batches, this specifies the number of
+        samples drawn per batch from the proposal distribution.
     prior_nsamples : int
         Number of prior draws used in the maximum-likelihood search.
     minimization_method : str
@@ -244,6 +303,21 @@ class Laplace(Sampler):
         )
         logger.info(msg)
 
+        if self.kwargs["plot_diagnostic"]:
+            self.create_proposal_diagnostic(mean, cov)
+
+        # Build the proposal distribution.  For rejection and importance
+        # sampling we use a truncated Gaussian (per-marginal independent
+        # truncated normals) so that every draw lands within the prior support.
+        # This eliminates wasted likelihood evaluations on out-of-bounds
+        # samples and is especially important when the iFIM-derived sigma is
+        # much larger than the prior width.
+        proposal = TruncatedMVNProposal(
+            mean, cov,
+            lower=fisher_mpe.prior_bounds_min,
+            upper=fisher_mpe.prior_bounds_max,
+        )
+
         # Laplace evidence (always available)
         log_evidence_laplace = fisher_mpe.log_evidence_laplace(
             maxL_sample_dict, iFIM
@@ -252,177 +326,29 @@ class Laplace(Sampler):
         log_evidence_err = np.nan
 
         target_nsamples = self.kwargs["target_nsamples"]
-        batch_nsamples = self.kwargs["batch_nsamples"]
         resample = self.kwargs["resample"]
         if resample == "None":
             resample = None
 
         if resample is None:
-            logger.info(
-                f"Drawing {target_nsamples} samples from "
-                f"Gaussian approximation (no resampling)"
+            samples, logl, g_samples, efficiency = self._sample_laplace(
+                mean, cov, fisher_mpe, target_nsamples
             )
-            samples_array = random.rng.multivariate_normal(mean, cov, target_nsamples)
-            samples = pd.DataFrame(samples_array, columns=fisher_mpe.parameter_names)
-            logl = np.full(target_nsamples, np.nan)
-            g_samples = samples
-            efficiency = 100.0
         elif resample == "smc":
-            n_modes = self.kwargs["n_modes"]
-            if n_modes > 1:
-                map_estimates = self._find_multiple_maps(
-                    fisher_mpe, n_modes, cov_scaling
-                )
-                proposal_flow = GaussianMixtureFlow(
-                    [m for m, _ in map_estimates],
-                    [c for _, c in map_estimates],
-                )
-            else:
-                proposal_flow = GaussianFlow(mean, cov)
-            samples, logl, smc_log_z, smc_log_z_err = (
-                self._smc_sample(proposal_flow, fisher_mpe)
+            samples, logl, g_samples, efficiency, smc_log_z, smc_log_z_err = (
+                self._run_smc(mean, cov, fisher_mpe, cov_scaling)
             )
             if smc_log_z is not None:
                 log_evidence = float(smc_log_z)
                 log_evidence_err = float(smc_log_z_err)
-            g_samples = samples
-            efficiency = 100.0
-            if self.kwargs["plot_diagnostic"]:
-                self.create_smc_diagnostic(samples, proposal_flow)
+        elif resample == "rejection":
+            samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = (
+                self._run_rejection_sampling(proposal, fisher_mpe, maxL_sample_dict)
+            )
         else:
-            nsamples = 0
-            all_g_samples = []
-            all_samples = []
-            all_logl = []
-            all_weights = []
-            all_ln_weights_raw = []
-            efficiency = 0.0
-
-            logger.info(
-                f"Drawing {target_nsamples} samples using "
-                f"{resample} resampling "
-                f"(batch size {batch_nsamples})"
+            samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = (
+                self._run_importance_sampling(proposal, fisher_mpe, maxL_sample_dict)
             )
-            pbar = tqdm.tqdm(
-                total=target_nsamples,
-                desc=f"{resample.capitalize()} sampling",
-                file=sys.stdout,
-                initial=0,
-            )
-
-            _resample_methods = dict(
-                rejection=self._rejection_sample,
-                importance=self._importance_sample,
-            )
-
-            while nsamples < target_nsamples:
-                g_samples, g_logl, g_logpi, discard_inef = (
-                    self._draw_samples_from_generating_distribution(
-                        mean, cov, fisher_mpe, batch_nsamples
-                    )
-                )
-
-                if resample in _resample_methods:
-                    weights, ln_w_raw = (
-                        self._calculate_weights(
-                            g_samples, g_logl,
-                            g_logpi, mean, cov,
-                        )
-                    )
-                    samples, logl = (
-                        _resample_methods[resample](
-                            g_samples, g_logl, weights
-                        )
-                    )
-                    efficiency = (
-                        100.0 * len(samples) / len(g_samples)
-                    )
-                else:
-                    logger.info("No resampling applied")
-                    samples = g_samples
-                    logl = g_logl
-                    weights = np.ones_like(g_logl)
-                    ln_w_raw = np.zeros_like(g_logl)
-                    efficiency = 100.0
-
-                nsamples += len(samples)
-                pbar.set_postfix(
-                    {
-                        "acceptance": f"{efficiency:.1f}%",
-                        "out-of-prior": f"{discard_inef:.1f}%",
-                    },
-                    refresh=False,
-                )
-                if len(samples) > 0:
-                    pbar.update(len(samples))
-                    all_g_samples.append(g_samples)
-                    all_samples.append(samples)
-                    all_logl.append(logl)
-                    all_weights.append(weights)
-                    all_ln_weights_raw.append(ln_w_raw)
-                else:
-                    pbar.update(0)
-
-            pbar.close()
-
-            g_samples = pd.concat(
-                all_g_samples, ignore_index=True
-            )
-            samples = pd.concat(
-                all_samples, ignore_index=True
-            )
-            logl = np.concatenate(all_logl)
-            weights = np.concatenate(all_weights)
-            ln_weights_raw = np.concatenate(
-                all_ln_weights_raw
-            )
-            efficiency = (
-                100.0 * len(samples) / len(g_samples)
-            )
-
-            # IS evidence: Z = <w> = (1/N) sum(w_i)
-            # In log space: log Z = logsumexp(ln_w) - log(N)
-            finite = np.isfinite(ln_weights_raw)
-            if np.any(finite):
-                n_total = len(ln_weights_raw)
-                log_z_is = (
-                    logsumexp(ln_weights_raw[finite])
-                    - np.log(n_total)
-                )
-                # Variance via delta method on log weights
-                ln_w_f = ln_weights_raw[finite]
-                log_z2 = (
-                    logsumexp(2 * ln_w_f)
-                    - 2 * np.log(n_total)
-                )
-                # var(Z)/Z^2 => sigma(log Z)
-                var_ratio = np.exp(log_z2 - 2 * log_z_is)
-                var_ratio -= 1.0 / n_total
-                if var_ratio > 0:
-                    log_evidence_err = np.sqrt(
-                        var_ratio
-                    )
-                else:
-                    log_evidence_err = 0.0
-                log_evidence = log_z_is
-                logger.info(
-                    f"IS log-evidence: "
-                    f"{log_z_is:.2f} +/- "
-                    f"{log_evidence_err:.2f}"
-                )
-
-            logger.info(
-                f"Sampling complete: {len(samples)} "
-                f"samples accepted from "
-                f"{len(g_samples)} proposals "
-                f"({efficiency:.1f}% acceptance rate)"
-            )
-
-            if self.kwargs["plot_diagnostic"]:
-                self.create_resample_diagnostic(
-                    samples, g_samples, mean,
-                    weights, method=resample,
-                )
 
         end_time = datetime.datetime.now()
         self.sampling_time = end_time - self.start_time
@@ -466,134 +392,295 @@ class Laplace(Sampler):
         )
         self.result.meta_data["run_statistics"] = run_stats
 
-    def _draw_samples_from_generating_distribution(
-        self, mean, cov, fisher_mpe, nsamples
-    ):
-        samples_array = random.rng.multivariate_normal(mean, cov, nsamples)
+    def _sample_laplace(self, mean, cov, fisher_mpe, target_nsamples):
+        """Draw samples directly from the Gaussian approximation without resampling."""
+        logger.info(
+            f"Drawing {target_nsamples} samples from "
+            f"Gaussian approximation (no resampling)"
+        )
+        samples_array = random.rng.multivariate_normal(mean, cov, target_nsamples)
         samples = pd.DataFrame(samples_array, columns=fisher_mpe.parameter_names)
+        logl = np.full(target_nsamples, np.nan)
+        return samples, logl, samples, 100.0
 
-        logpi = self.priors.ln_prob(samples, axis=0)
-        logl = np.full(len(samples), -np.inf)
+    def _run_smc(self, mean, cov, fisher_mpe, cov_scaling):
+        """Build the Laplace proposal flow and run SMC sampling.
 
-        in_prior = ~np.isinf(logpi)
-        outside_prior_count = int(np.sum(~in_prior))
-        discard_inef = 100.0 * outside_prior_count / len(samples)
-
-        if outside_prior_count < len(samples):
-            logl[in_prior] = fisher_mpe.log_likelihood_from_array(
-                samples.values[in_prior].T
+        Handles multi-mode discovery when ``n_modes > 1``, then delegates to
+        ``_smc_sample``.  Returns ``(samples, logl, g_samples, efficiency,
+        smc_log_z, smc_log_z_err)`` where ``smc_log_z`` is ``None`` if the
+        aspire result did not carry a log-evidence attribute.
+        """
+        n_modes = self.kwargs["n_modes"]
+        if n_modes > 1:
+            map_estimates = self._find_multiple_maps(fisher_mpe, n_modes, cov_scaling)
+            proposal_flow = GaussianMixtureFlow(
+                [m for m, _ in map_estimates],
+                [c for _, c in map_estimates],
             )
+        else:
+            proposal_flow = GaussianFlow(mean, cov)
+
+        samples, logl, smc_log_z, smc_log_z_err = self._smc_sample(
+            proposal_flow, fisher_mpe
+        )
+
+        if self.kwargs["plot_diagnostic"]:
+            self.create_smc_diagnostic(samples, proposal_flow)
+
+        return samples, logl, samples, 100.0, smc_log_z, smc_log_z_err
+
+    def _compute_ln_ratios(self, x, g_df, proposal, fisher_mpe):
+        """Compute log[L(x)π(x)/g(x)] for a batch of proposal samples.
+
+        Returns ``(ln_r, logl)`` arrays of length ``len(g_df)``.
+        Samples outside the prior get ``ln_r = -inf``.
+        """
+        logpi = np.real(np.array(self.priors.ln_prob(g_df, axis=0)))
+        in_prior = ~np.isinf(logpi)
+        logl = np.full(len(g_df), -np.inf)
+        if in_prior.any():
+            logl[in_prior] = fisher_mpe.log_likelihood_from_array(x[in_prior].T)
         else:
             msg = "All proposal samples fell outside the prior"
             if self.kwargs["fail_on_error"]:
                 raise SamplerError(msg)
-            else:
-                logger.debug(msg)
+            logger.debug(msg)
+        log_g = proposal.logpdf(x)
+        ln_r = logl + logpi - log_g
+        return ln_r, logl
 
-        logpi = np.real(np.array(logpi))
-        return samples, logl, logpi, discard_inef
+    def _run_rejection_sampling(self, proposal, fisher_mpe, maxL_sample_dict):
+        """Draw samples from the proposal using rejection sampling.
 
-    def _calculate_weights(self, g_samples, g_logl, g_logpi, mean, cov):
-        g_logl_norm = multivariate_normal.logpdf(
-            g_samples, mean=mean, cov=cov
+        The acceptance probability for a proposal θ is L(θ)π(θ) / (M·g(θ)),
+        where M is an upper bound on L(θ)π(θ)/g(θ).  The bound is established
+        by a pre-scan batch before any samples are accepted, so that a
+        mid-run bound update (which would invalidate earlier acceptances)
+        cannot occur.
+
+        Returns ``(samples, logl, g_samples, efficiency, log_evidence, log_evidence_err)``.
+        """
+        target_nsamples = self.kwargs["target_nsamples"]
+        batch_nsamples = self.kwargs["batch_nsamples"]
+        mean = proposal.mean
+
+        # --- Establish the rejection bound ln_M ---
+        # Start from the analytic value at the MAP.
+        ln_M = (
+            float(fisher_mpe.log_likelihood_from_array(mean))
+            + sum(
+                np.log(max(self.priors[k].prob(float(maxL_sample_dict[k])), 1e-300))
+                for k in fisher_mpe.parameter_names
+            )
+            - float(proposal.logpdf(mean.reshape(1, -1))[0])
         )
 
-        ln_weights_raw = g_logl + g_logpi - g_logl_norm
+        # Pre-scan: draw a calibration batch to find the empirical maximum of
+        # L(x)π(x)/g(x).  These samples are discarded (not accepted/rejected)
+        # so the bound is fixed before the main loop begins.
+        x_cal = proposal.sample(batch_nsamples)
+        g_cal = pd.DataFrame(x_cal, columns=fisher_mpe.parameter_names)
+        ln_r_cal, _ = self._compute_ln_ratios(x_cal, g_cal, proposal, fisher_mpe)
+        finite_cal = np.isfinite(ln_r_cal)
+        if finite_cal.any():
+            empirical_max = float(np.max(ln_r_cal[finite_cal]))
+            if empirical_max > ln_M:
+                logger.info(
+                    f"Pre-scan raised rejection bound "
+                    f"{ln_M:.2f} → {empirical_max:.2f}"
+                )
+                ln_M = empirical_max
 
-        # Remove impossible samples for ESS calculation
-        finite_mask = np.isfinite(ln_weights_raw)
-        ln_weights_viable = ln_weights_raw[finite_mask]
-
-        # Scale so max weight is 1 (avoids overflow in exp)
-        ln_weights = ln_weights_raw.copy()
-        if len(ln_weights_viable) > 0:
-            ln_weights -= np.max(ln_weights_viable)
-
-        self.ess = int(np.floor(np.exp(
-            kish_log_effective_sample_size(ln_weights_viable)
-        )))
-        logger.debug(
-            f"Effective sample size: {self.ess} "
-            f"out of {len(g_samples)} proposals"
+        logger.info(
+            f"Drawing {target_nsamples} samples using rejection sampling "
+            f"(batch size {batch_nsamples}, ln_M = {ln_M:.2f})"
         )
 
-        return np.exp(ln_weights), ln_weights_raw
+        # --- Main rejection loop ---
+        all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
+        n_accepted = n_proposed = 0
+        n_bound_violations = 0
 
-    def _rejection_sample(self, g_samples, g_logl, weights):
-        logger.debug(f"Rejection resampling {len(g_samples)} proposals")
+        pbar = tqdm.tqdm(
+            total=target_nsamples, desc="Rejection sampling", file=sys.stdout
+        )
 
-        w_max = np.max(weights)
-        uniform = random.rng.uniform(0, w_max, len(g_samples))
-        accepted = uniform < weights
+        while n_accepted < target_nsamples:
+            x = proposal.sample(batch_nsamples)
+            g_df = pd.DataFrame(x, columns=fisher_mpe.parameter_names)
+            ln_r, logl = self._compute_ln_ratios(x, g_df, proposal, fisher_mpe)
+            finite = np.isfinite(ln_r)
 
-        samples = g_samples[accepted].reset_index(drop=True)
-        logl = g_logl[accepted]
+            # Count samples that exceed the bound (accepted with prob 1,
+            # which may introduce minor bias).
+            if finite.any():
+                n_over = int(np.sum(ln_r[finite] > ln_M))
+                n_bound_violations += n_over
 
-        if len(samples) < self.ndim:
-            msg = (
-                f"Only {len(samples)} samples accepted "
-                f"(fewer than {self.ndim} parameters)"
-            )
-            if self.kwargs["fail_on_error"]:
-                raise SamplerError(msg)
-            else:
-                logger.debug(msg)
+            # Accept if log(U) < ln_r - ln_M  ⟺  U < L(x)π(x) / (M·g(x))
+            log_u = np.log(random.rng.uniform(size=batch_nsamples))
+            accepted = finite & (log_u < ln_r - ln_M)
 
-        return samples, logl
+            n_proposed += batch_nsamples
+            n_accepted += int(accepted.sum())
+            efficiency = 100.0 * n_accepted / n_proposed
+            pbar.set_postfix({"acceptance": f"{efficiency:.1f}%"}, refresh=False)
+            pbar.update(int(accepted.sum()))
 
-    def _importance_sample(self, g_samples, g_logl, weights):
-        logger.debug(f"Importance resampling {len(g_samples)} proposals")
+            all_samples.append(g_df[accepted].reset_index(drop=True))
+            all_logl.append(logl[accepted])
+            all_g_samples.append(g_df)
+            all_ln_r.append(ln_r)
 
-        weight_sum = np.sum(weights)
-        if weight_sum == 0 or not np.isfinite(weight_sum):
-            msg = "All importance weights are zero or non-finite"
-            if self.kwargs["fail_on_error"]:
-                raise SamplerError(msg)
-            else:
-                logger.debug(msg)
-            return g_samples.iloc[:0].reset_index(drop=True), g_logl[:0]
+        pbar.close()
 
-        normalized_weights = weights / weight_sum
-        if self.ess < self.ndim:
-            msg = (
-                f"Effective sample size ({self.ess}) is "
-                f"fewer than the number of parameters "
-                f"({self.ndim})"
-            )
-            if self.kwargs["fail_on_error"]:
-                raise SamplerError(msg)
-            else:
-                logger.debug(msg)
-
-        if self.ess > len(g_samples):
+        if n_bound_violations > 0:
             logger.warning(
-                f"Effective sample size ({self.ess}) exceeds "
-                f"batch size ({len(g_samples)}); clamping"
-            )
-            n_draw = len(g_samples)
-        else:
-            n_draw = self.ess
-
-        target = self.kwargs["target_nsamples"]
-        if n_draw < target and not getattr(
-            self, "_importance_ess_warned", False
-        ):
-            self._importance_ess_warned = True
-            logger.warning(
-                f"Only {n_draw} effective samples per batch "
-                f"(target is {target}). The final samples "
-                f"will contain duplicates from repeated "
-                f"draws. Consider increasing batch_nsamples "
-                f"or cov_scaling to improve the proposal."
+                f"{n_bound_violations} of {n_proposed} proposal samples "
+                f"({100.0 * n_bound_violations / n_proposed:.1f}%) exceeded "
+                f"the rejection bound and were accepted with probability 1. "
+                f"The posterior may be slightly biased — consider increasing "
+                f"cov_scaling to widen the proposal."
             )
 
-        idxs = random.rng.choice(
-            len(g_samples), size=n_draw, p=normalized_weights
+        samples = pd.concat(all_samples, ignore_index=True)
+        logl = np.concatenate(all_logl)
+        g_samples = pd.concat(all_g_samples, ignore_index=True)
+        ln_r_all = np.concatenate(all_ln_r)
+        efficiency = 100.0 * len(samples) / len(g_samples)
+
+        log_evidence, log_evidence_err = self._compute_is_evidence(ln_r_all)
+
+        logger.info(
+            f"Rejection sampling complete: {len(samples)} accepted from "
+            f"{len(g_samples)} proposals ({efficiency:.1f}%)"
         )
-        samples = g_samples.iloc[idxs].reset_index(drop=True)
-        logl = g_logl[idxs]
 
-        return samples, logl
+        if self.kwargs["plot_diagnostic"]:
+            weights = np.exp(ln_r_all - ln_M)
+            self.create_resample_diagnostic(
+                samples, g_samples, mean, weights, method="rejection"
+            )
+
+        return samples, logl, g_samples, efficiency, log_evidence, log_evidence_err
+
+    def _run_importance_sampling(self, proposal, fisher_mpe, maxL_sample_dict):
+        """Draw samples from the proposal using importance resampling.
+
+        Accumulates batches until ``target_nsamples`` are collected by
+        resampling proportionally to the IS weights L(θ)π(θ)/g(θ).
+
+        Returns ``(samples, logl, g_samples, efficiency, log_evidence, log_evidence_err)``.
+        """
+        target_nsamples = self.kwargs["target_nsamples"]
+        batch_nsamples = self.kwargs["batch_nsamples"]
+        mean = proposal.mean
+
+        all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
+        n_accepted = n_proposed = 0
+
+        logger.info(
+            f"Drawing {target_nsamples} samples using importance resampling "
+            f"(batch size {batch_nsamples})"
+        )
+        pbar = tqdm.tqdm(
+            total=target_nsamples, desc="Importance sampling", file=sys.stdout
+        )
+
+        while n_accepted < target_nsamples:
+            x = proposal.sample(batch_nsamples)
+            g_df = pd.DataFrame(x, columns=fisher_mpe.parameter_names)
+
+            logpi = np.real(np.array(self.priors.ln_prob(g_df, axis=0)))
+            in_prior = ~np.isinf(logpi)
+            logl = np.full(batch_nsamples, -np.inf)
+            if in_prior.any():
+                logl[in_prior] = fisher_mpe.log_likelihood_from_array(x[in_prior].T)
+            else:
+                msg = "All proposal samples fell outside the prior"
+                if self.kwargs["fail_on_error"]:
+                    raise SamplerError(msg)
+                logger.debug(msg)
+
+            log_g = proposal.logpdf(x)
+            ln_r = logl + logpi - log_g
+
+            finite = np.isfinite(ln_r)
+            if not finite.any():
+                continue
+
+            # Normalised weights for this batch
+            ln_r_finite = ln_r[finite]
+            ln_w = ln_r_finite - np.max(ln_r_finite)
+            w = np.exp(ln_w)
+            w /= w.sum()
+
+            ess = int(np.floor(np.exp(kish_log_effective_sample_size(ln_r_finite))))
+            n_draw = min(ess, len(g_df))
+
+            if n_draw == 0:
+                pbar.update(0)
+                continue
+
+            finite_idx = np.where(finite)[0]
+            chosen = random.rng.choice(len(finite_idx), size=n_draw, p=w)
+            idx = finite_idx[chosen]
+
+            n_proposed += batch_nsamples
+            n_accepted += n_draw
+            efficiency = 100.0 * n_accepted / n_proposed
+            pbar.set_postfix({"acceptance": f"{efficiency:.1f}%"}, refresh=False)
+            pbar.update(n_draw)
+
+            all_samples.append(g_df.iloc[idx].reset_index(drop=True))
+            all_logl.append(logl[idx])
+            all_g_samples.append(g_df)
+            all_ln_r.append(ln_r)
+
+        pbar.close()
+
+        samples = pd.concat(all_samples, ignore_index=True)
+        logl = np.concatenate(all_logl)
+        g_samples = pd.concat(all_g_samples, ignore_index=True)
+        ln_r_all = np.concatenate(all_ln_r)
+        efficiency = 100.0 * len(samples) / len(g_samples)
+
+        log_evidence, log_evidence_err = self._compute_is_evidence(ln_r_all)
+
+        logger.info(
+            f"Importance sampling complete: {len(samples)} drawn from "
+            f"{len(g_samples)} proposals ({efficiency:.1f}% effective)"
+        )
+
+        if self.kwargs["plot_diagnostic"]:
+            ln_r_shifted = ln_r_all - np.nanmax(ln_r_all)
+            weights = np.where(np.isfinite(ln_r_shifted), np.exp(ln_r_shifted), 0.0)
+            self.create_resample_diagnostic(
+                samples, g_samples, proposal.mean, weights, method="importance"
+            )
+
+        return samples, logl, g_samples, efficiency, log_evidence, log_evidence_err
+
+    def _compute_is_evidence(self, ln_r):
+        """Estimate log Z and its uncertainty from raw IS log-weights.
+
+        Uses ``log Z = logsumexp(ln_r) - log(N)`` with a delta-method variance.
+        Returns ``(log_evidence, log_evidence_err)``.
+        """
+        finite = np.isfinite(ln_r)
+        if not np.any(finite):
+            return np.nan, np.nan
+
+        ln_w = ln_r[finite]
+        n_total = len(ln_r)
+        log_z = logsumexp(ln_w) - np.log(n_total)
+        log_z2 = logsumexp(2 * ln_w) - 2 * np.log(n_total)
+        var_ratio = np.exp(log_z2 - 2 * log_z) - 1.0 / n_total
+        log_z_err = np.sqrt(var_ratio) if var_ratio > 0 else 0.0
+
+        logger.info(f"IS log-evidence: {log_z:.2f} +/- {log_z_err:.2f}")
+        return log_z, log_z_err
 
     def _smc_sample(self, proposal_flow, fisher_mpe):
         """Run posterior sampling via aspire, starting from the Laplace proposal.
@@ -725,6 +812,15 @@ class Laplace(Sampler):
         if any_inflated:
             cov = eigvecs @ np.diag(eigvals) @ eigvecs.T
             cov = 0.5 * (cov + cov.T)
+
+        # Guarantee strict positive definiteness for scipy's _PSD check.
+        # scipy.stats.multivariate_normal (allow_singular=False) requires all
+        # eigenvalues to exceed eps = 1e6 * machine_eps * max_eigval ≈ 2.22e-10 * max.
+        # Use 1e-9 * max as the floor to stay comfortably above that threshold.
+        eigvals_out = np.linalg.eigvalsh(cov)
+        min_floor = max(1e-9 * eigvals_out.max(), 1e-30)
+        if eigvals_out.min() < min_floor:
+            cov = cov + (min_floor - eigvals_out.min()) * np.eye(len(cov))
 
         return cov
 
@@ -920,6 +1016,114 @@ class Laplace(Sampler):
             f"  {header}\n" + "\n".join(rows)
         )
 
+    def create_proposal_diagnostic(self, mean, cov):
+        """Corner plot comparing the Gaussian proposal against the prior.
+
+        The prior is shown via Monte Carlo samples.  The Gaussian proposal is
+        drawn entirely analytically — 1-D ``norm.pdf`` on the diagonal panels
+        and 2-D contour ellipses on the off-diagonal panels — so the plot works
+        correctly even when the proposal is much wider than the prior.
+        """
+        import corner
+        import matplotlib.pyplot as plt
+        import matplotlib.lines as mpllines
+        from scipy.stats import norm
+
+        parameter_names = self.search_parameter_keys
+        labels = [k.replace("_", " ") for k in parameter_names]
+        ndim = len(parameter_names)
+        n_samples = 5000
+
+        proposal_sigmas = np.sqrt(np.diag(cov))
+
+        prior_samples = np.column_stack([
+            self.priors[k].sample(n_samples) for k in parameter_names
+        ])
+
+        ranges = [
+            (self.priors[k].minimum, self.priors[k].maximum)
+            for k in parameter_names
+        ]
+
+        p_color, p_ls = "C0", "-"
+        g_color, g_ls = "k", "--"
+
+        # Prior samples only go into corner; the proposal is drawn analytically
+        # below so that it is always visible regardless of its width.
+        fig = corner.corner(
+            prior_samples,
+            color=p_color,
+            contour_kwargs={"linestyles": p_ls, "alpha": 0.8},
+            hist_kwargs={"density": True, "ls": p_ls, "alpha": 0.8},
+            no_fill_contours=True,
+            plot_density=False,
+            plot_datapoints=False,
+            fill_contours=False,
+            levels=(1 - np.exp(-0.5), 1 - np.exp(-2)),
+            bins=50,
+            smooth=0.7,
+            max_n_ticks=5,
+            labels=labels,
+            truths=mean,
+            truth_color="C3",
+            range=ranges,
+        )
+
+        axes_grid = np.array(fig.get_axes()).reshape(ndim, ndim)
+
+        # 1-D analytic Gaussian marginals on diagonal panels
+        for i in range(ndim):
+            ax = axes_grid[i, i]
+            lo, hi = ranges[i]
+            xs = np.linspace(lo, hi, 300)
+            ax.plot(xs, norm.pdf(xs, loc=mean[i], scale=proposal_sigmas[i]),
+                    color=g_color, lw=1.5, ls=g_ls)
+
+        # 2-D analytic Gaussian contours on off-diagonal panels.
+        # Contour levels exp(-0.5) and exp(-2) relative to the peak match the
+        # 1-sigma and 2-sigma enclosed-mass fractions for a 2-D Gaussian.
+        for row in range(ndim):
+            for col in range(row):
+                ax = axes_grid[row, col]
+                x_lo, x_hi = ranges[col]
+                y_lo, y_hi = ranges[row]
+                xs = np.linspace(x_lo, x_hi, 60)
+                ys = np.linspace(y_lo, y_hi, 60)
+                X, Y = np.meshgrid(xs, ys)
+                pos = np.dstack([X, Y])
+                sub_mean = mean[[col, row]]
+                sub_cov = cov[np.ix_([col, row], [col, row])]
+                try:
+                    Z = multivariate_normal(mean=sub_mean, cov=sub_cov).pdf(pos)
+                    Z_max = Z.max()
+                    if Z_max > 0:
+                        ax.contour(
+                            X, Y, Z,
+                            levels=[Z_max * np.exp(-2), Z_max * np.exp(-0.5)],
+                            colors=g_color,
+                            linestyles=[g_ls],
+                            alpha=0.8,
+                        )
+                except Exception:
+                    pass
+
+        legend_handles = [
+            mpllines.Line2D([0], [0], color=p_color, linestyle=p_ls),
+            mpllines.Line2D([0], [0], color=g_color, linestyle=g_ls),
+            mpllines.Line2D([0], [0], color="C3", linestyle=":", marker="+",
+                            markersize=8, linewidth=1.5),
+        ]
+        axes_grid[0, 0].legend(
+            legend_handles, ["Prior", "Gaussian proposal", "MAP"],
+            fontsize="small",
+        )
+        fig.suptitle("Gaussian proposal vs prior")
+
+        filename = f"{self.outdir}/{self.label}_diagnostic-proposal.png"
+        safe_save_figure(fig=fig, filename=filename, dpi=150)
+        plt.close(fig)
+        return fig
+
     def create_resample_diagnostic(self, samples, raw_samples, mean, weights, method):
         """Produce a corner plot comparing the proposal and resampled posteriors."""
         import corner
@@ -996,7 +1200,7 @@ class Laplace(Sampler):
         axes[0].legend(lines, labels)
         fig.suptitle(f"Resampling method: {method}")
 
-        filename = f"{self.outdir}/{self.label}_smc_diagnostic-resample_{method}.png"
+        filename = f"{self.outdir}/{self.label}_diagnostic-resample_{method}.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
         return fig
