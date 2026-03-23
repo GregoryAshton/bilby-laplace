@@ -150,8 +150,8 @@ def kish_log_effective_sample_size(ln_weights):
 class Laplace(Sampler):
     """Bilby sampler implementing the Laplace approximation.
 
-    Estimates the maximum likelihood with scipy optimisation, computes the
-    inverse Fisher Information Matrix (iFIM) as a Gaussian proposal covariance,
+    Finds the MAP (maximum a posteriori) with scipy optimisation, computes the
+    inverse Hessian of the log-posterior as a Gaussian proposal covariance,
     then draws posterior samples via a resample method (if requested).
 
     Parameters
@@ -169,7 +169,7 @@ class Laplace(Sampler):
         For methods that draw samples in batches, this specifies the number of
         samples drawn per batch from the proposal distribution.
     prior_nsamples : int
-        Number of prior draws used in the maximum-likelihood search.
+        Number of prior draws used in the MAP search (multi-start mode).
     minimization_method : str
         Optimization method. Default is ``'differential_evolution'`` (global
         optimizer; recommended for real data). Set to ``'Nelder-Mead'`` to use
@@ -182,7 +182,7 @@ class Laplace(Sampler):
         Multiplicative scale applied to the iFIM covariance.
     use_injection_for_map : bool
         If True and injection_parameters are set, use them as the starting
-        point for the max-likelihood search.
+        point for the MAP search.
     fail_on_error : bool
         If True, raise SamplerError when sampling fails; otherwise just log.
     n_modes : int
@@ -408,8 +408,8 @@ class Laplace(Sampler):
 
         Handles multi-mode discovery when ``n_modes > 1``, then delegates to
         ``_smc_sample``.  Returns ``(samples, logl, g_samples, efficiency,
-        smc_log_z, smc_log_z_err)`` where ``smc_log_z`` is ``None`` if the
-        aspire result did not carry a log-evidence attribute.
+        smc_log_z, smc_log_z_err, nlikelihood)`` where ``smc_log_z`` is
+        ``None`` if the aspire result did not carry a log-evidence attribute.
         """
         n_modes = self.kwargs["n_modes"]
         if n_modes > 1:
@@ -866,7 +866,7 @@ class Laplace(Sampler):
         by 3-sigma separation, and has its covariance validated.
 
         Returns a list of ``(mean_array, cov_array)`` pairs sorted by
-        descending log-likelihood.
+        descending log-posterior.
         """
         parameter_names = fisher_mpe.parameter_names
         logger.info(
@@ -876,14 +876,14 @@ class Laplace(Sampler):
 
         # --- 1. Find primary mode with DE ---
         result = (
-            fisher_mpe._maximize_likelihood_differential_evolution()
+            fisher_mpe._maximize_posterior_differential_evolution()
         )
         best_mean = np.array(result.x)
-        best_logl = -result.fun
+        best_logp = -result.fun
         best_dict = dict(zip(parameter_names, best_mean))
         logger.info(
             f"Primary mode found: "
-            f"log-likelihood = {best_logl:.2f}"
+            f"log-posterior = {best_logp:.2f}"
         )
 
         try:
@@ -898,7 +898,7 @@ class Laplace(Sampler):
                 f"iFIM failed for primary mode: {exc}"
             )
 
-        found_modes = [(best_mean, cov, best_logl)]
+        found_modes = [(best_mean, cov, best_logp)]
 
         if n_modes <= 1:
             self._log_mode_summary(found_modes, parameter_names)
@@ -916,13 +916,13 @@ class Laplace(Sampler):
         prior_x = self._latin_hypercube_prior(
             parameter_names, n_starts
         )
-        prior_logl = np.array([
-            float(fisher_mpe.log_likelihood_from_array(x))
+        prior_logp = np.array([
+            float(fisher_mpe.log_posterior_from_array(x))
             for x in prior_x
         ])
 
-        # Sort descending by likelihood
-        order = np.argsort(prior_logl)[::-1]
+        # Sort descending by posterior
+        order = np.argsort(prior_logp)[::-1]
 
         # Polish top candidates far from existing modes
         max_polish = 10 * n_modes
@@ -949,15 +949,15 @@ class Laplace(Sampler):
             sample_dict = dict(zip(parameter_names, x))
             polished = (
                 fisher_mpe
-                ._maximize_likelihood_from_initial_sample(
+                ._maximize_posterior_from_initial_sample(
                     sample_dict
                 )
             )
             p_mean = np.array(polished.x)
-            p_logl = -polished.fun
+            p_logp = -polished.fun
             logger.debug(
                 f"Candidate {n_polished}: "
-                f"log-likelihood = {p_logl:.2f} "
+                f"log-posterior = {p_logp:.2f} "
                 f"after local optimisation"
             )
 
@@ -980,10 +980,10 @@ class Laplace(Sampler):
                 p_cov = self._validate_covariance(
                     fisher_mpe, p_mean, p_cov
                 )
-                found_modes.append((p_mean, p_cov, p_logl))
+                found_modes.append((p_mean, p_cov, p_logp))
                 logger.info(
                     f"Secondary mode {len(found_modes) - 1} "
-                    f"found: log-likelihood = {p_logl:.2f}"
+                    f"found: log-posterior = {p_logp:.2f}"
                 )
             except Exception as exc:
                 logger.warning(
@@ -1000,16 +1000,16 @@ class Laplace(Sampler):
     def _log_mode_summary(found_modes, parameter_names):
         """Log a table summarising the discovered modes."""
         header = (
-            f"{'Mode':<6} {'log-likelihood':>14}  "
+            f"{'Mode':<6} {'log-posterior':>14}  "
             + "  ".join(f"{p:>12}" for p in parameter_names)
         )
         rows = []
-        for i, (mean, _cov, logl) in enumerate(found_modes):
+        for i, (mean, _cov, logp) in enumerate(found_modes):
             vals = "  ".join(
                 f"{v:>+12.4f}" for v in mean
             )
             rows.append(
-                f"  {i:<4d} {logl:>14.2f}  {vals}"
+                f"  {i:<4d} {logp:>14.2f}  {vals}"
             )
         logger.info(
             f"Summary of {len(found_modes)} mode(s):\n"

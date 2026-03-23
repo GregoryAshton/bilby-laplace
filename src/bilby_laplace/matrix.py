@@ -26,28 +26,33 @@ class FisherMatrixPosteriorEstimator:
         n_prior_samples=100,
         use_unit_cube=True,
     ):
-        """A class to estimate posteriors using a Fisher Information Matrix approach
+        """Estimate posteriors using the Laplace approximation.
+
+        Finds the MAP (maximum a posteriori) estimate, computes the Hessian of
+        the log-posterior at the MAP, and uses its inverse as a Gaussian
+        approximation to the posterior covariance.
 
         Parameters
         ----------
         likelihood: bilby.core.likelihood.Likelihood
-            A bilby likelihood object
+            A bilby likelihood object.
         priors: bilby.core.prior.PriorDict
-            A bilby prior object
+            A bilby prior object.
         parameters: list
-            Names of parameters to sample in
-        minimization_method: str (Nelder-Mead)
-            The method to use in scipy.optimize.minimize
+            Names of parameters to sample in.
+        minimization_method: str
+            The method to use in scipy.optimize.minimize for MAP finding.
+            Default is ``'Nelder-Mead'``.
         fd_eps: float
             A parameter to control the size of perturbation used when finite
-            differencing the likelihood
+            differencing the log-posterior.
         n_prior_samples: int
-            The number of prior samples to draw and use to attempt estimation
-            of the maximum likelihood sample.
+            The number of prior samples to draw and use as starting points
+            for the MAP search (multi-start mode).
         use_unit_cube: bool
-            If True (default), compute the FIM in unit-cube space via the prior
-            CDFs. This avoids boundary clipping when the MAP is near a prior
-            edge, giving unbiased curvature estimates.
+            If True (default), compute the Hessian in unit-cube space via the
+            prior CDFs. This avoids boundary clipping when the MAP is near a
+            prior edge, giving unbiased curvature estimates.
         """
         self.likelihood = likelihood
 
@@ -275,13 +280,14 @@ class FisherMatrixPosteriorEstimator:
         sample : dict
             MAP parameter values.
         iFIM : array
-            Inverse Fisher Information Matrix (covariance at the MAP).
+            Inverse of the negative Hessian of the log-posterior (covariance
+            at the MAP).
 
         Returns
         -------
         log_evidence : float
             log Z ≈ log L(θ_MAP) + log π(θ_MAP) + (d/2) log(2π)
-                    + (1/2) log det(iFIM)
+                    + (1/2) log det(Σ)
         """
         d = len(self.parameter_names)
         log_l_map = self.log_likelihood(sample)
@@ -452,7 +458,7 @@ class FisherMatrixPosteriorEstimator:
         )
 
     def get_maximum_likelihood_sample(self, initial_sample=None):
-        """Backwards-compatible alias for :meth:`get_MAP_sample`."""
+        """Deprecated alias for :meth:`get_MAP_sample`."""
         return self.get_MAP_sample(initial_sample)
 
     def get_MAP_sample(self, initial_sample=None):
