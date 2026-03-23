@@ -14,10 +14,8 @@ for details on accessing data on the LIGO Data Grid instead.
 
 Usage
 -----
-    python examples/GW150914.py --smc
-    python examples/GW150914.py --rejection
-    python examples/GW150914.py --importance
-    python examples/GW150914.py --dynesty
+    python examples/GW150914.py --sampler laplace rejection smc dynesty
+    python examples/GW150914.py --sampler smc
     python examples/GW150914.py --compare
 """
 
@@ -160,8 +158,8 @@ _common_laplace = dict(
 )
 
 _smc_kwargs = dict(
-    backend="minipcn",
-    n_samples=5000,
+    sampler="minipcn_smc",
+    n_initial_samples=5000,
     n_final_samples=1000,
     target_efficiency=[0.5, 0.8],
     adaptive=True,
@@ -193,13 +191,6 @@ def run_rejection():
         resample="rejection",
     )
 
-
-def run_importance():
-    return bilby.run_sampler(
-        **_common_laplace,
-        label=f"{base_label}_importance",
-        resample="importance",
-    )
 
 
 def run_smc():
@@ -282,50 +273,43 @@ def compare():
             f"Need at least 2 results for a comparison plot, "
             f"found {len(results)}"
         )
-        if len(results) == 1:
-            results[0].plot_corner()
         return
 
-    bilby.core.result.plot_multiple(
+    import matplotlib.pyplot as plt
+    filename = os.path.join(outdir, f"{base_label}_comparison_corner.png")
+    fig = bilby.core.result.plot_multiple(
         results,
         labels=labels,
-        filename=os.path.join(outdir, f"{base_label}_comparison_corner.png"),
+        filename=filename,
         titles=False,
+        save=False,
     )
+    fig.savefig(filename, dpi=400)
+    plt.close(fig)
     logger.info(
         f"Comparison corner plot saved to "
         f"{outdir}/{base_label}_comparison_corner.png"
     )
 
 
+_run_fns = dict(
+    laplace=run_laplace,
+    rejection=run_rejection,
+
+    smc=run_smc,
+    dynesty=run_dynesty,
+)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Parameter estimation on GW150914"
     )
     parser.add_argument(
-        "--laplace",
-        action="store_true",
-        help="Run Laplace approximation (no resampling)",
-    )
-    parser.add_argument(
-        "--rejection",
-        action="store_true",
-        help="Run Laplace with rejection resampling",
-    )
-    parser.add_argument(
-        "--importance",
-        action="store_true",
-        help="Run Laplace with importance resampling",
-    )
-    parser.add_argument(
-        "--smc",
-        action="store_true",
-        help="Run Laplace with SMC resampling",
-    )
-    parser.add_argument(
-        "--dynesty",
-        action="store_true",
-        help="Run dynesty nested sampling",
+        "--sampler",
+        nargs="+",
+        choices=list(_run_fns),
+        metavar="SAMPLER",
+        help=f"One or more samplers to run: {', '.join(_run_fns)}",
     )
     parser.add_argument(
         "--compare",
@@ -334,19 +318,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.laplace:
-        run_laplace().plot_corner()
-    if args.rejection:
-        run_rejection().plot_corner()
-    if args.importance:
-        run_importance().plot_corner()
-    if args.smc:
-        run_smc().plot_corner()
-    if args.dynesty:
-        run_dynesty().plot_corner()
-    if args.compare:
-        compare()
-
-    if not any([args.laplace, args.rejection, args.importance, args.smc,
-                args.dynesty, args.compare]):
+    if not args.sampler and not args.compare:
         parser.print_help()
+    else:
+        for name in (args.sampler or []):
+            _run_fns[name]()
+        if args.compare:
+            compare()
