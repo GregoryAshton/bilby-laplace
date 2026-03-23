@@ -10,9 +10,9 @@ and Gaussian noise is generated internally.
 
 Usage
 -----
-    python examples/injection_HLV.py --sampler laplace rejection smc dynesty
-    python examples/injection_HLV.py --sampler smc
-    python examples/injection_HLV.py --compare
+    python examples/hlv_example.py --sampler laplace rejection smc dynesty
+    python examples/hlv_example.py --sampler smc
+    python examples/hlv_example.py --compare
 """
 
 import argparse
@@ -31,8 +31,8 @@ from bilby.gw.prior import (
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
-outdir = "outdir_injection"
-base_label = "injection"
+outdir = "outdir_hlv_example"
+base_label = "hlv"
 
 # ---------------------------------------------------------------------------
 # Injection parameters
@@ -167,15 +167,14 @@ _common_laplace = dict(
     priors=priors,
     outdir=outdir,
     injection_parameters=injection_parameters,
-    use_injection_for_maxL=True,
+    use_injection_for_map=True,
     conversion_function=bilby.gw.conversion.generate_all_bbh_parameters,
     result_class=bilby.gw.result.CBCResult,
     plot_diagnostic=True,
     clean=True,
     sampler="laplace",
-    target_nsamples=100,
-    cov_scaling=2,
-    extension="hdf5",
+    target_nsamples=1000,
+    save="hdf5",
     use_unit_cube=True,
 )
 
@@ -203,6 +202,7 @@ def run_laplace():
         **_common_laplace,
         label=f"{base_label}_laplace",
         resample="None",
+        cov_scaling=1,
     )
 
 
@@ -211,8 +211,8 @@ def run_rejection():
         **_common_laplace,
         label=f"{base_label}_rejection",
         resample="rejection",
+        cov_scaling=2,
     )
-
 
 
 def run_smc():
@@ -221,6 +221,7 @@ def run_smc():
         label=f"{base_label}_smc",
         resample="smc",
         smc_kwargs=_smc_kwargs,
+        cov_scaling=2,
     )
 
 
@@ -240,15 +241,15 @@ def run_dynesty():
         result_class=bilby.gw.result.CBCResult,
         clean=False,
         resume=True,
-        extension="hdf5",
+        save="hdf5",
     )
 
 
 def compare():
     """Load all result files in outdir, make a comparison corner plot,
-    and print an evidence comparison table."""
+    and print a comparison table."""
     pattern = os.path.join(outdir, f"{base_label}_*_result.*")
-    result_files = sorted(glob.glob(pattern))
+    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith('.old')])
     if not result_files:
         logger.warning(f"No result files found matching {pattern}")
         return
@@ -272,23 +273,25 @@ def compare():
         except Exception as exc:
             logger.warning(f"Could not load {f}: {exc}")
 
-    # Evidence comparison table
-    print("\n" + "=" * 60)
-    print("Evidence comparison")
-    print("=" * 60)
-    print(f"{'Method':<25} {'log Z':>10} {'± σ':>10} {'time':>10}")
-    print("-" * 60)
+    # Comparison table
+    W = 75
+    print("\n" + "=" * W)
+    print("Comparison")
+    print("=" * W)
+    print(f"{'Method':<20} {'log Z':>10} {'± σ':>8} {'n_like':>8} {'effic.':>8} {'time':>10}")
+    print("-" * W)
     for r, lab in zip(results, labels):
-        log_z = getattr(r, "log_evidence", np.nan)
-        log_z_err = getattr(r, "log_evidence_err", np.nan)
+        log_z = getattr(r, "log_evidence", np.nan) or np.nan
+        log_z_err = getattr(r, "log_evidence_err", np.nan) or np.nan
         secs = r.sampling_time.total_seconds()
-        if log_z is None:
-            log_z = np.nan
-        if log_z_err is None:
-            log_z_err = np.nan
+        run_stats = r.meta_data.get("run_statistics", {})
+        n_like = run_stats.get("nlikelihood", np.nan)
+        eff = run_stats.get("efficiency", np.nan)
         name = r.label.replace(f"{base_label}_", "")
-        print(f"{name:<25} {log_z:>10.2f} {log_z_err:>10.2f} {secs:>9.1f}s")
-    print("=" * 60 + "\n")
+        n_like_str = f"{int(n_like):>8}" if np.isfinite(n_like) else f"{'—':>8}"
+        eff_str = f"{eff:>7.1f}%" if np.isfinite(eff) else f"{'—':>8}"
+        print(f"{name:<20} {log_z:>10.2f} {log_z_err:>8.2f} {n_like_str} {eff_str} {secs:>9.1f}s")
+    print("=" * W + "\n")
 
     if len(results) < 2:
         logger.warning(

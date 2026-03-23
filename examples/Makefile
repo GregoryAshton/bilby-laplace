@@ -36,13 +36,13 @@ lorentzian-compare:
 # ---------------------------------------------------------------------------
 # HLV injection example
 # ---------------------------------------------------------------------------
-injection-%:
-	$(PYTHON) injection.py --sampler $*
+hlv-%:
+	$(PYTHON) hlv_example.py --sampler $*
 
-injection-all: injection-laplace injection-rejection injection-smc injection-dynesty injection-compare
+hlv-all: hlv-laplace hlv-rejection hlv-smc hlv-dynesty hlv-compare
 
-injection-compare:
-	$(PYTHON) injection.py --compare
+hlv-compare:
+	$(PYTHON) hlv_example.py --compare
 
 # ---------------------------------------------------------------------------
 # GW150914 example
