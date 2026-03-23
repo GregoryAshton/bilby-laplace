@@ -86,11 +86,6 @@ class FisherMatrixPosteriorEstimator:
                 raise ValueError(f"Prior width is ill-formed for {key}")
             self.prior_width_dict[key] = width
 
-        # Collect fixed parameter values (floats or DeltaFunction priors) so
-        # that every likelihood call receives a complete parameter dict.  This
-        # is required when the likelihood uses internal marginalisation (e.g.
-        # bilby's GravitationalWaveTransient), which still needs the fixed
-        # reference values (e.g. geocent_time) even though they are not sampled.
         self.fixed_parameters = {}
         for key, val in priors.items():
             if key in self.parameter_names:
@@ -233,7 +228,7 @@ class FisherMatrixPosteriorEstimator:
         else:
             import scipy.differentiate as sd
             logger.info("Computing Fisher matrix in unit cube (scipy.differentiate)")
-            res = sd.hessian(self.log_likelihood_in_unit_cube, u_map, initial_step=0.5)
+            res = sd.hessian(self.log_likelihood_in_unit_cube, u_map, initial_step=0.1)
             FIM_u = -res.ddf
             logger.debug(f"FIM (unit cube):\n{FIM_u}")
 
@@ -293,22 +288,42 @@ class FisherMatrixPosteriorEstimator:
             + upper_off_diagonal_average.T
         )
 
+        # Regularise near-singular FIM by flooring small/negative eigenvalues
+        # before inversion.  This prevents LinAlgError on singular matrices
+        # when some parameters are poorly constrained by the data.
+        fim_eigvals, fim_eigvecs = np.linalg.eigh(FIM)
+        max_abs = max(np.max(np.abs(fim_eigvals)), 1e-30)
+        threshold = 1e-10 * max_abs
+        n_small = int(np.sum(fim_eigvals < threshold))
+        if n_small > 0:
+            logger.warning(
+                f"FIM has {n_small} eigenvalue(s) below {threshold:.2g} "
+                f"(min={fim_eigvals.min():.3g}); some parameters appear poorly "
+                f"constrained. Flooring to {threshold:.2g} before inversion."
+            )
+            fim_eigvals = np.maximum(fim_eigvals, threshold)
+            FIM = fim_eigvecs @ np.diag(fim_eigvals) @ fim_eigvecs.T
+            FIM = 0.5 * (FIM + FIM.T)
+
         iFIM = scipy.linalg.inv(FIM)
 
-        # Ensure iFIM is positive definite using nearest-PD
-        # projection: zero out negative eigenvalues rather than
-        # inflating every diagonal element.
+        # Ensure iFIM is positive definite.  Apply the 1e-6 * max floor
+        # unconditionally: inversion of an ill-conditioned FIM (condition
+        # number ~1e10) can leave tiny-but-positive eigenvalues that are still
+        # below scipy's _PSD tolerance (eps ≈ 2.22e-10 * max).  Flooring at
+        # 1e-6 * max keeps the condition number at most 1e6, well inside that
+        # threshold.
         eigvals, eigvecs = np.linalg.eigh(iFIM)
-        if np.any(eigvals < 0):
-            n_neg = int(np.sum(eigvals < 0))
+        n_neg = int(np.sum(eigvals < 0))
+        if n_neg > 0:
             logger.warning(
                 f"Covariance matrix has {n_neg} negative "
                 f"eigenvalue(s); projecting to nearest "
                 f"positive-definite matrix"
             )
-            eigvals = np.maximum(eigvals, 0.0)
-            # Floor must be large enough for Cholesky to succeed
-            eigvals = np.maximum(eigvals, 1e-6 * np.max(eigvals))
+        floor = 1e-6 * np.max(eigvals)
+        if eigvals.min() < floor:
+            eigvals = np.maximum(eigvals, floor)
             iFIM = eigvecs @ np.diag(eigvals) @ eigvecs.T
             # Re-symmetrise to remove floating-point drift
             iFIM = 0.5 * (iFIM + iFIM.T)
