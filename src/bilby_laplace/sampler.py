@@ -24,23 +24,6 @@ except ImportError:
         fig.savefig(filename, **kwargs)
 
 
-class GaussianProposal:
-    """Unconstrained multivariate Gaussian proposal.
-
-    Wraps ``scipy.stats.multivariate_normal`` with the common ``sample`` /
-    ``logpdf`` interface used by the rejection and importance sampling loops.
-    """
-
-    def __init__(self, mean, cov):
-        self.mean = mean
-        self._dist = multivariate_normal(mean=mean, cov=cov)
-
-    def sample(self, n):
-        return random.rng.multivariate_normal(self.mean, self._dist.cov, n)
-
-    def logpdf(self, x):
-        return self._dist.logpdf(np.atleast_2d(x))
-
 
 class TruncatedMVNProposal:
     """Per-marginal independent truncated Gaussian proposal.
@@ -1019,10 +1002,11 @@ class Laplace(Sampler):
     def create_proposal_diagnostic(self, mean, cov):
         """Corner plot comparing the Gaussian proposal against the prior.
 
-        The prior is shown via Monte Carlo samples.  The Gaussian proposal is
-        drawn entirely analytically — 1-D ``norm.pdf`` on the diagonal panels
-        and 2-D contour ellipses on the off-diagonal panels — so the plot works
-        correctly even when the proposal is much wider than the prior.
+        The prior is shown via Monte Carlo samples — histograms on diagonal
+        panels and low-alpha scatter (alpha=0.01) on off-diagonal panels. The
+        Gaussian proposal is drawn analytically as 1-D curves on the diagonal
+        and 2-D contour ellipses on the off-diagonal panels, working correctly
+        even when the proposal is much wider than the prior.
         """
         import corner
         import matplotlib.pyplot as plt
@@ -1032,7 +1016,7 @@ class Laplace(Sampler):
         parameter_names = self.search_parameter_keys
         labels = [k.replace("_", " ") for k in parameter_names]
         ndim = len(parameter_names)
-        n_samples = 5000
+        n_samples = 10000
 
         proposal_sigmas = np.sqrt(np.diag(cov))
 
@@ -1048,8 +1032,8 @@ class Laplace(Sampler):
         p_color, p_ls = "C0", "-"
         g_color, g_ls = "k", "--"
 
-        # Prior samples only go into corner; the proposal is drawn analytically
-        # below so that it is always visible regardless of its width.
+        panel_size = 2.5
+        fig_size = panel_size * ndim
         fig = corner.corner(
             prior_samples,
             color=p_color,
@@ -1057,8 +1041,9 @@ class Laplace(Sampler):
             hist_kwargs={"density": True, "ls": p_ls, "alpha": 0.8},
             no_fill_contours=True,
             plot_density=False,
-            plot_datapoints=False,
-            fill_contours=False,
+            plot_datapoints=True,
+            plot_contours=False,
+            fill_contours=True,
             levels=(1 - np.exp(-0.5), 1 - np.exp(-2)),
             bins=50,
             smooth=0.7,
@@ -1066,6 +1051,7 @@ class Laplace(Sampler):
             labels=labels,
             truths=mean,
             truth_color="C3",
+            fig=plt.figure(figsize=(fig_size, fig_size)),
             range=ranges,
         )
 
@@ -1076,8 +1062,21 @@ class Laplace(Sampler):
             ax = axes_grid[i, i]
             lo, hi = ranges[i]
             xs = np.linspace(lo, hi, 300)
-            ax.plot(xs, norm.pdf(xs, loc=mean[i], scale=proposal_sigmas[i]),
-                    color=g_color, lw=1.5, ls=g_ls)
+            ys = norm.pdf(xs, loc=mean[i], scale=proposal_sigmas[i])
+            ax.plot(xs, ys, color=g_color, lw=1.5, ls=g_ls)
+            # Extend y-axis to accommodate full Gaussian peak
+            y_max = ax.get_ylim()[1]
+            ax.set_ylim(top=max(y_max, ys.max() * 1.1))
+
+        # 2-D prior samples on off-diagonal panels with low alpha,
+        # overlaid with Gaussian proposal contours.
+        for row in range(ndim):
+            for col in range(row):
+                ax = axes_grid[row, col]
+                ax.scatter(
+                    prior_samples[:, col], prior_samples[:, row],
+                    s=1, alpha=0.01, color=p_color,
+                )
 
         # 2-D analytic Gaussian contours on off-diagonal panels.
         # Contour levels exp(-0.5) and exp(-2) relative to the peak match the
@@ -1119,7 +1118,7 @@ class Laplace(Sampler):
         )
         fig.suptitle("Gaussian proposal vs prior")
 
-        filename = f"{self.outdir}/{self.label}_diagnostic-proposal.png"
+        filename = f"{self.outdir}/{self.label}_diagnostic_proposal.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
         return fig
@@ -1150,11 +1149,12 @@ class Laplace(Sampler):
         # Sort by weight for cleaner scatter colouring
         idxs = np.argsort(weights)
         rxs = rxs[idxs]
-        weights_sorted = weights[idxs]
 
         g_color, g_ls = "k", "--"
         f_color, f_ls = "C0", "-"
 
+        panel_size = 2.5
+        fig_size = panel_size * len(labels)
         lines = []
         fig = corner.corner(
             rxs,
@@ -1168,6 +1168,7 @@ class Laplace(Sampler):
             plot_datapoints=False,
             fill_contours=False,
             levels=(1 - np.exp(-0.5), 1 - np.exp(-2), 1 - np.exp(-9 / 2.0)),
+            fig=plt.figure(figsize=(fig_size, fig_size)),
             **corner_kwargs,
         )
         lines.append(mpllines.Line2D([0], [0], color=g_color, linestyle=g_ls))
@@ -1200,7 +1201,7 @@ class Laplace(Sampler):
         axes[0].legend(lines, labels)
         fig.suptitle(f"Resampling method: {method}")
 
-        filename = f"{self.outdir}/{self.label}_diagnostic-resample_{method}.png"
+        filename = f"{self.outdir}/{self.label}_diagnostic_resample_{method}.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
         return fig
@@ -1237,6 +1238,8 @@ class Laplace(Sampler):
         f_color, f_ls = "C0", "-"
         mode_colors = [f"C{i + 1}" for i in range(len(mode_means))]
 
+        panel_size = 2.5
+        fig_size = panel_size * self.ndim
         fig = corner.corner(
             laplace_samples,
             color=g_color,
@@ -1247,6 +1250,7 @@ class Laplace(Sampler):
             plot_datapoints=False,
             fill_contours=False,
             levels=(1 - np.exp(-0.5), 1 - np.exp(-2), 1 - np.exp(-9 / 2.0)),
+            fig=plt.figure(figsize=(fig_size, fig_size)),
             **corner_kwargs,
         )
         fig = corner.corner(
@@ -1296,7 +1300,7 @@ class Laplace(Sampler):
         axes_grid[0, 0].legend(legend_handles, legend_labels, fontsize="small")
         fig.suptitle("Resampling method: SMC")
 
-        filename = f"{self.outdir}/{self.label}_smc_diagnostic-resample.png"
+        filename = f"{self.outdir}/{self.label}_diagnostic_smc_samples.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
 
@@ -1309,20 +1313,26 @@ class Laplace(Sampler):
             fig_stats.tight_layout()
             safe_save_figure(
                 fig=fig_stats,
-                filename=f"{self.outdir}/{self.label}_smc_diagnostic-stats.png",
+                filename=f"{self.outdir}/{self.label}_diagnostic_smc_stats.png",
                 dpi=150,
             )
             plt.close(fig_stats)
 
             if history.sample_history:
-                fig_bands = history.plot_quantile_bands(
-                    parameters=self.search_parameter_keys
+                n_params = len(self.search_parameter_keys)
+                fig_bands, axs = plt.subplots(
+                    n_params, 1, sharex=True,
+                    figsize=(8, 2.5 * n_params),
+                )
+                history.plot_quantile_bands(
+                    parameters=self.search_parameter_keys,
+                    ax=axs,
                 )
                 fig_bands.suptitle("SMC parameter evolution")
                 fig_bands.tight_layout()
                 safe_save_figure(
                     fig=fig_bands,
-                    filename=f"{self.outdir}/{self.label}_smc_diagnostic-evolution.png",
+                    filename=f"{self.outdir}/{self.label}_diagnostic_smc_evolution.png",
                     dpi=150,
                 )
                 plt.close(fig_bands)
