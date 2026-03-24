@@ -162,33 +162,36 @@ likelihood = bilby.gw.likelihood.GravitationalWaveTransient(
 # ---------------------------------------------------------------------------
 # Shared sampler kwargs
 # ---------------------------------------------------------------------------
-_common_laplace = dict(
+_common = dict(
     likelihood=likelihood,
     priors=priors,
     outdir=outdir,
     injection_parameters=injection_parameters,
-    use_injection_for_map=True,
     conversion_function=bilby.gw.conversion.generate_all_bbh_parameters,
     result_class=bilby.gw.result.CBCResult,
+    save="hdf5",
+)
+
+_common_laplace = dict(
+    **_common,
+    use_injection_for_map=True,
     plot_diagnostic=True,
     clean=True,
     sampler="laplace",
     target_nsamples=1000,
-    save="hdf5",
     use_unit_cube=True,
 )
 
 _smc_kwargs = dict(
     sampler="minipcn_smc",
-    n_initial_samples=1000,
+    n_initial_samples=5000,
     n_final_samples=5000,
-    target_efficiency=[0.5, 0.8],
     adaptive=True,
     sampler_kwargs=dict(
-        n_steps=5,
+        n_steps=10,
         target_acceptance_rate=0.234,
         step_fn="tpcn",
-        verbose=True,
+        #verbose=True,
     ),
 )
 
@@ -211,7 +214,7 @@ def run_rejection():
         **_common_laplace,
         label=f"{base_label}_rejection",
         resample="rejection",
-        cov_scaling=2,
+        cov_scaling=3,
     )
 
 
@@ -221,27 +224,21 @@ def run_smc():
         label=f"{base_label}_smc",
         resample="smc",
         smc_kwargs=_smc_kwargs,
-        cov_scaling=2,
+        cov_scaling=3,
     )
 
 
 def run_dynesty():
     return bilby.run_sampler(
-        likelihood=likelihood,
-        priors=priors,
+        **_common,
         sampler="dynesty",
-        outdir=outdir,
         label=f"{base_label}_dynesty",
-        injection_parameters=injection_parameters,
-        nlive=250,
+        nlive=1000,
         check_point_delta_t=1800,
         check_point_plot=True,
         npool=1,
-        conversion_function=bilby.gw.conversion.generate_all_bbh_parameters,
-        result_class=bilby.gw.result.CBCResult,
         clean=False,
         resume=True,
-        save="hdf5",
     )
 
 
