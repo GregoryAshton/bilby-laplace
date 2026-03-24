@@ -81,6 +81,9 @@ print(result.meta_data["run_statistics"])
    - **smc**: use the Laplace Gaussian as a starting distribution for
      [aspire](https://github.com/bilby-dev/aspire) SMC posterior sampling,
      which iteratively refines samples toward the true posterior
+   - **inprior**: draw from the proposal and keep only samples within the
+     prior support, evaluating the likelihood for retained samples. Useful
+     as a fast filter when the proposal is well-matched to the prior.
    - **None**: skip resampling entirely and return raw Gaussian samples
 
 6. **Evidence estimation** — The Laplace log-evidence
@@ -96,7 +99,7 @@ All keyword arguments are passed through `bilby.run_sampler`:
 
 | Argument | Default | Description |
 |---|---|---|
-| `resample` | `'rejection'` | Resampling method: `'rejection'`, `'importance'`, `'smc'`, or `None` |
+| `resample` | `'rejection'` | Resampling method: `'rejection'`, `'importance'`, `'smc'`, `'inprior'`, or `None` |
 | `target_nsamples` | `10000` | Target number of posterior samples |
 | `batch_nsamples` | `1000` | Proposal samples drawn per batch |
 | `prior_nsamples` | `100` | Prior draws used in the MAP search (multi-start only) |
