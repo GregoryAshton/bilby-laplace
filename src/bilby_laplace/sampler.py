@@ -368,12 +368,8 @@ class Laplace(Sampler):
         log_evidence=np.nan, log_evidence_err=np.nan,
         **run_stats,
     ):
-        posterior = samples[self.search_parameter_keys].copy()
-        posterior["log_likelihood"] = log_likelihood_evaluations
-        self.result.posterior = posterior
-        self.result.log_likelihood_evaluations = (
-            log_likelihood_evaluations
-        )
+        self.result.samples = samples[self.search_parameter_keys].values
+        self.result.log_likelihood_evaluations = log_likelihood_evaluations
         self.result.log_evidence = log_evidence
         self.result.log_evidence_err = log_evidence_err
         run_stats["sampling_time_s"] = (
