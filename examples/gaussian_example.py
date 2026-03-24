@@ -62,11 +62,15 @@ injection_parameters = {"x": 1.0, "y": -0.5}
 # ---------------------------------------------------------------------------
 # Shared sampler kwargs
 # ---------------------------------------------------------------------------
-_common_laplace = dict(
+_common = dict(
     likelihood=likelihood,
     priors=priors,
     injection_parameters=injection_parameters,
     outdir=outdir,
+)
+
+_common_laplace = dict(
+    **_common,
     use_injection_for_map=True,
     clean=True,
     sampler="laplace",
@@ -107,11 +111,8 @@ def run_smc():
 
 def run_dynesty():
     return bilby.run_sampler(
-        likelihood=likelihood,
-        priors=priors,
+        **_common,
         sampler="dynesty",
-        injection_parameters=injection_parameters,
-        outdir=outdir,
         label=f"{base_label}_dynesty",
         clean=True,
         nlive=1000,
