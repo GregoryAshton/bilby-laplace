@@ -99,7 +99,7 @@ def run_laplace():
     return bilby.run_sampler(
         **_common_laplace,
         label=f"{base_label}_laplace",
-        resample="None",
+        resample="inprior",
         cov_scaling=1,
     )
 
@@ -111,7 +111,6 @@ def run_rejection():
         resample="rejection",
         cov_scaling=10,
     )
-
 
 
 _smc_kwargs = dict(
@@ -135,7 +134,7 @@ def run_smc():
         label=f"{base_label}_smc",
         resample="smc",
         smc_kwargs=_smc_kwargs,
-        cov_scaling=5,
+        cov_scaling=10,
     )
 
 
