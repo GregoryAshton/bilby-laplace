@@ -328,6 +328,12 @@ class Laplace(Sampler):
             samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = (
                 self._run_rejection_sampling(proposal, fisher_mpe, map_sample_dict)
             )
+        elif resample == "inprior":
+            samples, logl, g_samples, efficiency = (
+                self._run_inprior(proposal, fisher_mpe)
+            )
+            log_evidence = np.nan
+            log_evidence_err = np.nan
         else:
             samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = (
                 self._run_importance_sampling(proposal, fisher_mpe, map_sample_dict)
@@ -385,6 +391,81 @@ class Laplace(Sampler):
         samples = pd.DataFrame(samples_array, columns=fisher_mpe.parameter_names)
         logl = np.full(target_nsamples, np.nan)
         return samples, logl, samples, 100.0
+
+    def _run_inprior(self, proposal, fisher_mpe):
+        """Draw and filter samples to those within prior bounds.
+
+        Draws from the proposal and keeps only samples within the prior support,
+        discarding out-of-bounds samples. Returns in-prior samples with their
+        likelihoods evaluated.
+
+        Returns ``(samples, logl, g_samples, efficiency)``.
+        """
+        target_nsamples = self.kwargs["target_nsamples"]
+        batch_nsamples = self.kwargs["batch_nsamples"]
+
+        logger.info(
+            f"Drawing samples from proposal and filtering to prior support "
+            f"(target: {target_nsamples})"
+        )
+
+        samples_list = []
+        logl_list = []
+        total_drawn = 0
+        n_accepted = 0
+
+        pbar = tqdm.tqdm(
+            total=target_nsamples,
+            desc="Filtering to prior",
+            unit="sample",
+            dynamic_ncols=True,
+        )
+
+        while n_accepted < target_nsamples:
+            # Draw batch from proposal
+            x_batch = proposal.sample(batch_nsamples)
+            g_batch = pd.DataFrame(x_batch, columns=fisher_mpe.parameter_names)
+
+            # Check which samples are in prior
+            logpi = np.real(np.array(self.priors.ln_prob(g_batch, axis=0)))
+            in_prior = ~np.isinf(logpi)
+
+            total_drawn += batch_nsamples
+            batch_accepted = np.sum(in_prior)
+
+            if in_prior.any():
+                # Evaluate likelihood for in-prior samples
+                x_in = x_batch[in_prior]
+                logl_in = fisher_mpe.log_likelihood_from_array(x_in.T)
+
+                samples_list.append(x_in)
+                logl_list.append(logl_in)
+                n_accepted += batch_accepted
+
+                # Update progress bar (capped at target)
+                samples_to_show = min(batch_accepted, max(0, target_nsamples - pbar.n))
+                pbar.update(samples_to_show)
+                pbar.set_postfix({
+                    "drawn": total_drawn,
+                    "eff": f"{100.0 * n_accepted / total_drawn:.1f}%",
+                })
+
+        pbar.close()
+
+        # Combine batches and truncate to target
+        x_out = np.vstack(samples_list)[:target_nsamples]
+        logl_out = np.hstack(logl_list)[:target_nsamples]
+
+        samples = pd.DataFrame(x_out, columns=fisher_mpe.parameter_names)
+
+        # Efficiency: fraction of drawn samples that were kept
+        efficiency = 100.0 * target_nsamples / total_drawn
+        logger.info(
+            f"Filtering complete: kept {target_nsamples} of {total_drawn} samples "
+            f"({efficiency:.1f}% efficiency)"
+        )
+
+        return samples, logl_out, samples, efficiency
 
     def _run_smc(self, mean, cov, fisher_mpe, cov_scaling):
         """Build the Laplace proposal flow and run SMC sampling.
