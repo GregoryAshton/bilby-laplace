@@ -21,70 +21,61 @@ bilby.core.utils.random.seed(1234)
 outdir = "outdir_gaussian_example"
 base_label = "gaussian"
 
-# ---------------------------------------------------------------------------
-# Likelihood
-# ---------------------------------------------------------------------------
 
+def setup():
+    """Set up likelihood, priors, and sampler configuration."""
+    # Likelihood
+    class GaussianLikelihood(bilby.core.likelihood.Likelihood):
+        """2-D correlated Gaussian likelihood."""
 
-class GaussianLikelihood(bilby.core.likelihood.Likelihood):
-    """2-D correlated Gaussian likelihood."""
+        def __init__(self, mu_x=1.0, mu_y=-0.5, sigma_x=0.3, sigma_y=0.5, rho=0.7):
+            super().__init__(parameters={"x": None, "y": None})
+            self.mu = np.array([mu_x, mu_y])
+            cov = np.array([
+                [sigma_x**2, rho * sigma_x * sigma_y],
+                [rho * sigma_x * sigma_y, sigma_y**2],
+            ])
+            self._inv_cov = np.linalg.inv(cov)
+            self._log_norm = -0.5 * np.log(np.linalg.det(2 * np.pi * cov))
 
-    def __init__(self, mu_x=1.0, mu_y=-0.5, sigma_x=0.3, sigma_y=0.5, rho=0.7):
-        super().__init__(parameters={"x": None, "y": None})
-        self.mu = np.array([mu_x, mu_y])
-        cov = np.array([
-            [sigma_x**2, rho * sigma_x * sigma_y],
-            [rho * sigma_x * sigma_y, sigma_y**2],
-        ])
-        self._inv_cov = np.linalg.inv(cov)
-        self._log_norm = -0.5 * np.log(np.linalg.det(2 * np.pi * cov))
+        def log_likelihood(self, parameters=None):
+            d = np.array([parameters["x"], parameters["y"]]) - self.mu
+            return -0.5 * d @ self._inv_cov @ d + self._log_norm
 
-    def log_likelihood(self, parameters=None):
-        d = np.array([parameters["x"], parameters["y"]]) - self.mu
-        return -0.5 * d @ self._inv_cov @ d + self._log_norm
+    likelihood = GaussianLikelihood()
 
-
-# ---------------------------------------------------------------------------
-# Setup
-# ---------------------------------------------------------------------------
-
-likelihood = GaussianLikelihood()
-
-priors = bilby.core.prior.PriorDict(
-    dict(
-        x=bilby.core.prior.Uniform(-5, 5, "x"),
-        y=bilby.core.prior.Uniform(-5, 5, "y"),
+    priors = bilby.core.prior.PriorDict(
+        dict(
+            x=bilby.core.prior.Uniform(-5, 5, "x"),
+            y=bilby.core.prior.Uniform(-5, 5, "y"),
+        )
     )
-)
 
-injection_parameters = {"x": 1.0, "y": -0.5}
+    injection_parameters = {"x": 1.0, "y": -0.5}
 
-# ---------------------------------------------------------------------------
-# Shared sampler kwargs
-# ---------------------------------------------------------------------------
-_common = dict(
-    likelihood=likelihood,
-    priors=priors,
-    injection_parameters=injection_parameters,
-    outdir=outdir,
-)
+    # Shared sampler kwargs
+    _common = dict(
+        likelihood=likelihood,
+        priors=priors,
+        injection_parameters=injection_parameters,
+        outdir=outdir,
+    )
 
-_common_laplace = dict(
-    **_common,
-    use_injection_for_map=True,
-    clean=True,
-    sampler="laplace",
-    target_nsamples=5000,
-    plot_diagnostic=True,
-    save="hdf5",
-)
+    _common_laplace = dict(
+        **_common,
+        use_injection_for_map=True,
+        clean=True,
+        sampler="laplace",
+        target_nsamples=5000,
+        plot_diagnostic=True,
+        save="hdf5",
+    )
+
+    return _common, _common_laplace
 
 
-# ---------------------------------------------------------------------------
 # Samplers
-# ---------------------------------------------------------------------------
-
-def run_laplace():
+def run_laplace(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
         label=f"{base_label}_laplace",
@@ -92,7 +83,7 @@ def run_laplace():
     )
 
 
-def run_rejection():
+def run_rejection(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
         label=f"{base_label}_rejection",
@@ -100,8 +91,7 @@ def run_rejection():
     )
 
 
-
-def run_smc():
+def run_smc(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
         label=f"{base_label}_smc",
@@ -109,7 +99,7 @@ def run_smc():
     )
 
 
-def run_dynesty():
+def run_dynesty(_common):
     return bilby.run_sampler(
         **_common,
         sampler="dynesty",
@@ -190,14 +180,6 @@ def compare():
     )
 
 
-_run_fns = dict(
-    laplace=run_laplace,
-    rejection=run_rejection,
-
-    smc=run_smc,
-    dynesty=run_dynesty,
-)
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Laplace vs dynesty on a 2D Gaussian likelihood"
@@ -205,9 +187,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sampler",
         nargs="+",
-        choices=list(_run_fns),
+        choices=["laplace", "rejection", "smc", "dynesty"],
         metavar="SAMPLER",
-        help=f"One or more samplers to run: {', '.join(_run_fns)}",
+        help="One or more samplers to run: laplace, rejection, smc, dynesty",
     )
     parser.add_argument(
         "--compare",
@@ -219,7 +201,20 @@ if __name__ == "__main__":
     if not args.sampler and not args.compare:
         parser.print_help()
     else:
-        for name in (args.sampler or []):
-            _run_fns[name]()
+        # Only set up likelihood/priors if running samplers
+        if args.sampler:
+            _common, _common_laplace = setup()
+
+            _run_fns = {
+                "laplace": lambda: run_laplace(_common_laplace),
+                "rejection": lambda: run_rejection(_common_laplace),
+                "smc": lambda: run_smc(_common_laplace),
+                "dynesty": lambda: run_dynesty(_common),
+            }
+
+            for name in args.sampler:
+                _run_fns[name]()
+
+        # Compare only needs to read result files
         if args.compare:
             compare()
