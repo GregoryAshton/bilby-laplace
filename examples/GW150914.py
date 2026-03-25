@@ -148,21 +148,7 @@ def setup():
         sampler="laplace",
     )
 
-    _smc_kwargs = dict(
-        sampler="minipcn_smc",
-        n_initial_samples=5000,
-        n_final_samples=1000,
-        target_efficiency=[0.5, 0.8],
-        adaptive=True,
-        sampler_kwargs=dict(
-            n_steps=50,
-            target_acceptance_rate=0.234,
-            step_fn="tpcn",
-            verbose=True,
-        ),
-    )
-
-    return _common, _common_laplace, _smc_kwargs
+    return _common, _common_laplace
 
 
 # Samplers
@@ -182,13 +168,25 @@ def run_rejection(_common_laplace):
     )
 
 
-def run_smc(_common_laplace, _smc_kwargs):
+def run_smc(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
         label=f"{base_label}_smc",
         resample="smc",
         n_modes=2,
-        smc_kwargs=_smc_kwargs,
+        smc_kwargs=dict(
+            sampler="minipcn_smc",
+            n_initial_samples=5000,
+            n_final_samples=1000,
+            target_efficiency=[0.5, 0.8],
+            adaptive=True,
+            sampler_kwargs=dict(
+                n_steps=50,
+                target_acceptance_rate=0.234,
+                step_fn="tpcn",
+                verbose=True,
+            ),
+        ),
     )
 
 
@@ -301,12 +299,12 @@ if __name__ == "__main__":
     else:
         # Only download data and set up if running samplers
         if args.sampler:
-            _common, _common_laplace, _smc_kwargs = setup()
+            _common, _common_laplace = setup()
 
             _run_fns = {
                 "laplace": lambda: run_laplace(_common_laplace),
                 "rejection": lambda: run_rejection(_common_laplace),
-                "smc": lambda: run_smc(_common_laplace, _smc_kwargs),
+                "smc": lambda: run_smc(_common_laplace),
                 "dynesty": lambda: run_dynesty(_common),
             }
 
