@@ -56,7 +56,6 @@ def setup():
     duration = 4
     sampling_frequency = 2048
     minimum_frequency = 20
-    maximum_frequency = 512
 
     waveform_arguments = dict(
         waveform_approximant="IMRPhenomXAS",
@@ -175,19 +174,7 @@ def setup():
         use_unit_cube=True,
     )
 
-    _smc_kwargs = dict(
-        sampler="minipcn_smc",
-        n_initial_samples=1000,
-        n_final_samples=1000,
-        adaptive=True,
-        sampler_kwargs=dict(
-            n_steps=5,
-            target_acceptance_rate=0.234,
-            step_fn="tpcn",
-        ),
-    )
-
-    return _common, _common_laplace, _smc_kwargs
+    return _common, _common_laplace
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +187,7 @@ def run_laplace(_common_laplace):
         label=f"{base_label}_laplace",
         resample="inprior",
         cov_scaling=1,
+        jacobian_cap_scale=1,
     )
 
 
@@ -209,16 +197,28 @@ def run_rejection(_common_laplace):
         label=f"{base_label}_rejection",
         resample="rejection",
         cov_scaling=1,
+        jacobian_cap_scale=1,
     )
 
 
-def run_smc(_common_laplace, _smc_kwargs):
+def run_smc(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
         label=f"{base_label}_smc",
         resample="smc",
-        smc_kwargs=_smc_kwargs,
+        smc_kwargs=dict(
+            sampler="minipcn_smc",
+            n_initial_samples=1000,
+            n_final_samples=5000,
+            adaptive=True,
+            sampler_kwargs=dict(
+                n_steps=5,
+                target_acceptance_rate=0.234,
+                step_fn="tpcn",
+            ),
+        ),
         cov_scaling=1,
+        jacobian_cap_scale=1,
     )
 
 
@@ -371,12 +371,12 @@ if __name__ == "__main__":
     else:
         # Only set up likelihood/priors if running samplers
         if args.sampler:
-            _common, _common_laplace, _smc_kwargs = setup()
+            _common, _common_laplace = setup()
 
             _run_fns = {
                 "laplace": lambda: run_laplace(_common_laplace),
                 "rejection": lambda: run_rejection(_common_laplace),
-                "smc": lambda: run_smc(_common_laplace, _smc_kwargs),
+                "smc": lambda: run_smc(_common_laplace),
                 "dynesty": lambda: run_dynesty(_common),
             }
 
