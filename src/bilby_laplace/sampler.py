@@ -216,6 +216,8 @@ class Laplace(Sampler):
         use_injection_for_map=True,
         fail_on_error=False,
         use_unit_cube=True,
+        jacobian_cap_scale=1.0,
+        hessian_kwargs=None,
         n_modes=1,
         mode_search_nsamples=500,
         smc_kwargs=None,
@@ -262,6 +264,8 @@ class Laplace(Sampler):
             n_prior_samples=self.kwargs["prior_nsamples"],
             fd_eps=self.kwargs["fd_eps"],
             use_unit_cube=self.kwargs["use_unit_cube"],
+            jacobian_cap_scale=self.kwargs["jacobian_cap_scale"],
+            hessian_kwargs=self.kwargs["hessian_kwargs"],
         )
 
         # Choose starting point for MAP search

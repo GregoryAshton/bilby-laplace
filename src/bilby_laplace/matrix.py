@@ -25,6 +25,8 @@ class FisherMatrixPosteriorEstimator:
         fd_eps=1e-6,
         n_prior_samples=100,
         use_unit_cube=True,
+        jacobian_cap_scale=1.0,
+        hessian_kwargs=None,
     ):
         """Estimate posteriors using the Laplace approximation.
 
@@ -53,6 +55,17 @@ class FisherMatrixPosteriorEstimator:
             If True (default), compute the Hessian in unit-cube space via the
             prior CDFs. This avoids boundary clipping when the MAP is near a
             prior edge, giving unbiased curvature estimates.
+        jacobian_cap_scale: float
+            Scales the Jacobian cap applied when transforming the unit-cube
+            Hessian back to parameter space. The cap is
+            ``jacobian_cap_scale / prior_width``. The default of 1.0 caps at
+            the uniform-prior Jacobian. Values < 1 apply a tighter cap,
+            widening the proposal for prior-dominated parameters.
+        hessian_kwargs: dict, optional
+            Keyword arguments forwarded to ``scipy.differentiate.hessian``.
+            Defaults are ``{"initial_step": 0.5}`` in parameter space and
+            ``{"initial_step": 0.1}`` in unit-cube space. Any key provided
+            here overrides the corresponding default.
         """
         self.likelihood = likelihood
 
@@ -67,6 +80,8 @@ class FisherMatrixPosteriorEstimator:
         self.fd_eps = fd_eps
         self.n_prior_samples = n_prior_samples
         self.use_unit_cube = use_unit_cube
+        self.jacobian_cap_scale = jacobian_cap_scale
+        self.hessian_kwargs = hessian_kwargs if hessian_kwargs is not None else {}
         self.N = len(self.parameter_names)
         self.priors_dict = {key: priors[key] for key in self.parameter_names}
 
@@ -247,7 +262,8 @@ class FisherMatrixPosteriorEstimator:
                 "Computing Hessian of log-posterior (scipy.differentiate)"
             )
             point = np.array([sample[key] for key in self.parameter_names])
-            res = sd.hessian(self.log_posterior_from_array, point, initial_step=0.5)
+            kw = {"initial_step": 0.5, **self.hessian_kwargs}
+            res = sd.hessian(self.log_posterior_from_array, point, **kw)
             FIM = -res.ddf
             logger.debug(f"Estimated Hessian:\n{FIM}")
             return FIM
@@ -265,11 +281,32 @@ class FisherMatrixPosteriorEstimator:
         else:
             import scipy.differentiate as sd
             logger.info("Computing Hessian of log-posterior in unit cube (scipy.differentiate)")
-            res = sd.hessian(self.log_posterior_in_unit_cube, u_map, initial_step=0.01)
+            kw = {"initial_step": 0.001, **self.hessian_kwargs}
+            res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
             FIM_u = -res.ddf
             logger.debug(f"Hessian (unit cube):\n{FIM_u}")
 
         J_inv = 1.0 / self._jacobian_diag(x_array)   # = p(θ_MAP)
+
+        # Cap the Jacobian at the uniform-prior value (1/width) for each
+        # parameter.  When the prior is strongly peaked (p(θ) >> 1/width),
+        # the uncapped J_inv amplifies the unit-cube FIM and collapses the
+        # parameter-space covariance.  Capping prevents this for prior-
+        # dominated parameters while leaving likelihood-constrained
+        # parameters unaffected.
+        uniform_cap = np.array([
+            self.jacobian_cap_scale / self.prior_width_dict[k]
+            for k in self.parameter_names
+        ])
+        capped = J_inv > uniform_cap
+        if np.any(capped):
+            names = [k for k, c in zip(self.parameter_names, capped) if c]
+            logger.info(
+                f"Capping Jacobian for prior-dominated parameter(s): "
+                f"{', '.join(names)}"
+            )
+            J_inv = np.minimum(J_inv, uniform_cap)
+
         return J_inv[:, None] * FIM_u * J_inv[None, :]
 
     def log_evidence_laplace(self, sample, iFIM):
