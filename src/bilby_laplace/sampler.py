@@ -323,7 +323,7 @@ class Laplace(Sampler):
             )
         elif resample == "smc":
             samples, logl, g_samples, efficiency, smc_log_z, smc_log_z_err = (
-                self._run_smc(mean, cov, fisher_mpe, cov_scaling)
+                self._run_smc(mean, cov, proposal, fisher_mpe, cov_scaling)
             )
             if smc_log_z is not None:
                 log_evidence = float(smc_log_z)
@@ -392,6 +392,35 @@ class Laplace(Sampler):
         logl = np.full(target_nsamples, np.nan)
         return samples, logl, samples, 100.0
 
+    def _draw_inprior_samples(self, proposal, n, parameter_names):
+        """Draw *n* samples from *proposal* filtered to the prior support.
+
+        Draws in batches, discarding any sample where the full prior
+        log-probability is ``-inf``.  No likelihood evaluations are performed.
+        Returns a ``(n, ndim)`` float array.
+        """
+        batch_nsamples = self.kwargs["batch_nsamples"]
+        collected = []
+        n_collected = 0
+        total_drawn = 0
+
+        while n_collected < n:
+            x_batch = proposal.sample(batch_nsamples)
+            g_batch = pd.DataFrame(x_batch, columns=parameter_names)
+            logpi = np.real(np.array(self.priors.ln_prob(g_batch, axis=0)))
+            in_prior = ~np.isinf(logpi)
+            total_drawn += batch_nsamples
+            if in_prior.any():
+                collected.append(x_batch[in_prior])
+                n_collected += int(in_prior.sum())
+
+        x_out = np.vstack(collected)[:n]
+        logger.debug(
+            f"Drew {n} in-prior samples from {total_drawn} proposals "
+            f"({100.0 * n / total_drawn:.1f}% efficiency)"
+        )
+        return x_out
+
     def _run_inprior(self, proposal, fisher_mpe):
         """Draw and filter samples to those within prior bounds.
 
@@ -422,19 +451,16 @@ class Laplace(Sampler):
         )
 
         while n_accepted < target_nsamples:
-            # Draw batch from proposal
             x_batch = proposal.sample(batch_nsamples)
             g_batch = pd.DataFrame(x_batch, columns=fisher_mpe.parameter_names)
 
-            # Check which samples are in prior
             logpi = np.real(np.array(self.priors.ln_prob(g_batch, axis=0)))
             in_prior = ~np.isinf(logpi)
 
             total_drawn += batch_nsamples
-            batch_accepted = np.sum(in_prior)
+            batch_accepted = int(np.sum(in_prior))
 
             if in_prior.any():
-                # Evaluate likelihood for in-prior samples
                 x_in = x_batch[in_prior]
                 logl_in = fisher_mpe.log_likelihood_from_array(x_in.T)
 
@@ -442,7 +468,6 @@ class Laplace(Sampler):
                 logl_list.append(logl_in)
                 n_accepted += batch_accepted
 
-                # Update progress bar (capped at target)
                 samples_to_show = min(batch_accepted, max(0, target_nsamples - pbar.n))
                 pbar.update(samples_to_show)
                 pbar.set_postfix({
@@ -452,13 +477,10 @@ class Laplace(Sampler):
 
         pbar.close()
 
-        # Combine batches and truncate to target
         x_out = np.vstack(samples_list)[:target_nsamples]
         logl_out = np.hstack(logl_list)[:target_nsamples]
-
         samples = pd.DataFrame(x_out, columns=fisher_mpe.parameter_names)
 
-        # Efficiency: fraction of drawn samples that were kept
         efficiency = 100.0 * target_nsamples / total_drawn
         logger.info(
             f"Filtering complete: kept {target_nsamples} of {total_drawn} samples "
@@ -467,7 +489,7 @@ class Laplace(Sampler):
 
         return samples, logl_out, samples, efficiency
 
-    def _run_smc(self, mean, cov, fisher_mpe, cov_scaling):
+    def _run_smc(self, mean, cov, proposal, fisher_mpe, cov_scaling):
         """Build the Laplace proposal flow and run SMC sampling.
 
         Handles multi-mode discovery when ``n_modes > 1``, then delegates to
@@ -486,7 +508,7 @@ class Laplace(Sampler):
             proposal_flow = GaussianFlow(mean, cov)
 
         samples, logl, smc_log_z, smc_log_z_err = self._smc_sample(
-            proposal_flow, fisher_mpe
+            proposal_flow, proposal, fisher_mpe
         )
 
         if self.kwargs["plot_diagnostic"]:
@@ -540,10 +562,12 @@ class Laplace(Sampler):
             - float(proposal.logpdf(mean.reshape(1, -1))[0])
         )
 
-        # Pre-scan: draw a calibration batch to find the empirical maximum of
-        # L(x)π(x)/g(x).  These samples are discarded (not accepted/rejected)
+        # Pre-scan: draw in-prior calibration samples to find the empirical
+        # maximum of L(x)π(x)/g(x).  Using in-prior samples avoids wasting
+        # calibration evaluations on out-of-bounds points and gives a tighter
+        # bound estimate.  These samples are discarded (not accepted/rejected)
         # so the bound is fixed before the main loop begins.
-        x_cal = proposal.sample(batch_nsamples)
+        x_cal = self._draw_inprior_samples(proposal, batch_nsamples, fisher_mpe.parameter_names)
         g_cal = pd.DataFrame(x_cal, columns=fisher_mpe.parameter_names)
         ln_r_cal, _ = self._compute_ln_ratios(x_cal, g_cal, proposal, fisher_mpe)
         finite_cal = np.isfinite(ln_r_cal)
@@ -746,12 +770,13 @@ class Laplace(Sampler):
         logger.info(f"IS log-evidence: {log_z:.2f} +/- {log_z_err:.2f}")
         return log_z, log_z_err
 
-    def _smc_sample(self, proposal_flow, fisher_mpe):
+    def _smc_sample(self, proposal_flow, proposal, fisher_mpe):
         """Run posterior sampling via aspire, starting from the Laplace proposal.
 
-        Initial samples are drawn from the Gaussian (or mixture) proposal and
-        passed to ``aspire.fit()``.  ``aspire.sample_posterior()`` then
-        refines these toward the true posterior.
+        Initial samples are drawn from *proposal* (a ``TruncatedMVNProposal``)
+        filtered to the prior support, matching the inprior/rejection sampling
+        approach.  ``aspire.sample_posterior()`` then refines these toward the
+        true posterior.
         """
         from aspire import Aspire
         from aspire.samples import Samples
@@ -782,8 +807,9 @@ class Laplace(Sampler):
             "n_final_samples", self.kwargs["target_nsamples"]
         )
 
-        # Draw initial samples from the Laplace proposal and fit aspire
-        initial_theta, _ = proposal_flow.sample_and_log_prob(n_initial)
+        # Draw initial samples filtered to the prior support, consistent with
+        # the inprior/rejection sampling paths.
+        initial_theta = self._draw_inprior_samples(proposal, n_initial, parameter_names)
         initial_samples = Samples(
             initial_theta, parameters=parameter_names
         )
