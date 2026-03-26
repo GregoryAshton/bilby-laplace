@@ -3,12 +3,11 @@ import sys
 
 import numpy as np
 import pandas as pd
-from scipy.special import logsumexp
-from scipy.stats import multivariate_normal, truncnorm
 import tqdm
-
 from bilby.core.sampler.base_sampler import Sampler, signal_wrapper
 from bilby.core.utils import logger, random
+from scipy.special import logsumexp
+from scipy.stats import multivariate_normal, truncnorm
 
 from .matrix import FisherMatrixPosteriorEstimator
 
@@ -48,8 +47,7 @@ class TruncatedMVNProposal:
         self._a = (lower - mean) / self._sigma
         self._b = (upper - mean) / self._sigma
         self._dists = [
-            truncnorm(a=self._a[i], b=self._b[i], loc=mean[i], scale=self._sigma[i])
-            for i in range(self._ndim)
+            truncnorm(a=self._a[i], b=self._b[i], loc=mean[i], scale=self._sigma[i]) for i in range(self._ndim)
         ]
 
     def sample(self, n):
@@ -103,12 +101,7 @@ class GaussianMixtureFlow:
 
     def sample_and_log_prob(self, n_samples):
         idx = random.rng.integers(0, self._k, n_samples)
-        x = np.array(
-            [
-                random.rng.multivariate_normal(self._dists[i].mean, self._dists[i].cov)
-                for i in idx
-            ]
-        )
+        x = np.array([random.rng.multivariate_normal(self._dists[i].mean, self._dists[i].cov) for i in idx])
         return x, self.log_prob(x)
 
 
@@ -141,8 +134,9 @@ class Laplace(Sampler):
     outdir : str
     label : str
     resample : str or None
-        Resampling method: ``'rejection'`` (default), ``'importance'``, ``'smc'``, or ``None`` / ``'None'`` to skip resampling entirely and return raw
-        Laplace-approximation samples.
+        Resampling method: ``'rejection'`` (default), ``'importance'``, ``'smc'``, or
+        ``None`` / ``'None'`` to skip resampling and return raw Laplace-approximation
+        samples.
     target_nsamples : int
         Target number of posterior samples.
     batch_nsamples : int
@@ -283,8 +277,7 @@ class Laplace(Sampler):
         cov = self._validate_covariance(fisher_mpe, mean, cov)
 
         msg = "Gaussian proposal (MAP +/- 1-sigma):\n " + "\n ".join(
-            f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}"
-            for (key, val), var in zip(map_sample_dict.items(), np.diag(cov))
+            f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}" for (key, val), var in zip(map_sample_dict.items(), np.diag(cov))
         )
         logger.info(msg)
 
@@ -315,29 +308,25 @@ class Laplace(Sampler):
             resample = None
 
         if resample is None:
-            samples, logl, g_samples, efficiency = self._sample_laplace(
-                mean, cov, fisher_mpe, target_nsamples
-            )
+            samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, fisher_mpe, target_nsamples)
         elif resample == "smc":
-            samples, logl, g_samples, efficiency, smc_log_z, smc_log_z_err = (
-                self._run_smc(mean, cov, proposal, fisher_mpe, cov_scaling)
+            samples, logl, g_samples, efficiency, smc_log_z, smc_log_z_err = self._run_smc(
+                mean, cov, proposal, fisher_mpe, cov_scaling
             )
             if smc_log_z is not None:
                 log_evidence = float(smc_log_z)
                 log_evidence_err = float(smc_log_z_err)
         elif resample == "rejection":
-            samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = (
-                self._run_rejection_sampling(proposal, fisher_mpe, map_sample_dict)
+            samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_rejection_sampling(
+                proposal, fisher_mpe, map_sample_dict
             )
         elif resample == "inprior":
-            samples, logl, g_samples, efficiency = self._run_inprior(
-                proposal, fisher_mpe
-            )
+            samples, logl, g_samples, efficiency = self._run_inprior(proposal, fisher_mpe)
             log_evidence = np.nan
             log_evidence_err = np.nan
         else:
-            samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = (
-                self._run_importance_sampling(proposal, fisher_mpe, map_sample_dict)
+            samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_importance_sampling(
+                proposal, fisher_mpe, map_sample_dict
             )
 
         end_time = datetime.datetime.now()
@@ -382,10 +371,7 @@ class Laplace(Sampler):
 
     def _sample_laplace(self, mean, cov, fisher_mpe, target_nsamples):
         """Draw samples directly from the Gaussian approximation without resampling."""
-        logger.info(
-            f"Drawing {target_nsamples} samples from "
-            f"Gaussian approximation (no resampling)"
-        )
+        logger.info(f"Drawing {target_nsamples} samples from " f"Gaussian approximation (no resampling)")
         samples_array = random.rng.multivariate_normal(mean, cov, target_nsamples)
         samples = pd.DataFrame(samples_array, columns=fisher_mpe.parameter_names)
         logl = np.full(target_nsamples, np.nan)
@@ -415,8 +401,7 @@ class Laplace(Sampler):
 
         x_out = np.vstack(collected)[:n]
         logger.debug(
-            f"Drew {n} in-prior samples from {total_drawn} proposals "
-            f"({100.0 * n / total_drawn:.1f}% efficiency)"
+            f"Drew {n} in-prior samples from {total_drawn} proposals " f"({100.0 * n / total_drawn:.1f}% efficiency)"
         )
         return x_out
 
@@ -460,10 +445,7 @@ class Laplace(Sampler):
         target_nsamples = self.kwargs["target_nsamples"]
         batch_nsamples = self.kwargs["batch_nsamples"]
 
-        logger.info(
-            f"Drawing samples from proposal and filtering to prior support "
-            f"(target: {target_nsamples})"
-        )
+        logger.info(f"Drawing samples from proposal and filtering to prior support " f"(target: {target_nsamples})")
 
         samples_list = []
         logl_list = []
@@ -512,8 +494,7 @@ class Laplace(Sampler):
 
         efficiency = 100.0 * target_nsamples / total_drawn
         logger.info(
-            f"Filtering complete: kept {target_nsamples} of {total_drawn} samples "
-            f"({efficiency:.1f}% efficiency)"
+            f"Filtering complete: kept {target_nsamples} of {total_drawn} samples " f"({efficiency:.1f}% efficiency)"
         )
 
         return samples, logl_out, samples, efficiency
@@ -536,9 +517,7 @@ class Laplace(Sampler):
         else:
             proposal_flow = GaussianFlow(mean, cov)
 
-        samples, logl, smc_log_z, smc_log_z_err = self._smc_sample(
-            proposal_flow, proposal, fisher_mpe
-        )
+        samples, logl, smc_log_z, smc_log_z_err = self._smc_sample(proposal_flow, proposal, fisher_mpe)
 
         if self.kwargs["plot_diagnostic"]:
             self.create_smc_diagnostic(samples, proposal_flow)
@@ -585,8 +564,7 @@ class Laplace(Sampler):
         ln_M = (
             float(fisher_mpe.log_likelihood_from_array(mean))
             + sum(
-                np.log(max(self.priors[k].prob(float(map_sample_dict[k])), 1e-300))
-                for k in fisher_mpe.parameter_names
+                np.log(max(self.priors[k].prob(float(map_sample_dict[k])), 1e-300)) for k in fisher_mpe.parameter_names
             )
             - float(proposal.logpdf(mean.reshape(1, -1))[0])
         )
@@ -596,19 +574,14 @@ class Laplace(Sampler):
         # calibration evaluations on out-of-bounds points and gives a tighter
         # bound estimate.  These samples are discarded (not accepted/rejected)
         # so the bound is fixed before the main loop begins.
-        x_cal = self._draw_inprior_samples(
-            proposal, batch_nsamples, fisher_mpe.parameter_names
-        )
+        x_cal = self._draw_inprior_samples(proposal, batch_nsamples, fisher_mpe.parameter_names)
         g_cal = pd.DataFrame(x_cal, columns=fisher_mpe.parameter_names)
         ln_r_cal, _ = self._compute_ln_ratios(x_cal, g_cal, proposal, fisher_mpe)
         finite_cal = np.isfinite(ln_r_cal)
         if finite_cal.any():
             empirical_max = float(np.max(ln_r_cal[finite_cal]))
             if empirical_max > ln_M:
-                logger.info(
-                    f"Pre-scan raised rejection bound "
-                    f"{ln_M:.2f} → {empirical_max:.2f}"
-                )
+                logger.info(f"Pre-scan raised rejection bound " f"{ln_M:.2f} → {empirical_max:.2f}")
                 ln_M = empirical_max
 
         logger.info(
@@ -620,16 +593,11 @@ class Laplace(Sampler):
         all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
         n_accepted = n_proposed = 0
         n_bound_violations = 0
-        max_iterations = int(self.kwargs["max_iterations"])
 
-        pbar = tqdm.tqdm(
-            total=target_nsamples, desc="Rejection sampling", file=sys.stdout
-        )
+        pbar = tqdm.tqdm(total=target_nsamples, desc="Rejection sampling", file=sys.stdout)
 
         while n_accepted < target_nsamples:
-            if self._check_iteration_limit(
-                "Rejection sampling", n_proposed, n_accepted
-            ):
+            if self._check_iteration_limit("Rejection sampling", n_proposed, n_accepted):
                 pbar.close()
                 break
 
@@ -685,9 +653,7 @@ class Laplace(Sampler):
 
         if self.kwargs["plot_diagnostic"]:
             weights = np.exp(ln_r_all - ln_M)
-            self.create_resample_diagnostic(
-                samples, g_samples, mean, weights, method="rejection"
-            )
+            self.create_resample_diagnostic(samples, g_samples, mean, weights, method="rejection")
 
         return samples, logl, g_samples, efficiency, log_evidence, log_evidence_err
 
@@ -701,24 +667,15 @@ class Laplace(Sampler):
         """
         target_nsamples = self.kwargs["target_nsamples"]
         batch_nsamples = self.kwargs["batch_nsamples"]
-        mean = proposal.mean
 
         all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
         n_accepted = n_proposed = 0
-        max_iterations = int(self.kwargs["max_iterations"])
 
-        logger.info(
-            f"Drawing {target_nsamples} samples using importance resampling "
-            f"(batch size {batch_nsamples})"
-        )
-        pbar = tqdm.tqdm(
-            total=target_nsamples, desc="Importance sampling", file=sys.stdout
-        )
+        logger.info(f"Drawing {target_nsamples} samples using importance resampling " f"(batch size {batch_nsamples})")
+        pbar = tqdm.tqdm(total=target_nsamples, desc="Importance sampling", file=sys.stdout)
 
         while n_accepted < target_nsamples:
-            if self._check_iteration_limit(
-                "Importance sampling", n_proposed, n_accepted
-            ):
+            if self._check_iteration_limit("Importance sampling", n_proposed, n_accepted):
                 pbar.close()
                 break
 
@@ -789,9 +746,7 @@ class Laplace(Sampler):
         if self.kwargs["plot_diagnostic"]:
             ln_r_shifted = ln_r_all - np.nanmax(ln_r_all)
             weights = np.where(np.isfinite(ln_r_shifted), np.exp(ln_r_shifted), 0.0)
-            self.create_resample_diagnostic(
-                samples, g_samples, proposal.mean, weights, method="importance"
-            )
+            self.create_resample_diagnostic(samples, g_samples, proposal.mean, weights, method="importance")
 
         return samples, logl, g_samples, efficiency, log_evidence, log_evidence_err
 
@@ -829,10 +784,7 @@ class Laplace(Sampler):
 
         parameter_names = fisher_mpe.parameter_names
 
-        prior_bounds = {
-            key: (self.priors[key].minimum, self.priors[key].maximum)
-            for key in parameter_names
-        }
+        prior_bounds = {key: (self.priors[key].minimum, self.priors[key].maximum) for key in parameter_names}
 
         functions = get_aspire_functions(self.likelihood, self.priors, parameter_names)
 
@@ -868,9 +820,7 @@ class Laplace(Sampler):
         smc_log_z = getattr(result, "log_evidence", None)
         smc_log_z_err = getattr(result, "log_evidence_error", np.nan)
         if smc_log_z is not None:
-            logger.info(
-                f"Aspire log-evidence: {smc_log_z:.2f} " f"+/- {smc_log_z_err:.2f}"
-            )
+            logger.info(f"Aspire log-evidence: {smc_log_z:.2f} " f"+/- {smc_log_z_err:.2f}")
 
         return samples, logl, smc_log_z, smc_log_z_err
 
@@ -893,12 +843,8 @@ class Laplace(Sampler):
             direction = eigvecs[:, i]
 
             # Evaluate at +/- 1 sigma
-            logl_plus = float(
-                fisher_mpe.log_likelihood_from_array(mean + sigma_i * direction)
-            )
-            logl_minus = float(
-                fisher_mpe.log_likelihood_from_array(mean - sigma_i * direction)
-            )
+            logl_plus = float(fisher_mpe.log_likelihood_from_array(mean + sigma_i * direction))
+            logl_minus = float(fisher_mpe.log_likelihood_from_array(mean - sigma_i * direction))
 
             # Collect finite drops only (skip out-of-bounds)
             drops = []
@@ -927,11 +873,7 @@ class Laplace(Sampler):
                 # Likelihood flat or rising — inflate
                 eigvals[i] *= 4.0
                 any_inflated = True
-                logger.info(
-                    f"Widening proposal along axis {i}: "
-                    f"likelihood is flat at 1-sigma, "
-                    f"expanding by 4x"
-                )
+                logger.info(f"Widening proposal along axis {i}: " f"likelihood is flat at 1-sigma, " f"expanding by 4x")
 
         if any_inflated:
             cov = eigvecs @ np.diag(eigvals) @ eigvecs.T
@@ -960,12 +902,7 @@ class Laplace(Sampler):
 
         # Stratified uniform in each dimension
         intervals = np.arange(n_samples, dtype=float)
-        lhs_unit = np.column_stack(
-            [
-                (intervals + random.rng.uniform(size=n_samples)) / n_samples
-                for _ in range(ndim)
-            ]
-        )
+        lhs_unit = np.column_stack([(intervals + random.rng.uniform(size=n_samples)) / n_samples for _ in range(ndim)])
         # Shuffle each column independently
         for j in range(ndim):
             random.rng.shuffle(lhs_unit[:, j])
@@ -1015,17 +952,11 @@ class Laplace(Sampler):
 
         # --- 2. Multi-start search for secondary modes ---
         n_starts = self.kwargs["mode_search_nsamples"]
-        logger.info(
-            f"Evaluating {n_starts} prior samples "
-            f"(Latin hypercube) to search for "
-            f"secondary modes"
-        )
+        logger.info(f"Evaluating {n_starts} prior samples " f"(Latin hypercube) to search for " f"secondary modes")
 
         # Latin hypercube in [0,1]^D, then map to prior
         prior_x = self._latin_hypercube_prior(parameter_names, n_starts)
-        prior_logp = np.array(
-            [float(fisher_mpe.log_posterior_from_array(x)) for x in prior_x]
-        )
+        prior_logp = np.array([float(fisher_mpe.log_posterior_from_array(x)) for x in prior_x])
 
         # Sort descending by posterior
         order = np.argsort(prior_logp)[::-1]
@@ -1043,9 +974,7 @@ class Laplace(Sampler):
             x = prior_x[idx]
 
             # Skip if near an existing mode
-            near_existing = any(
-                np.max(np.abs(x - m) / std_scale) < 3.0 for m, _, _ in found_modes
-            )
+            near_existing = any(np.max(np.abs(x - m) / std_scale) < 3.0 for m, _, _ in found_modes)
             if near_existing:
                 continue
 
@@ -1055,20 +984,12 @@ class Laplace(Sampler):
             polished = fisher_mpe._maximize_posterior_from_initial_sample(sample_dict)
             p_mean = np.array(polished.x)
             p_logp = -polished.fun
-            logger.debug(
-                f"Candidate {n_polished}: "
-                f"log-posterior = {p_logp:.2f} "
-                f"after local optimisation"
-            )
+            logger.debug(f"Candidate {n_polished}: " f"log-posterior = {p_logp:.2f} " f"after local optimisation")
 
             # Re-check after polishing
-            is_dup = any(
-                np.max(np.abs(p_mean - m) / std_scale) < 3.0 for m, _, _ in found_modes
-            )
+            is_dup = any(np.max(np.abs(p_mean - m) / std_scale) < 3.0 for m, _, _ in found_modes)
             if is_dup:
-                logger.debug(
-                    f"Candidate {n_polished} converged to " f"a known mode; skipping"
-                )
+                logger.debug(f"Candidate {n_polished} converged to " f"a known mode; skipping")
                 continue
 
             try:
@@ -1077,15 +998,9 @@ class Laplace(Sampler):
                 p_cov = cov_scaling * p_iFIM
                 p_cov = self._validate_covariance(fisher_mpe, p_mean, p_cov)
                 found_modes.append((p_mean, p_cov, p_logp))
-                logger.info(
-                    f"Secondary mode {len(found_modes) - 1} "
-                    f"found: log-posterior = {p_logp:.2f}"
-                )
+                logger.info(f"Secondary mode {len(found_modes) - 1} " f"found: log-posterior = {p_logp:.2f}")
             except Exception as exc:
-                logger.warning(
-                    f"Could not compute covariance for "
-                    f"candidate {n_polished}: {exc}"
-                )
+                logger.warning(f"Could not compute covariance for " f"candidate {n_polished}: {exc}")
 
         # --- 3. Sort and summarise ---
         found_modes.sort(key=lambda r: r[2], reverse=True)
@@ -1095,17 +1010,12 @@ class Laplace(Sampler):
     @staticmethod
     def _log_mode_summary(found_modes, parameter_names):
         """Log a table summarising the discovered modes."""
-        header = f"{'Mode':<6} {'log-posterior':>14}  " + "  ".join(
-            f"{p:>12}" for p in parameter_names
-        )
+        header = f"{'Mode':<6} {'log-posterior':>14}  " + "  ".join(f"{p:>12}" for p in parameter_names)
         rows = []
         for i, (mean, _cov, logp) in enumerate(found_modes):
             vals = "  ".join(f"{v:>+12.4f}" for v in mean)
             rows.append(f"  {i:<4d} {logp:>14.2f}  {vals}")
-        logger.info(
-            f"Summary of {len(found_modes)} mode(s):\n"
-            f"  {header}\n" + "\n".join(rows)
-        )
+        logger.info(f"Summary of {len(found_modes)} mode(s):\n" f"  {header}\n" + "\n".join(rows))
 
     def create_proposal_diagnostic(self, mean, cov):
         """Corner plot comparing the Gaussian proposal against the prior.
@@ -1117,8 +1027,8 @@ class Laplace(Sampler):
         even when the proposal is much wider than the prior.
         """
         import corner
-        import matplotlib.pyplot as plt
         import matplotlib.lines as mpllines
+        import matplotlib.pyplot as plt
         from scipy.stats import norm
 
         parameter_names = self.search_parameter_keys
@@ -1128,13 +1038,9 @@ class Laplace(Sampler):
 
         proposal_sigmas = np.sqrt(np.diag(cov))
 
-        prior_samples = np.column_stack(
-            [self.priors[k].sample(n_samples) for k in parameter_names]
-        )
+        prior_samples = np.column_stack([self.priors[k].sample(n_samples) for k in parameter_names])
 
-        ranges = [
-            (self.priors[k].minimum, self.priors[k].maximum) for k in parameter_names
-        ]
+        ranges = [(self.priors[k].minimum, self.priors[k].maximum) for k in parameter_names]
 
         p_color, p_ls = "C0", "-"
         g_color, g_ls = "k", "--"
@@ -1246,8 +1152,8 @@ class Laplace(Sampler):
     def create_resample_diagnostic(self, samples, raw_samples, mean, weights, method):
         """Produce a corner plot comparing the proposal and resampled posteriors."""
         import corner
-        import matplotlib.pyplot as plt
         import matplotlib.lines as mpllines
+        import matplotlib.pyplot as plt
 
         labels = [k.replace("_", " ") for k in self.search_parameter_keys]
         labels.append("weights")
@@ -1262,9 +1168,7 @@ class Laplace(Sampler):
         )
 
         xs = samples[self.search_parameter_keys].values
-        xs = np.concatenate(
-            (xs, np.random.uniform(0, 1, len(xs)).reshape(-1, 1)), axis=1
-        )
+        xs = np.concatenate((xs, np.random.uniform(0, 1, len(xs)).reshape(-1, 1)), axis=1)
         rxs = raw_samples[self.search_parameter_keys].values
         rxs = np.concatenate((rxs, weights.reshape(-1, 1)), axis=1)
 
@@ -1331,8 +1235,8 @@ class Laplace(Sampler):
         diagonal panels and as scatter points on the off-diagonal panels.
         """
         import corner
-        import matplotlib.pyplot as plt
         import matplotlib.lines as mpllines
+        import matplotlib.pyplot as plt
 
         labels = [k.replace("_", " ") for k in self.search_parameter_keys]
         corner_kwargs = dict(

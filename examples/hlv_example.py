@@ -19,8 +19,8 @@ import argparse
 import glob
 import os
 
-import numpy as np
 import bilby
+import numpy as np
 from bilby.core.prior import Constraint, Sine, Uniform
 from bilby.gw.prior import (
     AlignedSpin,
@@ -82,14 +82,14 @@ def setup():
     injection_parameters_radec = injection_parameters.copy()
 
     ra, dec = bilby.gw.utils.zenith_azimuth_to_ra_dec(
-        injection_parameters['zenith'],
-        injection_parameters['azimuth'],
-        injection_parameters['geocent_time'],
+        injection_parameters["zenith"],
+        injection_parameters["azimuth"],
+        injection_parameters["geocent_time"],
         ifo_list,
     )
 
-    injection_parameters_radec['ra'] = ra
-    injection_parameters_radec['dec'] = dec
+    injection_parameters_radec["ra"] = ra
+    injection_parameters_radec["dec"] = dec
 
     ifo_list.inject_signal(
         parameters=injection_parameters_radec,
@@ -99,12 +99,8 @@ def setup():
     # Priors
     priors = BBHPriorDict(
         dictionary=dict(
-            chirp_mass=UniformInComponentsChirpMass(
-                name="chirp_mass", minimum=25, maximum=35, unit=r"$M_{\odot}$"
-            ),
-            mass_ratio=UniformInComponentsMassRatio(
-                name="mass_ratio", minimum=0.125, maximum=1
-            ),
+            chirp_mass=UniformInComponentsChirpMass(name="chirp_mass", minimum=25, maximum=35, unit=r"$M_{\odot}$"),
+            mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.125, maximum=1),
             mass_1=Constraint(name="mass_1", minimum=10, maximum=80),
             mass_2=Constraint(name="mass_2", minimum=10, maximum=80),
             chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.99)),
@@ -118,12 +114,8 @@ def setup():
                 latex_label=r"$d_L$",
             ),
             theta_jn=Sine(name="theta_jn"),
-            psi=Uniform(
-                name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic"
-            ),
-            phase=Uniform(
-                name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic"
-            ),
+            psi=Uniform(name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic"),
+            phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic"),
             geocent_time=Uniform(
                 minimum=injection_parameters["geocent_time"] - 0.05,
                 maximum=injection_parameters["geocent_time"] + 0.05,
@@ -170,7 +162,7 @@ def setup():
         plot_diagnostic=True,
         clean=True,
         sampler="laplace",
-        target_nsamples=5000,
+        target_nsamples=1000,
         use_unit_cube=True,
     )
 
@@ -180,6 +172,7 @@ def setup():
 # ---------------------------------------------------------------------------
 # Samplers
 # ---------------------------------------------------------------------------
+
 
 def run_laplace(_common_laplace):
     return bilby.run_sampler(
@@ -196,8 +189,10 @@ def run_rejection(_common_laplace):
         **_common_laplace,
         label=f"{base_label}_rejection",
         resample="rejection",
-        cov_scaling=1,
+        cov_scaling=2,
         jacobian_cap_scale=1,
+        max_iterations=10000,
+        batch_nsamples=10000,
     )
 
 
@@ -240,7 +235,7 @@ def compare():
     """Load all result files in outdir, make a comparison corner plot,
     and print a comparison table."""
     pattern = os.path.join(outdir, f"{base_label}_*_result.*")
-    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith('.old')])
+    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith(".old")])
     if not result_files:
         logger.warning(f"No result files found matching {pattern}")
         return
@@ -271,7 +266,7 @@ def compare():
     print("=" * W)
     print(f"{'Method':<20} {'log Z':>10} {'± σ':>8} {'n_like':>8} {'effic.':>8} {'time':>10}")
     print("-" * W)
-    for r, lab in zip(results, labels):
+    for r, _lab in zip(results, labels):
         log_z = getattr(r, "log_evidence", np.nan) or np.nan
         log_z_err = getattr(r, "log_evidence_err", np.nan) or np.nan
         secs = r.sampling_time.total_seconds()
@@ -285,19 +280,22 @@ def compare():
     print("=" * W + "\n")
 
     if len(results) < 2:
-        logger.warning(
-            f"Need at least 2 results for a comparison plot, "
-            f"found {len(results)}"
-        )
+        logger.warning(f"Need at least 2 results for a comparison plot, " f"found {len(results)}")
         return
 
     import matplotlib.pyplot as plt
+
     plotdir = os.path.dirname(os.path.abspath(__file__))
 
     intrinsic_params = ["mass_1", "mass_2", "chi_1", "chi_2"]
     extrinsic_params = [
-        "ra", "dec", "luminosity_distance", "theta_jn", "psi",
-        "geocent_time", "phase",
+        "ra",
+        "dec",
+        "luminosity_distance",
+        "theta_jn",
+        "psi",
+        "geocent_time",
+        "phase",
     ]
 
     plot_sets = [
@@ -349,9 +347,7 @@ def compare():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="BBH injection in Gaussian noise (HLV network)"
-    )
+    parser = argparse.ArgumentParser(description="BBH injection in Gaussian noise (HLV network)")
     parser.add_argument(
         "--sampler",
         nargs="+",
