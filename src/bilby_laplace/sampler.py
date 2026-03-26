@@ -422,6 +422,34 @@ class Laplace(Sampler):
         )
         return x_out
 
+    def _check_iteration_limit(self, method_name, n_proposed, n_accepted):
+        """Check if iteration limit has been hit and acceptance rate is below 1%.
+
+        Raises SamplerError or logs error depending on fail_on_error setting.
+        Returns True if limit was hit, False otherwise.
+        """
+        max_iterations = int(self.kwargs["max_iterations"])
+        if n_proposed < max_iterations:
+            return False
+
+        acceptance_rate = 100.0 * n_accepted / n_proposed
+        if acceptance_rate >= 1.0:
+            return False
+
+        msg = (
+            f"{method_name} hit iteration limit "
+            f"({max_iterations:.0e} samples) with only "
+            f"{n_accepted} accepted samples "
+            f"({acceptance_rate:.2f}% < 1%). "
+            f"The proposal is poorly matched to the likelihood. "
+            f"Consider increasing cov_scaling."
+        )
+        if self.kwargs["fail_on_error"]:
+            raise SamplerError(msg)
+        else:
+            logger.error(msg)
+        return True
+
     def _run_inprior(self, proposal, fisher_mpe):
         """Draw and filter samples to those within prior bounds.
 
@@ -597,22 +625,8 @@ class Laplace(Sampler):
         )
 
         while n_accepted < target_nsamples:
-            if n_proposed >= max_iterations:
+            if self._check_iteration_limit("Rejection sampling", n_proposed, n_accepted):
                 pbar.close()
-                acceptance_rate = 100.0 * n_accepted / n_proposed
-                if acceptance_rate < 1.0:
-                    msg = (
-                        f"Rejection sampling hit iteration limit "
-                        f"({max_iterations:.0e} samples) with only "
-                        f"{n_accepted} accepted samples "
-                        f"({acceptance_rate:.2f}% < 1%). "
-                        f"The proposal is poorly matched to the likelihood. "
-                        f"Consider increasing cov_scaling."
-                    )
-                    if self.kwargs["fail_on_error"]:
-                        raise SamplerError(msg)
-                    else:
-                        logger.error(msg)
                 break
 
             x = proposal.sample(batch_nsamples)
@@ -698,22 +712,8 @@ class Laplace(Sampler):
         )
 
         while n_accepted < target_nsamples:
-            if n_proposed >= max_iterations:
+            if self._check_iteration_limit("Importance sampling", n_proposed, n_accepted):
                 pbar.close()
-                acceptance_rate = 100.0 * n_accepted / n_proposed
-                if acceptance_rate < 1.0:
-                    msg = (
-                        f"Importance sampling hit iteration limit "
-                        f"({max_iterations:.0e} samples) with only "
-                        f"{n_accepted} accepted samples "
-                        f"({acceptance_rate:.2f}% < 1%). "
-                        f"The proposal is poorly matched to the likelihood. "
-                        f"Consider increasing cov_scaling."
-                    )
-                    if self.kwargs["fail_on_error"]:
-                        raise SamplerError(msg)
-                    else:
-                        logger.error(msg)
                 break
 
             x = proposal.sample(batch_nsamples)
