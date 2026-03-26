@@ -214,13 +214,14 @@ class Laplace(Sampler):
         plot_diagnostic=False,
         cov_scaling=1,
         use_injection_for_map=True,
-        fail_on_error=False,
+        fail_on_error=True,
         use_unit_cube=True,
         jacobian_cap_scale=1.0,
         hessian_kwargs=None,
         n_modes=1,
         mode_search_nsamples=500,
         smc_kwargs=None,
+        max_iterations=1e6,
     )
 
     def __init__(
@@ -589,12 +590,31 @@ class Laplace(Sampler):
         all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
         n_accepted = n_proposed = 0
         n_bound_violations = 0
+        max_iterations = int(self.kwargs["max_iterations"])
 
         pbar = tqdm.tqdm(
             total=target_nsamples, desc="Rejection sampling", file=sys.stdout
         )
 
         while n_accepted < target_nsamples:
+            if n_proposed >= max_iterations:
+                pbar.close()
+                acceptance_rate = 100.0 * n_accepted / n_proposed
+                if acceptance_rate < 1.0:
+                    msg = (
+                        f"Rejection sampling hit iteration limit "
+                        f"({max_iterations:.0e} samples) with only "
+                        f"{n_accepted} accepted samples "
+                        f"({acceptance_rate:.2f}% < 1%). "
+                        f"The proposal is poorly matched to the likelihood. "
+                        f"Consider increasing cov_scaling."
+                    )
+                    if self.kwargs["fail_on_error"]:
+                        raise SamplerError(msg)
+                    else:
+                        logger.error(msg)
+                break
+
             x = proposal.sample(batch_nsamples)
             g_df = pd.DataFrame(x, columns=fisher_mpe.parameter_names)
             ln_r, logl = self._compute_ln_ratios(x, g_df, proposal, fisher_mpe)
@@ -667,6 +687,7 @@ class Laplace(Sampler):
 
         all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
         n_accepted = n_proposed = 0
+        max_iterations = int(self.kwargs["max_iterations"])
 
         logger.info(
             f"Drawing {target_nsamples} samples using importance resampling "
@@ -677,6 +698,24 @@ class Laplace(Sampler):
         )
 
         while n_accepted < target_nsamples:
+            if n_proposed >= max_iterations:
+                pbar.close()
+                acceptance_rate = 100.0 * n_accepted / n_proposed
+                if acceptance_rate < 1.0:
+                    msg = (
+                        f"Importance sampling hit iteration limit "
+                        f"({max_iterations:.0e} samples) with only "
+                        f"{n_accepted} accepted samples "
+                        f"({acceptance_rate:.2f}% < 1%). "
+                        f"The proposal is poorly matched to the likelihood. "
+                        f"Consider increasing cov_scaling."
+                    )
+                    if self.kwargs["fail_on_error"]:
+                        raise SamplerError(msg)
+                    else:
+                        logger.error(msg)
+                break
+
             x = proposal.sample(batch_nsamples)
             g_df = pd.DataFrame(x, columns=fisher_mpe.parameter_names)
 
