@@ -89,7 +89,8 @@ class FisherMatrixPosteriorEstimator:
         # Skip when using differential_evolution, which doesn't need starting points.
         if minimization_method != "differential_evolution":
             self.prior_samples = [
-                priors.sample_subset(self.parameter_names) for _ in range(n_prior_samples)
+                priors.sample_subset(self.parameter_names)
+                for _ in range(n_prior_samples)
             ]
         self.prior_bounds_min = np.array(
             [priors[key].minimum for key in self.parameter_names]
@@ -149,13 +150,12 @@ class FisherMatrixPosteriorEstimator:
                 idxs = x_array > self.prior_bounds_max
                 x_array[idxs] = self.prior_bounds_max[idxs]
             else:
-                if np.any(x_array < self.prior_bounds_min) or \
-                        np.any(x_array > self.prior_bounds_max):
+                if np.any(x_array < self.prior_bounds_min) or np.any(
+                    x_array > self.prior_bounds_max
+                ):
                     return -np.inf
 
-            return self.log_likelihood(
-                array_to_dict(self.parameter_names, x_array)
-            )
+            return self.log_likelihood(array_to_dict(self.parameter_names, x_array))
 
         def wrapped_logl_arb(x_array):
             return np.apply_along_axis(wrapped_logl, 0, x_array)
@@ -164,22 +164,31 @@ class FisherMatrixPosteriorEstimator:
 
     def log_posterior_from_array(self, x_array):
         """Evaluate log-posterior from a parameter array (or column-stacked arrays)."""
+
         def wrapped(x_array):
-            if np.any(x_array < self.prior_bounds_min) or \
-                    np.any(x_array > self.prior_bounds_max):
+            if np.any(x_array < self.prior_bounds_min) or np.any(
+                x_array > self.prior_bounds_max
+            ):
                 return -np.inf
-            return self.log_posterior(
-                array_to_dict(self.parameter_names, x_array)
-            )
+            return self.log_posterior(array_to_dict(self.parameter_names, x_array))
+
         return np.apply_along_axis(wrapped, 0, x_array)
 
     def _to_unit_cube(self, x_array):
-        return np.array([self.priors_dict[k].cdf(float(x_array[i]))
-                         for i, k in enumerate(self.parameter_names)])
+        return np.array(
+            [
+                self.priors_dict[k].cdf(float(x_array[i]))
+                for i, k in enumerate(self.parameter_names)
+            ]
+        )
 
     def _from_unit_cube(self, u_array):
-        return np.array([self.priors_dict[k].rescale(float(np.clip(u_array[i], 0.0, 1.0)))
-                         for i, k in enumerate(self.parameter_names)])
+        return np.array(
+            [
+                self.priors_dict[k].rescale(float(np.clip(u_array[i], 0.0, 1.0)))
+                for i, k in enumerate(self.parameter_names)
+            ]
+        )
 
     def _jacobian_diag(self, x_array):
         """Diagonal of dθ/du = 1/p(θ) at the given parameter values.
@@ -213,32 +222,42 @@ class FisherMatrixPosteriorEstimator:
 
     def log_likelihood_in_unit_cube(self, u_array):
         """L̃(u) = L(θ(u)); same shape contract as log_likelihood_from_array."""
+
         def wrapped(u):
             x = self._from_unit_cube(u)
             return self.log_likelihood(array_to_dict(self.parameter_names, x))
+
         return np.apply_along_axis(wrapped, 0, u_array)
 
     def log_posterior_in_unit_cube(self, u_array):
         """log p(θ(u)|d) = log L(θ(u)) + log π(θ(u)); in unit-cube coords."""
+
         def wrapped(u):
             x = self._from_unit_cube(u)
             return self.log_posterior(array_to_dict(self.parameter_names, x))
+
         return np.apply_along_axis(wrapped, 0, u_array)
 
     def _second_deriv_unit_cube(self, u_map, ii, jj):
         """Finite-difference second derivative of log-posterior in unit-cube coords."""
         h = self.fd_eps
-        ei = np.zeros(self.N); ei[ii] = h
-        ej = np.zeros(self.N); ej[jj] = h
+        ei = np.zeros(self.N)
+        ei[ii] = h
+        ej = np.zeros(self.N)
+        ej[jj] = h
         if ii == jj:
-            return (self.log_posterior_in_unit_cube(u_map + ei)
-                    - 2 * self.log_posterior_in_unit_cube(u_map)
-                    + self.log_posterior_in_unit_cube(u_map - ei)) / h**2
+            return (
+                self.log_posterior_in_unit_cube(u_map + ei)
+                - 2 * self.log_posterior_in_unit_cube(u_map)
+                + self.log_posterior_in_unit_cube(u_map - ei)
+            ) / h**2
         else:
-            return (self.log_posterior_in_unit_cube(u_map + ei + ej)
-                    - self.log_posterior_in_unit_cube(u_map + ei - ej)
-                    - self.log_posterior_in_unit_cube(u_map - ei + ej)
-                    + self.log_posterior_in_unit_cube(u_map - ei - ej)) / (4 * h**2)
+            return (
+                self.log_posterior_in_unit_cube(u_map + ei + ej)
+                - self.log_posterior_in_unit_cube(u_map + ei - ej)
+                - self.log_posterior_in_unit_cube(u_map - ei + ej)
+                + self.log_posterior_in_unit_cube(u_map - ei - ej)
+            ) / (4 * h**2)
 
     def calculate_FIM(self, sample):
         if self.use_unit_cube:
@@ -247,7 +266,9 @@ class FisherMatrixPosteriorEstimator:
 
     def _calculate_FIM_parameter_space(self, sample):
         if version.parse(scipy.__version__) < version.parse("1.15"):
-            logger.info("Computing Hessian of log-posterior (finite differences, scipy < 1.15)")
+            logger.info(
+                "Computing Hessian of log-posterior (finite differences, scipy < 1.15)"
+            )
             FIM = np.zeros((self.N, self.N))
             for ii, ii_key in enumerate(self.parameter_names):
                 for jj, jj_key in enumerate(self.parameter_names):
@@ -258,9 +279,7 @@ class FisherMatrixPosteriorEstimator:
         else:
             import scipy.differentiate as sd
 
-            logger.info(
-                "Computing Hessian of log-posterior (scipy.differentiate)"
-            )
+            logger.info("Computing Hessian of log-posterior (scipy.differentiate)")
             point = np.array([sample[key] for key in self.parameter_names])
             kw = {"initial_step": 0.5, **self.hessian_kwargs}
             res = sd.hessian(self.log_posterior_from_array, point, **kw)
@@ -273,20 +292,25 @@ class FisherMatrixPosteriorEstimator:
         u_map = self._to_unit_cube(x_array)
 
         if version.parse(scipy.__version__) < version.parse("1.15"):
-            logger.info("Computing Hessian of log-posterior in unit cube (finite differences, scipy < 1.15)")
+            logger.info(
+                "Computing Hessian of log-posterior in unit cube (finite differences, scipy < 1.15)"
+            )
             FIM_u = np.zeros((self.N, self.N))
             for ii in range(self.N):
                 for jj in range(self.N):
                     FIM_u[ii, jj] = -self._second_deriv_unit_cube(u_map, ii, jj)
         else:
             import scipy.differentiate as sd
-            logger.info("Computing Hessian of log-posterior in unit cube (scipy.differentiate)")
+
+            logger.info(
+                "Computing Hessian of log-posterior in unit cube (scipy.differentiate)"
+            )
             kw = {"initial_step": 0.001, **self.hessian_kwargs}
             res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
             FIM_u = -res.ddf
             logger.debug(f"Hessian (unit cube):\n{FIM_u}")
 
-        J_inv = 1.0 / self._jacobian_diag(x_array)   # = p(θ_MAP)
+        J_inv = 1.0 / self._jacobian_diag(x_array)  # = p(θ_MAP)
 
         # Cap the Jacobian at the uniform-prior value (1/width) for each
         # parameter.  When the prior is strongly peaked (p(θ) >> 1/width),
@@ -294,10 +318,12 @@ class FisherMatrixPosteriorEstimator:
         # parameter-space covariance.  Capping prevents this for prior-
         # dominated parameters while leaving likelihood-constrained
         # parameters unaffected.
-        uniform_cap = np.array([
-            self.jacobian_cap_scale / self.prior_width_dict[k]
-            for k in self.parameter_names
-        ])
+        uniform_cap = np.array(
+            [
+                self.jacobian_cap_scale / self.prior_width_dict[k]
+                for k in self.parameter_names
+            ]
+        )
         capped = J_inv > uniform_cap
         if np.any(capped):
             names = [k for k, c in zip(self.parameter_names, capped) if c]
@@ -338,12 +364,7 @@ class FisherMatrixPosteriorEstimator:
                 "iFIM has non-positive determinant; "
                 "Laplace evidence estimate may be unreliable"
             )
-        log_z = (
-            log_l_map
-            + log_pi_map
-            + 0.5 * d * np.log(2 * np.pi)
-            + 0.5 * log_det
-        )
+        log_z = log_l_map + log_pi_map + 0.5 * d * np.log(2 * np.pi) + 0.5 * log_det
         logger.info(
             f"Laplace log-evidence: {log_z:.2f} "
             f"(log L_MAP={log_l_map:.2f}, "
@@ -512,20 +533,13 @@ class FisherMatrixPosteriorEstimator:
         points for a local optimizer and the best result is returned.
         """
         if initial_sample:
-            logger.info(
-                "Finding MAP from initial parameters"
-            )
+            logger.info("Finding MAP from initial parameters")
             minout = self._maximize_posterior_from_initial_sample(initial_sample)
         elif self.minimization_method == "differential_evolution":
-            logger.info(
-                "Finding MAP using differential evolution"
-            )
+            logger.info("Finding MAP using differential evolution")
             minout = self._maximize_posterior_differential_evolution()
         else:
-            logger.info(
-                f"Finding MAP from "
-                f"{self.n_prior_samples} starting points"
-            )
+            logger.info(f"Finding MAP from " f"{self.n_prior_samples} starting points")
             max_logP = -np.inf
             logP_list = []
             successes = 0
