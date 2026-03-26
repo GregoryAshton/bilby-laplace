@@ -12,9 +12,8 @@ import argparse
 import glob
 import os
 
-import numpy as np
 import bilby
-
+import numpy as np
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
@@ -24,6 +23,7 @@ base_label = "gaussian"
 
 def setup():
     """Set up likelihood, priors, and sampler configuration."""
+
     # Likelihood
     class GaussianLikelihood(bilby.core.likelihood.Likelihood):
         """2-D correlated Gaussian likelihood."""
@@ -31,10 +31,12 @@ def setup():
         def __init__(self, mu_x=1.0, mu_y=-0.5, sigma_x=0.3, sigma_y=0.5, rho=0.7):
             super().__init__(parameters={"x": None, "y": None})
             self.mu = np.array([mu_x, mu_y])
-            cov = np.array([
-                [sigma_x**2, rho * sigma_x * sigma_y],
-                [rho * sigma_x * sigma_y, sigma_y**2],
-            ])
+            cov = np.array(
+                [
+                    [sigma_x**2, rho * sigma_x * sigma_y],
+                    [rho * sigma_x * sigma_y, sigma_y**2],
+                ]
+            )
             self._inv_cov = np.linalg.inv(cov)
             self._log_norm = -0.5 * np.log(np.linalg.det(2 * np.pi * cov))
 
@@ -113,7 +115,7 @@ def compare():
     """Load all result files in outdir, make a comparison corner plot,
     and print a comparison table."""
     pattern = os.path.join(outdir, f"{base_label}_*_result.*")
-    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith('.old')])
+    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith(".old")])
     if not result_files:
         logger.warning(f"No result files found matching {pattern}")
         return
@@ -144,7 +146,7 @@ def compare():
     print("=" * W)
     print(f"{'Method':<20} {'log Z':>10} {'± σ':>8} {'n_like':>8} {'effic.':>8} {'time':>10}")
     print("-" * W)
-    for r, lab in zip(results, labels):
+    for r, _lab in zip(results, labels):
         log_z = getattr(r, "log_evidence", np.nan) or np.nan
         log_z_err = getattr(r, "log_evidence_err", np.nan) or np.nan
         secs = r.sampling_time.total_seconds()
@@ -158,13 +160,11 @@ def compare():
     print("=" * W + "\n")
 
     if len(results) < 2:
-        logger.warning(
-            f"Need at least 2 results for a comparison plot, "
-            f"found {len(results)}"
-        )
+        logger.warning(f"Need at least 2 results for a comparison plot, " f"found {len(results)}")
         return
 
     import matplotlib.pyplot as plt
+
     filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{base_label}_comparison.png")
     fig = bilby.core.result.plot_multiple(
         results,
@@ -175,15 +175,11 @@ def compare():
     )
     fig.savefig(filename, dpi=400)
     plt.close(fig)
-    logger.info(
-        f"Comparison corner plot saved to {filename}"
-    )
+    logger.info(f"Comparison corner plot saved to {filename}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Laplace vs dynesty on a 2D Gaussian likelihood"
-    )
+    parser = argparse.ArgumentParser(description="Laplace vs dynesty on a 2D Gaussian likelihood")
     parser.add_argument(
         "--sampler",
         nargs="+",

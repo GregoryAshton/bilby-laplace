@@ -22,9 +22,8 @@ import argparse
 import glob
 import os
 
-import numpy as np
 import bilby
-
+import numpy as np
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
@@ -34,6 +33,7 @@ base_label = "rosenbrock"
 
 def setup():
     """Set up likelihood, priors, and sampler configuration."""
+
     # Likelihood
     class RosenbrockLikelihood(bilby.core.likelihood.Likelihood):
         """2-D Rosenbrock (banana) likelihood.
@@ -52,7 +52,7 @@ def setup():
         def log_likelihood(self, parameters=None):
             x = parameters["x"]
             y = parameters["y"]
-            return -((1 - x) ** 2 + 100 * (y - x ** 2) ** 2) / self.scale
+            return -((1 - x) ** 2 + 100 * (y - x**2) ** 2) / self.scale
 
     likelihood = RosenbrockLikelihood(scale=1.0)
 
@@ -140,7 +140,7 @@ def compare():
     """Load all result files in outdir, make a comparison corner plot,
     and print a comparison table."""
     pattern = os.path.join(outdir, f"{base_label}_*_result.*")
-    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith('.old')])
+    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith(".old")])
     if not result_files:
         logger.warning(f"No result files found matching {pattern}")
         return
@@ -171,7 +171,7 @@ def compare():
     print("=" * W)
     print(f"{'Method':<20} {'log Z':>10} {'± σ':>8} {'n_like':>8} {'effic.':>8} {'time':>10}")
     print("-" * W)
-    for r, lab in zip(results, labels):
+    for r, _lab in zip(results, labels):
         log_z = getattr(r, "log_evidence", np.nan) or np.nan
         log_z_err = getattr(r, "log_evidence_err", np.nan) or np.nan
         secs = r.sampling_time.total_seconds()
@@ -185,13 +185,11 @@ def compare():
     print("=" * W + "\n")
 
     if len(results) < 2:
-        logger.warning(
-            f"Need at least 2 results for a comparison plot, "
-            f"found {len(results)}"
-        )
+        logger.warning(f"Need at least 2 results for a comparison plot, " f"found {len(results)}")
         return
 
     import matplotlib.pyplot as plt
+
     filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{base_label}_comparison.png")
     fig = bilby.core.result.plot_multiple(
         results,
@@ -202,15 +200,11 @@ def compare():
     )
     fig.savefig(filename, dpi=400)
     plt.close(fig)
-    logger.info(
-        f"Comparison corner plot saved to {filename}"
-    )
+    logger.info(f"Comparison corner plot saved to {filename}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Laplace vs dynesty on a 2D Rosenbrock likelihood"
-    )
+    parser = argparse.ArgumentParser(description="Laplace vs dynesty on a 2D Rosenbrock likelihood")
     parser.add_argument(
         "--sampler",
         nargs="+",
