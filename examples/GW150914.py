@@ -23,15 +23,10 @@ import argparse
 import glob
 import os
 
-import numpy as np
 import bilby
+import numpy as np
 from bilby.core.prior import Constraint, PowerLaw, Sine, Uniform
-from bilby.gw.prior import (
-    AlignedSpin,
-    BBHPriorDict,
-    UniformInComponentsChirpMass,
-    UniformInComponentsMassRatio,
-)
+from bilby.gw.prior import BBHPriorDict
 from gwpy.timeseries import TimeSeries
 
 logger = bilby.core.utils.logger
@@ -66,9 +61,7 @@ def setup():
         logger.info(f"Downloading PSD data for ifo {det}")
         psd_data = TimeSeries.fetch_open_data(det, psd_start_time, psd_end_time, cache=True)
         psd_alpha = 2 * roll_off / duration
-        psd = psd_data.psd(
-            fftlength=duration, overlap=0, window=("tukey", psd_alpha), method="median"
-        )
+        psd = psd_data.psd(fftlength=duration, overlap=0, window=("tukey", psd_alpha), method="median")
         ifo.power_spectral_density = bilby.gw.detector.PowerSpectralDensity(
             frequency_array=psd.frequencies.value, psd_array=psd.value
         )
@@ -208,7 +201,7 @@ def compare():
     """Load all result files in outdir, make a comparison corner plot,
     and print a comparison table."""
     pattern = os.path.join(outdir, f"{base_label}_*_result.*")
-    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith('.old')])
+    result_files = sorted([f for f in glob.glob(pattern) if not f.endswith(".old")])
     if not result_files:
         logger.warning(f"No result files found matching {pattern}")
         return
@@ -239,7 +232,7 @@ def compare():
     print("=" * W)
     print(f"{'Method':<20} {'log Z':>10} {'± σ':>8} {'n_like':>8} {'effic.':>8} {'time':>10}")
     print("-" * W)
-    for r, lab in zip(results, labels):
+    for r, _lab in zip(results, labels):
         log_z = getattr(r, "log_evidence", np.nan) or np.nan
         log_z_err = getattr(r, "log_evidence_err", np.nan) or np.nan
         secs = r.sampling_time.total_seconds()
@@ -253,13 +246,11 @@ def compare():
     print("=" * W + "\n")
 
     if len(results) < 2:
-        logger.warning(
-            f"Need at least 2 results for a comparison plot, "
-            f"found {len(results)}"
-        )
+        logger.warning(f"Need at least 2 results for a comparison plot, " f"found {len(results)}")
         return
 
     import matplotlib.pyplot as plt
+
     filename = os.path.join(outdir, f"{base_label}_comparison_corner.png")
     fig = bilby.core.result.plot_multiple(
         results,
@@ -270,16 +261,11 @@ def compare():
     )
     fig.savefig(filename, dpi=400)
     plt.close(fig)
-    logger.info(
-        f"Comparison corner plot saved to "
-        f"{outdir}/{base_label}_comparison_corner.png"
-    )
+    logger.info(f"Comparison corner plot saved to " f"{outdir}/{base_label}_comparison_corner.png")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Parameter estimation on GW150914"
-    )
+    parser = argparse.ArgumentParser(description="Parameter estimation on GW150914")
     parser.add_argument(
         "--sampler",
         nargs="+",
