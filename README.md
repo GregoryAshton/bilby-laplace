@@ -108,10 +108,13 @@ All keyword arguments are passed through `bilby.run_sampler`:
 | `cov_scaling` | `1` | Multiplicative scale applied to the iFIM covariance |
 | `use_injection_for_map` | `True` | Use `injection_parameters` as MAP starting point if set |
 | `use_unit_cube` | `True` | Compute the Hessian in unit-cube space via prior CDFs |
+| `jacobian_cap_scale` | `1.0` | Scale the Jacobian cap for prior-dominated parameters (< 1 widens proposal) |
+| `hessian_kwargs` | `None` | Dict of kwargs forwarded to `scipy.differentiate.hessian` |
 | `plot_diagnostic` | `False` | Save diagnostic plots (proposal vs prior, SMC stages) |
-| `fail_on_error` | `False` | Raise an error (vs. log a warning) when sampling fails |
+| `fail_on_error` | `True` | Raise an error when sampling fails (vs. log a warning) |
 | `n_modes` | `1` | Number of posterior modes to search for (SMC only) |
 | `mode_search_nsamples` | `500` | Prior draws for multi-mode search (`n_modes > 1`) |
+| `max_iterations` | `1e6` | Maximum number of proposal samples before aborting (rejection/importance only) |
 | `smc_kwargs` | `None` | Dict of aspire SMC configuration (see docstring for keys) |
 | `save` | — | Result file format: `'hdf5'`, `'json'`, etc. |
 
@@ -139,10 +142,6 @@ make rosenbrock-compare
 make hlv-laplace
 make hlv-smc
 make hlv-compare
-
-# GW150914 (real LIGO data, downloads from GWOSC)
-make gw150914-laplace
-make gw150914-compare
 ```
 
 Run `make help` in the examples directory for the full list of targets.
