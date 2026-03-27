@@ -45,20 +45,9 @@ hlv-compare:
 	$(PYTHON) hlv_example.py --compare
 
 # ---------------------------------------------------------------------------
-# GW150914 example
-# ---------------------------------------------------------------------------
-GW150914-%:
-	$(PYTHON) GW150914.py --sampler $*
-
-GW150914-all: GW150914-laplace GW150914-rejection GW150914-smc GW150914-dynesty GW150914-compare
-
-GW150914-compare:
-	$(PYTHON) GW150914.py --compare
-
-# ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
-.PHONY: help gaussian-all gaussian-compare rosenbrock-all rosenbrock-compare lorentzian-all lorentzian-compare hlv-all hlv-compare gw150914-all gw150914-compare
+.PHONY: help gaussian-all gaussian-compare rosenbrock-all rosenbrock-compare lorentzian-all lorentzian-compare hlv-all hlv-compare
 
 help:
 	@echo "Usage: make <target>"
@@ -94,11 +83,3 @@ help:
 	@echo "  hlv-dynesty           Run dynesty nested sampling"
 	@echo "  hlv-compare           Compare all existing HLV results"
 	@echo "  hlv-all               Run all HLV samplers then compare"
-	@echo ""
-	@echo "GW150914 example:"
-	@echo "  gw150914-laplace      Run Laplace approximation (no resampling)"
-	@echo "  gw150914-rejection    Run Laplace with rejection resampling"
-	@echo "  gw150914-smc          Run Laplace with SMC resampling"
-	@echo "  gw150914-dynesty      Run dynesty nested sampling"
-	@echo "  gw150914-compare      Compare all existing GW150914 results"
-	@echo "  gw150914-all          Run all GW150914 samplers then compare"
