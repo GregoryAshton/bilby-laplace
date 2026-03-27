@@ -45,9 +45,20 @@ hlv-compare:
 	$(PYTHON) hlv_example.py --compare
 
 # ---------------------------------------------------------------------------
+# Pulse example
+# ---------------------------------------------------------------------------
+pulse-%:
+	$(PYTHON) pulse_example.py --sampler $*
+
+pulse-all: pulse-laplace pulse-rejection pulse-smc pulse-dynesty pulse-compare
+
+pulse-compare:
+	$(PYTHON) pulse_example.py --compare
+
+# ---------------------------------------------------------------------------
 # Help
 # ---------------------------------------------------------------------------
-.PHONY: help gaussian-all gaussian-compare rosenbrock-all rosenbrock-compare lorentzian-all lorentzian-compare hlv-all hlv-compare
+.PHONY: help gaussian-all gaussian-compare rosenbrock-all rosenbrock-compare lorentzian-all lorentzian-compare hlv-all hlv-compare pulse-all pulse-compare
 
 help:
 	@echo "Usage: make <target>"
@@ -83,3 +94,11 @@ help:
 	@echo "  hlv-dynesty           Run dynesty nested sampling"
 	@echo "  hlv-compare           Compare all existing HLV results"
 	@echo "  hlv-all               Run all HLV samplers then compare"
+	@echo ""
+	@echo "Pulse example (time-series Gaussian pulse):"
+	@echo "  pulse-laplace         Run Laplace approximation (no resampling)"
+	@echo "  pulse-rejection       Run Laplace with rejection resampling"
+	@echo "  pulse-smc             Run Laplace with SMC resampling"
+	@echo "  pulse-dynesty         Run dynesty nested sampling"
+	@echo "  pulse-compare         Compare all existing pulse results"
+	@echo "  pulse-all             Run all pulse samplers then compare"
