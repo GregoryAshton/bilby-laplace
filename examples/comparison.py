@@ -29,7 +29,8 @@ def compare(outdir, base_label, filename=None):
     """
     logger = bilby.core.utils.logger
 
-    pattern = os.path.join(outdir, f"{base_label}_*_result.*")
+    prefix = f"{base_label}_" if base_label else ""
+    pattern = os.path.join(outdir, f"{prefix}*_result.*")
     result_files = sorted([f for f in glob.glob(pattern) if not f.endswith(".old")])
     if not result_files:
         logger.warning(f"No result files found matching {pattern}")
@@ -41,7 +42,7 @@ def compare(outdir, base_label, filename=None):
         try:
             r = bilby.core.result.read_in_result(filename=f)
             results.append(r)
-            label = r.label.replace(f"{base_label}_", "").capitalize()
+            label = (r.label.replace(f"{base_label}_", "") if base_label else r.label).capitalize()
             secs = r.sampling_time.total_seconds()
             if secs >= 3600:
                 label += f" ({secs / 3600:.1f} hr)"
@@ -68,20 +69,21 @@ def compare(outdir, base_label, filename=None):
         run_stats = r.meta_data.get("run_statistics", {})
         n_like = run_stats.get("nlikelihood", np.nan)
         eff = run_stats.get("efficiency", np.nan)
-        name = r.label.replace(f"{base_label}_", "")
+        name = r.label.replace(f"{base_label}_", "") if base_label else r.label
         n_like_str = f"{int(n_like):>8}" if np.isfinite(n_like) else f"{'—':>8}"
         eff_str = f"{eff:>7.1f}%" if np.isfinite(eff) else f"{'—':>8}"
         print(f"{name:<20} {log_z:>10.2f} {log_z_err:>8.2f} {n_like_str} {eff_str} {secs:>9.1f}s")
     print("=" * W + "\n")
 
-    if len(results) < 2:
-        logger.warning(f"Need at least 2 results for a comparison plot, found {len(results)}")
-        return results, labels
+    # if len(results) < 2:
+    # logger.warning(f"Need at least 2 results for a comparison plot, found {len(results)}")
+    # return results, labels
 
     import matplotlib.pyplot as plt
 
     if filename is None:
-        filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{base_label}_comparison.png")
+        stem = base_label if base_label else "all"
+        filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{stem}_comparison.png")
 
     fig = bilby.core.result.plot_multiple(
         results,
