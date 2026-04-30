@@ -3,7 +3,7 @@
 """
 Binary neutron star parameter estimation with three likelihood options.
 
-Uses Einstein Telescope (ET) and Cosmic Explorer (CE) detectors to observe a
+Uses LIGO India (A1) and Cosmic Explorer (CE) detectors to observe a
 simulated binary neutron star merger signal.
 
   std (standard)
