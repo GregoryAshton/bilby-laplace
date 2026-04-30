@@ -27,7 +27,8 @@ from bilby.gw.prior import (
     UniformInComponentsChirpMass,
     UniformInComponentsMassRatio,
 )
-from comparison import compare as compare_results
+
+from bilby_laplace.comparison import compare as compare_results
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
