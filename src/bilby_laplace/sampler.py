@@ -262,10 +262,15 @@ class Laplace(Sampler):
 
         # Choose starting point for MAP search
         if self.injection_parameters and self.kwargs["use_injection_for_map"]:
+            fallback = self.priors.sample_subset(fisher_mpe.parameter_names)
+            missing = [k for k in fisher_mpe.parameter_names if k not in self.injection_parameters]
+            if missing:
+                logger.warning(
+                    f"use_injection_for_map=True but the following parameters are not in "
+                    f"injection_parameters (using prior samples as fallback): {missing}"
+                )
             initial_sample = {
-                key: self.injection_parameters[key]
-                for key in fisher_mpe.parameter_names
-                if key in self.injection_parameters
+                key: self.injection_parameters.get(key, fallback[key]) for key in fisher_mpe.parameter_names
             }
         else:
             initial_sample = None
