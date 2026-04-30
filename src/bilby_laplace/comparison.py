@@ -83,7 +83,7 @@ def compare(outdir, base_label, filename=None):
 
     if filename is None:
         stem = base_label if base_label else "all"
-        filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{stem}_comparison.png")
+        filename = os.path.join(outdir, f"{stem}_comparison.png")
 
     fig = bilby.core.result.plot_multiple(
         results,

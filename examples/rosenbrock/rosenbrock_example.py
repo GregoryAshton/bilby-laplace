@@ -21,7 +21,8 @@ Usage
 import argparse
 
 import bilby
-from comparison import compare
+
+from bilby_laplace.comparison import compare
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
