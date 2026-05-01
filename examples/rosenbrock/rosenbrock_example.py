@@ -88,8 +88,8 @@ def setup():
 def run_laplace(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}_laplace",
-        resample="None",
+        label=f"{base_label}_inprior",
+        resample="inprior",
         cov_scaling=1,
     )
 
@@ -170,4 +170,5 @@ if __name__ == "__main__":
 
         # Compare only needs to read result files
         if args.compare:
-            _results, _labels = compare(outdir, base_label)
+            filename = f"{base_label}_comparison.png"
+            _results, _labels = compare(outdir, base_label, filename=filename)

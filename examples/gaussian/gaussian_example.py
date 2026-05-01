@@ -98,6 +98,19 @@ def run_smc(_common_laplace):
         **_common_laplace,
         label=f"{base_label}_smc",
         resample="smc",
+        smc_kwargs=dict(
+            sampler="minipcn_smc",
+            n_initial_samples=10000,
+            n_final_samples=5000,
+            target_efficiency=[0.5, 0.8],
+            adaptive=True,
+            sampler_kwargs=dict(
+                n_steps=5,
+                target_acceptance_rate=0.234,
+                step_fn="tpcn",
+            ),
+        ),
+        cov_scaling=1,
     )
 
 
@@ -146,4 +159,4 @@ if __name__ == "__main__":
 
         # Compare only needs to read result files
         if args.compare:
-            _results, _labels = compare(outdir, base_label)
+            _results, _labels = compare(outdir, base_label, filename=f"{base_label}_comparison.png")
