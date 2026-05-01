@@ -1,10 +1,10 @@
 PYTHON ?= python
 
 laplace rejection smc dynesty:
-	$(PYTHON) hlv_example.py --sampler $@
+	$(PYTHON) run.py --sampler $@
 
 compare:
-	$(PYTHON) hlv_example.py --compare
+	$(PYTHON) run.py --compare
 
 all: laplace rejection smc dynesty compare
 

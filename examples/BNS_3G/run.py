@@ -1,31 +1,15 @@
 #!/usr/bin/env python
 
 """
-Binary neutron star parameter estimation with three likelihood options.
+Laplace approximation on a simulated BNS signal using A1 and CE detectors.
 
-Uses LIGO India (A1) and Cosmic Explorer (CE) detectors to observe a
-simulated binary neutron star merger signal.
-
-  std (standard)
-    Full GravitationalWaveTransient likelihood evaluated on the complete
-    frequency grid.  Slowest but exact reference.
-
-  rb (relative binning / heterodyning)
-    Computes the likelihood in a narrow time-frequency window around the signal
-    using a reference waveform, then rapidly evaluates likelihood ratios at
-    nearby points.  Typically 10-100x faster than a full evaluation.
-
-  mb (multi-banding, Morisaki 2021, arXiv:2104.07813)
-    Divides the frequency domain into sub-bands with progressively coarser
-    frequency resolution at high frequencies where the waveform phase evolution
-    is slow.  Provides similar speed gains without requiring a fiducial waveform.
+Supports three likelihood types: std (standard), rb (relative binning), mb (multi-banding).
 
 Usage
 -----
-    python examples/bns_heterodyned_example.py --likelihood std --sampler laplace dynesty
-    python examples/bns_heterodyned_example.py --likelihood rb --sampler laplace rejection smc dynesty
-    python examples/bns_heterodyned_example.py --likelihood mb --sampler laplace
-    python examples/bns_heterodyned_example.py --likelihood rb --compare
+    python run.py --likelihood rb --sampler laplace rejection smc dynesty
+    python run.py --likelihood rb --compare
+    python run.py --compare
 """
 
 import argparse

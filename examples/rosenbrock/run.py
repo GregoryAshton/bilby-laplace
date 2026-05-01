@@ -1,59 +1,57 @@
 """
-Comparison example: Laplace vs dynesty on a 2D Gaussian likelihood.
+Laplace approximation on a 2D Rosenbrock (banana) likelihood.
 
 Usage
 -----
-    python examples/gaussian_example.py --sampler laplace rejection smc dynesty
-    python examples/gaussian_example.py --sampler smc
-    python examples/gaussian_example.py --compare
+    python run.py --sampler laplace rejection smc dynesty
+    python run.py --compare
 """
 
 import argparse
 
 import bilby
-import numpy as np
 
 from bilby_laplace.comparison import compare
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
-outdir = "outdir_gaussian_example"
-base_label = "gaussian"
+outdir = "outdir_rosenbrock_example"
+base_label = "rosenbrock"
 
 
 def setup():
     """Set up likelihood, priors, and sampler configuration."""
 
     # Likelihood
-    class GaussianLikelihood(bilby.core.likelihood.Likelihood):
-        """2-D correlated Gaussian likelihood."""
+    class RosenbrockLikelihood(bilby.core.likelihood.Likelihood):
+        """2-D Rosenbrock (banana) likelihood.
 
-        def __init__(self, mu_x=1.0, mu_y=-0.5, sigma_x=0.3, sigma_y=0.5, rho=0.7):
+        Parameters
+        ----------
+        scale : float
+            Controls the width of the distribution. Larger values give a
+            broader, easier posterior. Default is 1.0.
+        """
+
+        def __init__(self, scale=1.0):
             super().__init__(parameters={"x": None, "y": None})
-            self.mu = np.array([mu_x, mu_y])
-            cov = np.array(
-                [
-                    [sigma_x**2, rho * sigma_x * sigma_y],
-                    [rho * sigma_x * sigma_y, sigma_y**2],
-                ]
-            )
-            self._inv_cov = np.linalg.inv(cov)
-            self._log_norm = -0.5 * np.log(np.linalg.det(2 * np.pi * cov))
+            self.scale = scale
 
         def log_likelihood(self, parameters=None):
-            d = np.array([parameters["x"], parameters["y"]]) - self.mu
-            return -0.5 * d @ self._inv_cov @ d + self._log_norm
+            x = parameters["x"]
+            y = parameters["y"]
+            return -((1 - x) ** 2 + 100 * (y - x**2) ** 2) / self.scale
 
-    likelihood = GaussianLikelihood()
+    likelihood = RosenbrockLikelihood(scale=1.0)
 
     priors = bilby.core.prior.PriorDict(
         dict(
-            x=bilby.core.prior.Uniform(-5, 5, "x"),
-            y=bilby.core.prior.Uniform(-5, 5, "y"),
+            x=bilby.core.prior.Uniform(-2, 2, "x"),
+            y=bilby.core.prior.Uniform(-1, 3, "y"),
         )
     )
 
-    injection_parameters = {"x": 1.0, "y": -0.5}
+    injection_parameters = {"x": 1.0, "y": 1.0}
 
     # Shared sampler kwargs
     _common = dict(
@@ -70,7 +68,6 @@ def setup():
         sampler="laplace",
         target_nsamples=5000,
         plot_diagnostic=True,
-        save="hdf5",
     )
 
     return _common, _common_laplace
@@ -80,8 +77,9 @@ def setup():
 def run_laplace(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}_laplace",
-        resample="None",
+        label=f"{base_label}_inprior",
+        resample="inprior",
+        cov_scaling=1,
     )
 
 
@@ -90,6 +88,7 @@ def run_rejection(_common_laplace):
         **_common_laplace,
         label=f"{base_label}_rejection",
         resample="rejection",
+        cov_scaling=10,
     )
 
 
@@ -105,12 +104,13 @@ def run_smc(_common_laplace):
             target_efficiency=[0.5, 0.8],
             adaptive=True,
             sampler_kwargs=dict(
-                n_steps=5,
+                n_steps=1000,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
+                verbose=True,
             ),
         ),
-        cov_scaling=1,
+        cov_scaling=10,
     )
 
 
@@ -125,7 +125,7 @@ def run_dynesty(_common):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Laplace vs dynesty on a 2D Gaussian likelihood")
+    parser = argparse.ArgumentParser(description="Laplace vs dynesty on a 2D Rosenbrock likelihood")
     parser.add_argument(
         "--sampler",
         nargs="+",
@@ -159,4 +159,5 @@ if __name__ == "__main__":
 
         # Compare only needs to read result files
         if args.compare:
-            _results, _labels = compare(outdir, base_label, filename=f"{base_label}_comparison.png")
+            filename = f"{base_label}_comparison.png"
+            _results, _labels = compare(outdir, base_label, filename=filename)

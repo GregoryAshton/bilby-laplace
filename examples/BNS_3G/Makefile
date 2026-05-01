@@ -1,25 +1,25 @@
 PYTHON ?= python
 
 std-compare:
-	$(PYTHON) bns_heterodyned_example.py --likelihood std --compare
+	$(PYTHON) run.py --likelihood std --compare
 
 rb-compare:
-	$(PYTHON) bns_heterodyned_example.py --likelihood rb --compare
+	$(PYTHON) run.py --likelihood rb --compare
 
 mb-compare:
-	$(PYTHON) bns_heterodyned_example.py --likelihood mb --compare
+	$(PYTHON) run.py --likelihood mb --compare
 
 compare:
-	$(PYTHON) bns_heterodyned_example.py --compare
+	$(PYTHON) run.py --compare
 
 std-%:
-	$(PYTHON) bns_heterodyned_example.py --likelihood std --sampler $*
+	$(PYTHON) run.py --likelihood std --sampler $*
 
 rb-%:
-	$(PYTHON) bns_heterodyned_example.py --likelihood rb --sampler $*
+	$(PYTHON) run.py --likelihood rb --sampler $*
 
 mb-%:
-	$(PYTHON) bns_heterodyned_example.py --likelihood mb --sampler $*
+	$(PYTHON) run.py --likelihood mb --sampler $*
 
 std-all: std-laplace std-rejection std-smc std-dynesty std-compare
 rb-all: rb-laplace rb-rejection rb-smc rb-dynesty rb-compare
