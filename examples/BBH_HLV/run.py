@@ -1,18 +1,12 @@
 #!/usr/bin/env python
 
 """
-Parameter estimation on a simulated BBH signal injected into Gaussian noise.
-
-Uses a three-detector HLV (Hanford-Livingston-Virgo) network with bilby's
-built-in injection infrastructure.  No real data download is needed -- the
-interferometers are initialised with their design power spectral densities
-and Gaussian noise is generated internally.
+Laplace approximation on a simulated BBH signal in an HLV network.
 
 Usage
 -----
-    python examples/hlv_example.py --sampler laplace rejection smc dynesty
-    python examples/hlv_example.py --sampler smc
-    python examples/hlv_example.py --compare
+    python run.py --sampler laplace rejection smc dynesty
+    python run.py --compare
 """
 
 import argparse

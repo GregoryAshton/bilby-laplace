@@ -1,10 +1,10 @@
 PYTHON ?= python
 
 laplace rejection smc dynesty:
-	$(PYTHON) gaussian_example.py --sampler $@
+	$(PYTHON) run.py --sampler $@
 
 compare:
-	$(PYTHON) gaussian_example.py --compare
+	$(PYTHON) run.py --compare
 
 all: laplace rejection smc dynesty compare
 
