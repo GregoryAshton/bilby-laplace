@@ -75,10 +75,6 @@ def compare(outdir, base_label, filename=None):
         print(f"{name:<20} {log_z:>10.2f} {log_z_err:>8.2f} {n_like_str} {eff_str} {secs:>9.1f}s")
     print("=" * W + "\n")
 
-    # if len(results) < 2:
-    # logger.warning(f"Need at least 2 results for a comparison plot, found {len(results)}")
-    # return results, labels
-
     import matplotlib.pyplot as plt
 
     if filename is None:
