@@ -329,9 +329,14 @@ class Laplace(Sampler):
             samples, logl, g_samples, efficiency = self._run_inprior(proposal, fisher_mpe)
             log_evidence = np.nan
             log_evidence_err = np.nan
-        else:
+        elif resample == "importance":
             samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_importance_sampling(
                 proposal, fisher_mpe, map_sample_dict
+            )
+        else:
+            raise ValueError(
+                f"Unknown resample method {resample!r}. "
+                f"Expected one of: None, 'rejection', 'importance', 'inprior', 'smc'."
             )
 
         end_time = datetime.datetime.now()
@@ -395,6 +400,8 @@ class Laplace(Sampler):
         total_drawn = 0
 
         while n_collected < n:
+            if self._check_iteration_limit("In-prior sampling", total_drawn, n_collected):
+                break
             x_batch = proposal.sample(batch_nsamples)
             g_batch = pd.DataFrame(x_batch, columns=parameter_names)
             logpi = np.real(np.array(self.priors.ln_prob(g_batch, axis=0)))
@@ -404,9 +411,12 @@ class Laplace(Sampler):
                 collected.append(x_batch[in_prior])
                 n_collected += int(in_prior.sum())
 
+        if not collected:
+            return np.empty((0, len(parameter_names)))
         x_out = np.vstack(collected)[:n]
         logger.debug(
-            f"Drew {n} in-prior samples from {total_drawn} proposals " f"({100.0 * n / total_drawn:.1f}% efficiency)"
+            f"Drew {len(x_out)} in-prior samples from {total_drawn} proposals "
+            f"({100.0 * len(x_out) / total_drawn:.1f}% efficiency)"
         )
         return x_out
 
@@ -465,6 +475,9 @@ class Laplace(Sampler):
         )
 
         while n_accepted < target_nsamples:
+            if self._check_iteration_limit("In-prior sampling", total_drawn, n_accepted):
+                pbar.close()
+                break
             x_batch = proposal.sample(batch_nsamples)
             g_batch = pd.DataFrame(x_batch, columns=fisher_mpe.parameter_names)
 
@@ -493,14 +506,16 @@ class Laplace(Sampler):
 
         pbar.close()
 
+        if not samples_list:
+            empty = pd.DataFrame(columns=fisher_mpe.parameter_names)
+            return empty, np.array([]), empty, 0.0
+
         x_out = np.vstack(samples_list)[:target_nsamples]
         logl_out = np.hstack(logl_list)[:target_nsamples]
         samples = pd.DataFrame(x_out, columns=fisher_mpe.parameter_names)
 
-        efficiency = 100.0 * target_nsamples / total_drawn
-        logger.info(
-            f"Filtering complete: kept {target_nsamples} of {total_drawn} samples " f"({efficiency:.1f}% efficiency)"
-        )
+        efficiency = 100.0 * n_accepted / total_drawn if total_drawn else 0.0
+        logger.info(f"Filtering complete: kept {len(x_out)} of {total_drawn} samples ({efficiency:.1f}% efficiency)")
 
         return samples, logl_out, samples, efficiency
 
@@ -634,6 +649,10 @@ class Laplace(Sampler):
 
         pbar.close()
 
+        if not all_samples:
+            empty = pd.DataFrame(columns=fisher_mpe.parameter_names)
+            return empty, np.array([]), empty, 0.0, np.nan, np.nan
+
         if n_bound_violations > 0:
             logger.warning(
                 f"{n_bound_violations} of {n_proposed} proposal samples "
@@ -734,6 +753,10 @@ class Laplace(Sampler):
             all_ln_r.append(ln_r)
 
         pbar.close()
+
+        if not all_samples:
+            empty = pd.DataFrame(columns=fisher_mpe.parameter_names)
+            return empty, np.array([]), empty, 0.0, np.nan, np.nan
 
         samples = pd.concat(all_samples, ignore_index=True)
         logl = np.concatenate(all_logl)
