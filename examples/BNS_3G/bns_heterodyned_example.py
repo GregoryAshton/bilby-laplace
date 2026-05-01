@@ -29,7 +29,6 @@ Usage
 """
 
 import argparse
-import os
 
 import bilby
 import numpy as np
@@ -343,8 +342,6 @@ def compare(outdir, base_label):
 
     import matplotlib.pyplot as plt
 
-    plotdir = os.path.dirname(os.path.abspath(__file__))
-
     intrinsic_params = ["mass_1", "mass_2", "chi_1", "chi_2", "lambda_1", "lambda_2"]
     extrinsic_params = [
         "ra",
@@ -365,7 +362,7 @@ def compare(outdir, base_label):
     inj = getattr(results[0], "injection_parameters", None)
 
     for suffix, parameters in plot_sets:
-        filename = os.path.join(plotdir, f"{base_label}_{suffix}.png")
+        filename = f"{base_label}_{suffix}.png"
         try:
             fig = bilby.core.result.plot_multiple(
                 results,
