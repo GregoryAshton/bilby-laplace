@@ -273,9 +273,11 @@ class FisherMatrixPosteriorEstimator:
         else:
             import scipy.differentiate as sd
 
-            logger.info("Computing Hessian of log-posterior in unit cube (scipy.differentiate)")
-            kw = {"initial_step": 0.001, **self.hessian_kwargs}
+            kw = {"initial_step": 0.001, "step_factor": 2, "maxiter": 20, **self.hessian_kwargs}
+            logger.info(f"Computing Hessian of log-posterior in unit cube (scipy.differentiate) with {kw}")
             res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
+            print(f"Completed with success={res.success}, status={res.status}, and nfev={res.nfev}")
+
             FIM_u = -res.ddf
             logger.debug(f"Hessian (unit cube):\n{FIM_u}")
 
