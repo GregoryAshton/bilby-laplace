@@ -16,7 +16,7 @@ import argparse
 
 import bilby
 import numpy as np
-from bilby.core.prior import Constraint, Sine, Uniform
+from bilby.core.prior import Constraint, Cosine, Sine, Uniform
 from bilby.gw.likelihood import (
     MBGravitationalWaveTransient,
     RelativeBinningGravitationalWaveTransient,
@@ -53,15 +53,15 @@ def setup(likelihood_type="rb"):
         mass_ratio=1,
         chi_1=0.00,
         chi_2=0.00,
-        luminosity_distance=1000.0,  # Mpc
+        luminosity_distance=250.0,  # Mpc
         theta_jn=0.5,
         psi=0.3,
         phase=2.1,
         geocent_time=0.0,
         ra=1.0,
         dec=0.5,
-        lambda_1=50.0,  # Tidal deformability
-        lambda_2=50.0,
+        lambda_1=310.0,
+        lambda_2=310.0,
     )
 
     # Detector setup
@@ -109,10 +109,9 @@ def setup(likelihood_type="rb"):
             mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.2, maximum=1.0),
             mass_1=Constraint(name="mass_1", minimum=1.0, maximum=2.8),
             mass_2=Constraint(name="mass_2", minimum=1.0, maximum=2.8),
-            luminosity_distance=bilby.core.prior.PowerLaw(
-                alpha=2,
-                name="luminosity_distance",
-                minimum=50,
+            luminosity_distance=bilby.gw.prior.UniformSourceFrame(
+                name='luminosity_distance',
+                minimum=100,
                 maximum=10000,
                 unit="Mpc",
                 latex_label=r"$d_L$",
@@ -134,10 +133,8 @@ def setup(likelihood_type="rb"):
                 boundary="periodic",
                 latex_label=r"$\alpha$",
             ),
-            dec=Uniform(
+            dec=Cosine(
                 name="dec",
-                minimum=-np.pi / 2,
-                maximum=np.pi / 2,
                 latex_label=r"$\delta$",
             ),
             chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.05)),
@@ -148,7 +145,7 @@ def setup(likelihood_type="rb"):
     )
 
     # Fixed parameters to simplify the PE
-    for key in ["chi_1", "chi_2"]:
+    for key in ["lambda_1", "lambda_2", "psi", "theta_jn", "chi_1", "chi_2"]:
         priors[key] = injection_parameters[key]
 
     if likelihood_type == "std":
@@ -201,7 +198,7 @@ def setup(likelihood_type="rb"):
             phase_marginalization=True,
             distance_marginalization=True,
             jitter_time=False,
-            chi=2,
+            chi=1,
             epsilon=0.5,
         )
 
@@ -236,7 +233,7 @@ def setup(likelihood_type="rb"):
         priors=priors,
         outdir=outdir,
         injection_parameters=injection_parameters,
-        # conversion_function=bilby.gw.conversion.generate_all_bns_parameters,
+        conversion_function=bilby.gw.conversion.generate_all_bns_parameters,
         result_class=bilby.gw.result.CBCResult,
         save="hdf5",
         use_ratio=True,
@@ -293,7 +290,7 @@ def run_smc(_common_laplace, base_label):
             n_final_samples=5000,
             adaptive=True,
             sampler_kwargs=dict(
-                n_steps=5,
+                n_steps=50,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
             ),
@@ -308,11 +305,11 @@ def run_dynesty(_common, base_label):
         **_common,
         sampler="dynesty",
         label=f"{base_label}-dynesty",
-        nlive=500,
-        dlogz=0.5,
+        nlive=1000,
+        dlogz=0.1,
         check_point_delta_t=1800,
         check_point_plot=True,
-        npool=1,
+        npool=32,
         clean=False,
         resume=True,
     )
