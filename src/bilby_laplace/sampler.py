@@ -279,7 +279,7 @@ class Laplace(Sampler):
         for param in bad_params:
             prior_draws = self.priors[param].sample(len(samples))
             samples[param] = prior_draws
-            logger.info(f"Replaced initial {param} samples with {len(samples)} prior draws")
+            logger.debug(f"Replaced initial {param} samples with {len(samples)} prior draws")
 
         return samples
 
@@ -530,6 +530,10 @@ class Laplace(Sampler):
             x_batch = proposal.sample(batch_nsamples)
             g_batch = pd.DataFrame(x_batch, columns=fisher_mpe.parameter_names)
 
+            # Apply prior replacement BEFORE checking if in prior
+            g_batch = self._replace_with_prior_samples(g_batch, fisher_mpe.parameter_names)
+            x_batch = g_batch.values
+
             logpi = np.real(np.array(self.priors.ln_prob(g_batch, axis=0)))
             in_prior = ~np.isinf(logpi)
 
@@ -539,8 +543,6 @@ class Laplace(Sampler):
             if in_prior.any():
                 x_in = x_batch[in_prior]
                 g_batch_in = g_batch[in_prior]
-                g_batch_in = self._replace_with_prior_samples(g_batch_in, fisher_mpe.parameter_names)
-                x_in = g_batch_in.values
                 logl_in = fisher_mpe.log_likelihood_from_array(x_in.T)
 
                 samples_list.append(x_in)
@@ -675,6 +677,11 @@ class Laplace(Sampler):
 
             x = proposal.sample(batch_nsamples)
             g_df = pd.DataFrame(x, columns=fisher_mpe.parameter_names)
+
+            # Apply prior replacement BEFORE computing likelihoods
+            g_df = self._replace_with_prior_samples(g_df, fisher_mpe.parameter_names)
+            x = g_df.values
+
             ln_r, logl = self._compute_ln_ratios(x, g_df, proposal, fisher_mpe)
             finite = np.isfinite(ln_r)
 
@@ -691,11 +698,10 @@ class Laplace(Sampler):
             n_proposed += batch_nsamples
             n_accepted += int(accepted.sum())
             efficiency = 100.0 * n_accepted / n_proposed
-            pbar.set_postfix({"acceptance": f"{efficiency:.1f}%"}, refresh=False)
+            pbar.set_postfix({"acceptance": f"{efficiency:.3f}%"}, refresh=False)
             pbar.update(int(accepted.sum()))
 
             g_accepted = g_df[accepted].reset_index(drop=True)
-            g_accepted = self._replace_with_prior_samples(g_accepted, fisher_mpe.parameter_names)
             all_samples.append(g_accepted)
             all_logl.append(logl[accepted])
             all_g_samples.append(g_df)
@@ -731,7 +737,10 @@ class Laplace(Sampler):
 
         if self.kwargs["plot_diagnostic"]:
             weights = np.exp(ln_r_all - ln_M)
-            self.create_resample_diagnostic(samples, g_samples, mean, weights, method="rejection")
+            try:
+                self.create_resample_diagnostic(samples, g_samples, mean, weights, method="rejection")
+            except Exception as e:
+                logger.warning(f"Failed to create rejection sampling diagnostic plot: {e}")
 
         return samples, logl, g_samples, efficiency, log_evidence, log_evidence_err
 
@@ -759,6 +768,10 @@ class Laplace(Sampler):
 
             x = proposal.sample(batch_nsamples)
             g_df = pd.DataFrame(x, columns=fisher_mpe.parameter_names)
+
+            # Apply prior replacement BEFORE computing likelihoods
+            g_df = self._replace_with_prior_samples(g_df, fisher_mpe.parameter_names)
+            x = g_df.values
 
             logpi = np.real(np.array(self.priors.ln_prob(g_df, axis=0)))
             in_prior = ~np.isinf(logpi)
@@ -798,11 +811,10 @@ class Laplace(Sampler):
             n_proposed += batch_nsamples
             n_accepted += n_draw
             efficiency = 100.0 * n_accepted / n_proposed
-            pbar.set_postfix({"acceptance": f"{efficiency:.1f}%"}, refresh=False)
+            pbar.set_postfix({"acceptance": f"{efficiency:.3f}%"}, refresh=False)
             pbar.update(n_draw)
 
             g_selected = g_df.iloc[idx].reset_index(drop=True)
-            g_selected = self._replace_with_prior_samples(g_selected, fisher_mpe.parameter_names)
             all_samples.append(g_selected)
             all_logl.append(logl[idx])
             all_g_samples.append(g_df)
