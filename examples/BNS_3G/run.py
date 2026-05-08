@@ -271,10 +271,11 @@ def run_rejection(_common_laplace, base_label):
         **_common_laplace,
         label=f"{base_label}-rejection",
         resample="rejection",
-        cov_scaling=2,
+        cov_scaling=1,
         jacobian_cap_scale=1,
-        max_iterations=1000000,
+        max_iterations=10000000,
         batch_nsamples=10000,
+        prior_parameters=["lambda_1", "lambda_2", "psi"],
     )
 
 
@@ -289,14 +290,15 @@ def run_smc(_common_laplace, base_label):
             n_final_samples=5000,
             adaptive=True,
             sampler_kwargs=dict(
-                n_steps=50,
+                n_steps=10,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
             ),
         ),
-        cov_scaling=10,
+        cov_scaling=2,
         jacobian_cap_scale=1,
-        hessian_kwargs={"initial_step": 0.001, "step_factor": 1.9, "maxiter": 20}
+        hessian_kwargs={"initial_step": 0.001, "step_factor": 2, "maxiter": 10},
+        prior_parameters=["lambda_1", "lambda_2", "psi"],
     )
 
 
