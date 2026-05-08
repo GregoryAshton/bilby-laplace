@@ -28,7 +28,7 @@ from bilby.gw.prior import (
     UniformInComponentsMassRatio,
 )
 
-from bilby_laplace.comparison import compare as compare_results
+from bilby_laplace.comparison import compare as compare_results, overlay_injection_lines
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
@@ -53,13 +53,13 @@ def setup(likelihood_type="rb"):
         mass_ratio=1,
         chi_1=0.00,
         chi_2=0.00,
-        luminosity_distance=250.0,  # Mpc
+        luminosity_distance=500.0,  # Mpc
         theta_jn=0.5,
-        psi=0.3,
+        psi=1.3,
         phase=2.1,
         geocent_time=0.0,
-        ra=1.0,
-        dec=0.5,
+        ra=1.2,
+        dec=1.17,
         lambda_1=310.0,
         lambda_2=310.0,
     )
@@ -120,8 +120,8 @@ def setup(likelihood_type="rb"):
             psi=Uniform(name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic"),
             phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic"),
             geocent_time=Uniform(
-                minimum=injection_parameters["geocent_time"] - 0.05,
-                maximum=injection_parameters["geocent_time"] + 0.05,
+                minimum=injection_parameters["geocent_time"] - 0.01,
+                maximum=injection_parameters["geocent_time"] + 0.01,
                 name="geocent_time",
                 latex_label=r"$t_{\rm geo}$",
                 unit="$s$",
@@ -145,7 +145,7 @@ def setup(likelihood_type="rb"):
     )
 
     # Fixed parameters to simplify the PE
-    for key in ["lambda_1", "lambda_2", "psi", "theta_jn", "chi_1", "chi_2"]:
+    for key in ["chi_1", "chi_2"]:
         priors[key] = injection_parameters[key]
 
     if likelihood_type == "std":
@@ -194,12 +194,11 @@ def setup(likelihood_type="rb"):
             rb_waveform_generator,
             priors=priors,
             fiducial_parameters=fiducial_parameters,
-            time_marginalization=True,
+            time_marginalization=False,
             phase_marginalization=True,
             distance_marginalization=True,
             jitter_time=False,
-            chi=1,
-            epsilon=0.5,
+            epsilon=0.25,
         )
 
     elif likelihood_type == "mb":
@@ -297,6 +296,7 @@ def run_smc(_common_laplace, base_label):
         ),
         cov_scaling=10,
         jacobian_cap_scale=1,
+        hessian_kwargs={"initial_step": 0.001, "step_factor": 1.9, "maxiter": 20}
     )
 
 
@@ -317,10 +317,11 @@ def run_dynesty(_common, base_label):
 
 def compare(outdir, base_label):
     """Load all result files, make comparison corner plots, and print comparison table."""
-    results, labels = compare_results(outdir, base_label)
-    if len(results) < 2:
-        return
+    pattern = f"{outdir}/*_result.*"
+    sampling_parameter_filename = "comparison_sampling_parameters.png"
+    results, labels = compare_results(pattern, sampling_parameter_filename)
 
+    # Custom plotting for this example
     import matplotlib.pyplot as plt
 
     intrinsic_params = ["mass_1", "mass_2", "chi_1", "chi_2", "lambda_1", "lambda_2"]
@@ -335,7 +336,6 @@ def compare(outdir, base_label):
     ]
 
     plot_sets = [
-        ("comparison", None),
         ("comparison_intrinsic", intrinsic_params),
         ("comparison_extrinsic", extrinsic_params),
     ]
@@ -343,39 +343,30 @@ def compare(outdir, base_label):
     inj = getattr(results[0], "injection_parameters", None)
 
     for suffix, parameters in plot_sets:
-        filename = f"{base_label}_{suffix}.png"
-        try:
-            fig = bilby.core.result.plot_multiple(
-                results,
-                labels=labels,
-                parameters=parameters,
-                filename=filename,
-                titles=False,
-                save=False,
-            )
-        except Exception as exc:
-            logger.warning(f"Could not create {suffix} plot: {exc}")
+        filename = f"comparison_{suffix}.png"
+        # Check if the parameters are sampled
+        plot_parameters = []
+        for p in parameters:
+            # Check if the posterior set has a non-zero range
+            samples = results[0].posterior.get(p)
+            if samples is not None and np.ptp(samples) > 0:
+                plot_parameters.append(p)
+
+        if len(plot_parameters)==0:
+            logger.info(f"No sampled parameters found for {suffix} plot; skipping")
             continue
 
-        # Overlay injection truth values
-        if inj:
-            params = parameters if parameters is not None else results[0].search_parameter_keys
-            truths = [inj.get(p) for p in params]
-            ndim = len(params)
-            axes = fig.get_axes()
-            if len(axes) == ndim * ndim:
-                axes_grid = np.array(axes).reshape(ndim, ndim)
-                for row in range(ndim):
-                    for col in range(ndim):
-                        ax = axes_grid[row, col]
-                        if row == col:
-                            if truths[col] is not None:
-                                ax.axvline(truths[col], color="k", ls="--", lw=1.0)
-                        elif row > col:
-                            if truths[col] is not None:
-                                ax.axvline(truths[col], color="k", ls="--", lw=0.8, alpha=0.7)
-                            if truths[row] is not None:
-                                ax.axhline(truths[row], color="k", ls="--", lw=0.8, alpha=0.7)
+        logger.info(f"Creating {suffix} corner plot for parameters: {plot_parameters}")
+        fig = bilby.core.result.plot_multiple(
+            results,
+            labels=labels,
+            parameters=plot_parameters,
+            filename=filename,
+            titles=False,
+            save=False,
+        )
+
+        overlay_injection_lines(fig, plot_parameters, inj)
 
         fig.savefig(filename, dpi=400)
         plt.close(fig)
@@ -411,7 +402,7 @@ if __name__ == "__main__":
         parser.print_help()
     else:
         _outdir = "outdir_bns_example"
-        _base_label = args.likelihood  # None means compare all likelihoods
+        _base_label = "BNS_3G"
 
         if args.sampler:
             if args.likelihood is None:

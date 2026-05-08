@@ -159,5 +159,6 @@ if __name__ == "__main__":
 
         # Compare only needs to read result files
         if args.compare:
-            filename = f"{base_label}_comparison.png"
-            _results, _labels = compare(outdir, base_label, filename=filename)
+            pattern = f"{outdir}/{base_label}_*_result.*"
+            filename = f"{outdir}/{base_label}_comparison.png"
+            _results, _labels = compare(pattern, filename)

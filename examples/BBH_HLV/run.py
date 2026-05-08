@@ -21,7 +21,7 @@ from bilby.gw.prior import (
     UniformInComponentsMassRatio,
 )
 
-from bilby_laplace.comparison import compare as compare_results
+from bilby_laplace.comparison import compare as compare_results, overlay_injection_lines
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
@@ -228,7 +228,9 @@ def run_dynesty(_common):
 def compare():
     """Load all result files in outdir, make comparison corner plots,
     and print a comparison table. Custom to HLV example for intrinsic/extrinsic plots."""
-    results, labels = compare_results(outdir, base_label)
+    pattern = f"{outdir}/{base_label}_*_result.*"
+    full_filename = f"{outdir}/{base_label}_comparison.png"
+    results, labels = compare_results(pattern, full_filename)
     if len(results) < 2:
         return
 
@@ -254,7 +256,7 @@ def compare():
     inj = getattr(results[0], "injection_parameters", None)
 
     for suffix, parameters in plot_sets:
-        filename = f"{base_label}_{suffix}.png"
+        filename = f"{outdir}/{base_label}_{suffix}.png"
         try:
             fig = bilby.core.result.plot_multiple(
                 results,
@@ -268,25 +270,8 @@ def compare():
             logger.warning(f"Could not create {suffix} plot: {exc}")
             continue
 
-        # Overlay injection truth values
-        if inj:
-            params = parameters if parameters is not None else results[0].search_parameter_keys
-            truths = [inj.get(p) for p in params]
-            ndim = len(params)
-            axes = fig.get_axes()
-            if len(axes) == ndim * ndim:
-                axes_grid = np.array(axes).reshape(ndim, ndim)
-                for row in range(ndim):
-                    for col in range(ndim):
-                        ax = axes_grid[row, col]
-                        if row == col:
-                            if truths[col] is not None:
-                                ax.axvline(truths[col], color="k", ls="--", lw=1.0)
-                        elif row > col:
-                            if truths[col] is not None:
-                                ax.axvline(truths[col], color="k", ls="--", lw=0.8, alpha=0.7)
-                            if truths[row] is not None:
-                                ax.axhline(truths[row], color="k", ls="--", lw=0.8, alpha=0.7)
+        params = parameters if parameters is not None else results[0].search_parameter_keys
+        overlay_injection_lines(fig, params, inj)
 
         fig.savefig(filename, dpi=400)
         plt.close(fig)
