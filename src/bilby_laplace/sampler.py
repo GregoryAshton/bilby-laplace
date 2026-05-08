@@ -191,6 +191,12 @@ class Laplace(Sampler):
         Any other keys are forwarded directly to
         ``aspire.Aspire.sample_posterior()``, so all aspire parameters are
         accessible this way.
+    prior_parameters : list or None
+        List of parameter names for which initial proposal samples should be
+        replaced with independent draws from the prior. Use this for parameters
+        with wide posteriors consistent with their prior, where the FIM
+        poorly constrains the proposal covariance. Default is None (no
+        replacement).
     """
 
     sampler_name = "laplace"
@@ -213,6 +219,7 @@ class Laplace(Sampler):
         mode_search_nsamples=500,
         smc_kwargs=None,
         max_iterations=1e6,
+        prior_parameters=None,
     )
 
     def __init__(
@@ -238,6 +245,43 @@ class Laplace(Sampler):
             exit_code=exit_code,
             **kwargs,
         )
+
+    def _replace_with_prior_samples(self, samples, parameter_names):
+        """Replace specified parameters with draws from the prior.
+
+        For parameters in self.kwargs['prior_parameters'], replace values
+        in the samples DataFrame with independent draws from their priors.
+        This is useful for parameters with wide posteriors consistent with
+        their prior, where the FIM poorly constrains the proposal covariance.
+
+        Parameters
+        ----------
+        samples : pd.DataFrame
+            Samples with columns for each parameter.
+        parameter_names : list
+            Names of all parameters in order.
+
+        Returns
+        -------
+        samples : pd.DataFrame
+            Modified samples with specified parameters replaced by prior draws.
+        """
+        prior_params = self.kwargs.get("prior_parameters") or []
+        if not prior_params:
+            return samples
+
+        bad_params = [p for p in prior_params if p in parameter_names]
+        unknown_params = [p for p in prior_params if p not in parameter_names]
+
+        if unknown_params:
+            logger.warning(f"prior_parameters contains unknown parameters: {unknown_params}")
+
+        for param in bad_params:
+            prior_draws = self.priors[param].sample(len(samples))
+            samples[param] = prior_draws
+            logger.info(f"Replaced initial {param} samples with {len(samples)} prior draws")
+
+        return samples
 
     @classmethod
     def get_expected_outputs(cls, outdir=None, label=None):
@@ -286,9 +330,6 @@ class Laplace(Sampler):
         )
         logger.info(msg)
 
-        if self.kwargs["plot_diagnostic"]:
-            self.create_proposal_diagnostic(mean, cov)
-
         # Build the proposal distribution.  For rejection and importance
         # sampling we use a truncated Gaussian (per-marginal independent
         # truncated normals) so that every draw lands within the prior support.
@@ -301,6 +342,10 @@ class Laplace(Sampler):
             lower=fisher_mpe.prior_bounds_min,
             upper=fisher_mpe.prior_bounds_max,
         )
+
+        if self.kwargs["plot_diagnostic"]:
+            init_samples = self._draw_inprior_samples(proposal, 5000, fisher_mpe.parameter_names)
+            self.create_proposal_diagnostic(mean, cov, fisher_mpe.parameter_names, init_samples)
 
         # Laplace evidence (always available)
         log_evidence_laplace = fisher_mpe.log_evidence_laplace(map_sample_dict, iFIM)
@@ -384,6 +429,7 @@ class Laplace(Sampler):
         logger.info(f"Drawing {target_nsamples} samples from " f"Gaussian approximation (no resampling)")
         samples_array = random.rng.multivariate_normal(mean, cov, target_nsamples)
         samples = pd.DataFrame(samples_array, columns=fisher_mpe.parameter_names)
+        samples = self._replace_with_prior_samples(samples, fisher_mpe.parameter_names)
         logl = np.full(target_nsamples, np.nan)
         return samples, logl, samples, 100.0
 
@@ -418,6 +464,9 @@ class Laplace(Sampler):
             f"Drew {len(x_out)} in-prior samples from {total_drawn} proposals "
             f"({100.0 * len(x_out) / total_drawn:.1f}% efficiency)"
         )
+        df_out = pd.DataFrame(x_out, columns=parameter_names)
+        df_out = self._replace_with_prior_samples(df_out, parameter_names)
+        x_out = df_out.values
         return x_out
 
     def _check_iteration_limit(self, method_name, n_proposed, n_accepted):
@@ -489,6 +538,9 @@ class Laplace(Sampler):
 
             if in_prior.any():
                 x_in = x_batch[in_prior]
+                g_batch_in = g_batch[in_prior]
+                g_batch_in = self._replace_with_prior_samples(g_batch_in, fisher_mpe.parameter_names)
+                x_in = g_batch_in.values
                 logl_in = fisher_mpe.log_likelihood_from_array(x_in.T)
 
                 samples_list.append(x_in)
@@ -642,7 +694,9 @@ class Laplace(Sampler):
             pbar.set_postfix({"acceptance": f"{efficiency:.1f}%"}, refresh=False)
             pbar.update(int(accepted.sum()))
 
-            all_samples.append(g_df[accepted].reset_index(drop=True))
+            g_accepted = g_df[accepted].reset_index(drop=True)
+            g_accepted = self._replace_with_prior_samples(g_accepted, fisher_mpe.parameter_names)
+            all_samples.append(g_accepted)
             all_logl.append(logl[accepted])
             all_g_samples.append(g_df)
             all_ln_r.append(ln_r)
@@ -747,7 +801,9 @@ class Laplace(Sampler):
             pbar.set_postfix({"acceptance": f"{efficiency:.1f}%"}, refresh=False)
             pbar.update(n_draw)
 
-            all_samples.append(g_df.iloc[idx].reset_index(drop=True))
+            g_selected = g_df.iloc[idx].reset_index(drop=True)
+            g_selected = self._replace_with_prior_samples(g_selected, fisher_mpe.parameter_names)
+            all_samples.append(g_selected)
             all_logl.append(logl[idx])
             all_g_samples.append(g_df)
             all_ln_r.append(ln_r)
@@ -1045,41 +1101,59 @@ class Laplace(Sampler):
             rows.append(f"  {i:<4d} {logp:>14.2f}  {vals}")
         logger.info(f"Summary of {len(found_modes)} mode(s):\n" f"  {header}\n" + "\n".join(rows))
 
-    def create_proposal_diagnostic(self, mean, cov):
-        """Corner plot comparing the Gaussian proposal against the prior.
+    def create_proposal_diagnostic(self, mean, cov, parameter_names, init_samples=None):
+        """Corner plot comparing the Gaussian proposal, initialization samples, and injection parameters.
 
-        The prior is shown via Monte Carlo samples — histograms on diagonal
-        panels and low-alpha scatter (alpha=0.01) on off-diagonal panels. The
-        Gaussian proposal is drawn analytically as 1-D curves on the diagonal
-        and 2-D contour ellipses on the off-diagonal panels, working correctly
-        even when the proposal is much wider than the prior.
+        Shows:
+        - Initialization samples (actual samples drawn from proposal with prior replacement applied)
+          as histograms on diagonal and scatter on off-diagonal
+        - Gaussian proposal as 1-D curves on diagonal and 2-D contours on off-diagonal
+        - MAP estimate and injection parameters (if available) as markers
+
+        Parameters
+        ----------
+        mean : array
+            MAP estimate (mean of proposal)
+        cov : array
+            Covariance matrix of proposal
+        parameter_names : list
+            Names of parameters
+        init_samples : array, optional
+            Initial samples drawn from proposal (shape: N_samples x N_params).
+            If None, prior samples are shown instead.
         """
         import corner
         import matplotlib.lines as mpllines
         import matplotlib.pyplot as plt
         from scipy.stats import norm
 
-        parameter_names = self.search_parameter_keys
         labels = [k.replace("_", " ") for k in parameter_names]
         ndim = len(parameter_names)
-        n_samples = 10000
 
         proposal_sigmas = np.sqrt(np.diag(cov))
 
-        prior_samples = np.column_stack([self.priors[k].sample(n_samples) for k in parameter_names])
+        # Use initialization samples if provided, otherwise use prior samples
+        if init_samples is not None:
+            display_samples = init_samples
+            sample_color, sample_ls = "C0", "-"
+            sample_label = "Initial samples"
+        else:
+            n_samples = 10000
+            display_samples = np.column_stack([self.priors[k].sample(n_samples) for k in parameter_names])
+            sample_color, sample_ls = "C0", "-"
+            sample_label = "Prior samples"
 
         ranges = [(self.priors[k].minimum, self.priors[k].maximum) for k in parameter_names]
 
-        p_color, p_ls = "C0", "-"
         g_color, g_ls = "k", "--"
 
         panel_size = 2.5
         fig_size = panel_size * ndim
         fig = corner.corner(
-            prior_samples,
-            color=p_color,
-            contour_kwargs={"linestyles": p_ls, "alpha": 0.8},
-            hist_kwargs={"density": True, "ls": p_ls, "alpha": 0.8},
+            display_samples,
+            color=sample_color,
+            contour_kwargs={"linestyles": sample_ls, "alpha": 0.8},
+            hist_kwargs={"density": True, "ls": sample_ls, "alpha": 0.8},
             no_fill_contours=True,
             plot_density=False,
             plot_datapoints=True,
@@ -1091,7 +1165,7 @@ class Laplace(Sampler):
             max_n_ticks=5,
             labels=labels,
             truths=mean,
-            truth_color="C3",
+            truth_color="C1",
             fig=plt.figure(figsize=(fig_size, fig_size)),
             range=ranges,
         )
@@ -1109,17 +1183,17 @@ class Laplace(Sampler):
             y_max = ax.get_ylim()[1]
             ax.set_ylim(top=max(y_max, ys.max() * 1.1))
 
-        # 2-D prior samples on off-diagonal panels with low alpha,
+        # 2-D samples on off-diagonal panels with low alpha,
         # overlaid with Gaussian proposal contours.
         for row in range(ndim):
             for col in range(row):
                 ax = axes_grid[row, col]
                 ax.scatter(
-                    prior_samples[:, col],
-                    prior_samples[:, row],
+                    display_samples[:, col],
+                    display_samples[:, row],
                     s=1,
                     alpha=0.01,
-                    color=p_color,
+                    color=sample_color,
                 )
 
         # 2-D analytic Gaussian contours on off-diagonal panels.
@@ -1153,24 +1227,62 @@ class Laplace(Sampler):
                     pass
 
         legend_handles = [
-            mpllines.Line2D([0], [0], color=p_color, linestyle=p_ls),
+            mpllines.Line2D([0], [0], color=sample_color, linestyle=sample_ls),
             mpllines.Line2D([0], [0], color=g_color, linestyle=g_ls),
             mpllines.Line2D(
                 [0],
                 [0],
-                color="C3",
+                color="C1",
                 linestyle=":",
-                marker="+",
+                marker="s",
                 markersize=8,
                 linewidth=1.5,
             ),
         ]
+        legend_labels = [sample_label, "Gaussian proposal", "MAP"]
+
+        # Add injection parameters if available
+        if self.injection_parameters:
+            legend_handles.append(
+                mpllines.Line2D(
+                    [0],
+                    [0],
+                    color="C2",
+                    linestyle=":",
+                    marker="x",
+                    markersize=8,
+                    linewidth=1.5,
+                )
+            )
+            legend_labels.append("Injection")
+
+            # Overlay injection parameters on axes
+            injection_array = np.array([self.injection_parameters.get(k, np.nan) for k in parameter_names])
+            for i in range(ndim):
+                ax = axes_grid[i, i]
+                if np.isfinite(injection_array[i]):
+                    ax.axvline(injection_array[i], color="C2", lw=1.5, ls=":")
+
+            for row in range(ndim):
+                for col in range(row):
+                    ax = axes_grid[row, col]
+                    if np.isfinite(injection_array[col]) and np.isfinite(injection_array[row]):
+                        ax.scatter(
+                            [injection_array[col]],
+                            [injection_array[row]],
+                            color="C2",
+                            marker="x",
+                            s=80,
+                            zorder=5,
+                            linewidths=1.5,
+                        )
+
         axes_grid[0, 0].legend(
             legend_handles,
-            ["Prior", "Gaussian proposal", "MAP"],
+            legend_labels,
             fontsize="small",
         )
-        fig.suptitle("Gaussian proposal vs prior")
+        fig.suptitle("Gaussian proposal: initial samples, injection, and MAP")
 
         filename = f"{self.outdir}/{self.label}_diagnostic_proposal.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
