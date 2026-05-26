@@ -154,6 +154,36 @@ class Laplace(Sampler):
         If True, produce a corner diagnostic plot after resampling.
     cov_scaling : float
         Multiplicative scale applied to the iFIM covariance.
+    sampling_cov : pd.DataFrame, tuple, or None
+        Pre-computed covariance to use in place of the FIM-derived iFIM.
+        Must be one of:
+
+        - A pandas DataFrame whose row index and column index are both the
+          parameter names. Any ordering is accepted; the matrix is reordered
+          internally.
+        - A two-element tuple ``(parameter_names, cov)`` where
+          ``parameter_names`` is a sequence of parameter-name strings and
+          ``cov`` is an ``(N, N)`` array-like covariance in that order.
+        - ``None`` (default) to compute the inverse Fisher information matrix
+          from the likelihood at the MAP.
+
+        The MAP search still runs; only the covariance step is replaced.
+        ``cov_scaling`` and the eigenvalue-based covariance validation are
+        still applied.  Not compatible with ``n_modes > 1``.
+
+        Examples
+        --------
+        Given an ``(N, N)`` array ``C`` and a list ``parameter_names``::
+
+            import pandas as pd
+            cov_df = pd.DataFrame(C, index=parameter_names, columns=parameter_names)
+            result = bilby.run_sampler(..., sampler="laplace", sampling_cov=cov_df)
+
+        Or pass the tuple form directly::
+
+            result = bilby.run_sampler(
+                ..., sampler="laplace", sampling_cov=(parameter_names, C)
+            )
     use_injection_for_map : bool
         If True and injection_parameters are set, use them as the starting
         point for the MAP search.
@@ -210,6 +240,7 @@ class Laplace(Sampler):
         fd_eps=1e-6,
         plot_diagnostic=False,
         cov_scaling=1,
+        sampling_cov=None,
         use_injection_for_map=True,
         fail_on_error=True,
         use_unit_cube=True,
@@ -245,6 +276,87 @@ class Laplace(Sampler):
             exit_code=exit_code,
             **kwargs,
         )
+
+    def _resolve_sampling_cov(self, sampling_cov, parameter_names):
+        """Normalize a user-provided sampling covariance to an ndarray.
+
+        Accepts either a pandas DataFrame with parameter-named index/columns,
+        a ``(names, cov)`` tuple, or ``None``.  Returns an ``(N, N)`` ndarray
+        ordered by ``parameter_names``, or ``None`` when the input is ``None``.
+
+        All mismatches (unknown names, missing names, duplicates, wrong shape,
+        non-symmetry, non-PSD) raise ``ValueError`` up-front.
+        """
+        if sampling_cov is None:
+            return None
+
+        if isinstance(sampling_cov, pd.DataFrame):
+            cov_df = sampling_cov
+        elif isinstance(sampling_cov, tuple) and len(sampling_cov) == 2:
+            names, cov = sampling_cov
+            names = list(names)
+            cov = np.asarray(cov, dtype=float)
+            if cov.shape != (len(names), len(names)):
+                raise ValueError(
+                    f"sampling_cov array has shape {cov.shape}; expected "
+                    f"({len(names)}, {len(names)}) for parameter_names of "
+                    f"length {len(names)}."
+                )
+            cov_df = pd.DataFrame(cov, index=names, columns=names)
+        else:
+            raise TypeError(
+                "sampling_cov must be a pandas DataFrame with parameter-named "
+                "index/columns, a (parameter_names, cov) tuple, or None. "
+                f"Got {type(sampling_cov).__name__}."
+            )
+
+        row_names = list(cov_df.index)
+        col_names = list(cov_df.columns)
+
+        if len(set(row_names)) != len(row_names):
+            dups = sorted({n for n in row_names if row_names.count(n) > 1})
+            raise ValueError(f"sampling_cov parameter names contain duplicates: {dups}")
+
+        if set(row_names) != set(col_names):
+            row_only = sorted(set(row_names) - set(col_names))
+            col_only = sorted(set(col_names) - set(row_names))
+            raise ValueError(
+                f"sampling_cov DataFrame row index and column index must "
+                f"contain the same parameter names. Row-only: {row_only}. "
+                f"Column-only: {col_only}."
+            )
+
+        expected = set(parameter_names)
+        got = set(row_names)
+        if got != expected:
+            missing = sorted(expected - got)
+            extra = sorted(got - expected)
+            if missing:
+                raise ValueError(f"sampling_cov is missing covariance entries for parameter(s): {missing}")
+            if extra:
+                raise ValueError(f"sampling_cov contains unknown parameter(s) not in the model: {extra}")
+
+        cov_df = cov_df.loc[list(parameter_names), list(parameter_names)]
+        C = np.asarray(cov_df.values, dtype=float)
+
+        asym = float(np.max(np.abs(C - C.T)))
+        scale = max(float(np.max(np.abs(C))), 1.0)
+        if asym > 1e-8 * scale:
+            raise ValueError(
+                f"sampling_cov is not symmetric: max asymmetry {asym:.3g} " f"exceeds tolerance {1e-8 * scale:.3g}."
+            )
+        C = 0.5 * (C + C.T)
+
+        eigvals = np.linalg.eigvalsh(C)
+        max_eig = float(eigvals.max())
+        tol = 1e-8 * max(max_eig, 1.0)
+        if eigvals.min() < -tol:
+            raise ValueError(
+                f"sampling_cov is not positive semi-definite: minimum "
+                f"eigenvalue {eigvals.min():.3g} is below tolerance {-tol:.3g}."
+            )
+
+        return C
 
     def _replace_with_prior_samples(self, samples, parameter_names):
         """Replace specified parameters with draws from the prior.
@@ -304,6 +416,15 @@ class Laplace(Sampler):
             hessian_kwargs=self.kwargs["hessian_kwargs"],
         )
 
+        # Validate any user-provided sampling covariance up-front (before the
+        # MAP search) so naming/shape errors surface immediately.
+        user_cov = self._resolve_sampling_cov(self.kwargs["sampling_cov"], fisher_mpe.parameter_names)
+        if user_cov is not None and self.kwargs["n_modes"] > 1:
+            raise SamplerError(
+                "sampling_cov cannot be combined with n_modes > 1; "
+                "multi-mode search builds an independent covariance per mode."
+            )
+
         # Choose starting point for MAP search
         if self.injection_parameters and self.kwargs["use_injection_for_map"]:
             fallback = self.priors.sample_subset(fisher_mpe.parameter_names)
@@ -321,7 +442,11 @@ class Laplace(Sampler):
 
         map_sample_dict = fisher_mpe.get_MAP_sample(initial_sample)
         mean = np.array(list(map_sample_dict.values()))
-        iFIM = fisher_mpe.calculate_iFIM(map_sample_dict)
+        if user_cov is not None:
+            logger.info("Using user-provided sampling covariance (skipping iFIM)")
+            iFIM = user_cov
+        else:
+            iFIM = fisher_mpe.calculate_iFIM(map_sample_dict)
         cov = cov_scaling * iFIM
         cov = self._validate_covariance(fisher_mpe, mean, cov)
 
@@ -542,7 +667,6 @@ class Laplace(Sampler):
 
             if in_prior.any():
                 x_in = x_batch[in_prior]
-                g_batch_in = g_batch[in_prior]
                 logl_in = fisher_mpe.log_likelihood_from_array(x_in.T)
 
                 samples_list.append(x_in)
