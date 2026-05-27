@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import scipy.differentiate as sd
-import scipy.linalg
 import tqdm
 from bilby.core.prior import PriorDict
 from bilby.core.utils import logger, random
@@ -284,52 +283,62 @@ class LaplacePosteriorEstimator:
         )
         return log_z
 
+    # Eigenvalues of the preconditioned precision below this fraction of the
+    # largest are floored before inversion.  This caps the condition number of
+    # the inverted matrix at 1 / COVARIANCE_REL_FLOOR.
+    COVARIANCE_REL_FLOOR = 1e-10
+
     def calculate_posterior_covariance(self, sample):
         precision = self.calculate_posterior_precision(sample)
 
-        # Force the precision to be symmetric by averaging off-diagonal estimates
+        # Force the precision to be symmetric by averaging off-diagonal estimates.
         upper_off_diagonal_average = 0.5 * (np.triu(precision, 1) + np.triu(precision.T, 1))
         precision = np.diag(np.diag(precision)) + upper_off_diagonal_average + upper_off_diagonal_average.T
 
-        # Regularise a near-singular precision by flooring small/negative
-        # eigenvalues before inversion.  This prevents LinAlgError on singular
-        # matrices when some parameters are poorly constrained by the data.
-        prec_eigvals, prec_eigvecs = np.linalg.eigh(precision)
-        max_abs = max(np.max(np.abs(prec_eigvals)), 1e-30)
-        threshold = 1e-10 * max_abs
-        n_small = int(np.sum(prec_eigvals < threshold))
-        if n_small > 0:
-            logger.warning(
-                f"Precision has {n_small} eigenvalue(s) below {threshold:.2g} "
-                f"(min={prec_eigvals.min():.3g}); some parameters appear poorly "
-                f"constrained. Flooring to {threshold:.2g} before inversion."
-            )
-            prec_eigvals = np.maximum(prec_eigvals, threshold)
-            precision = prec_eigvecs @ np.diag(prec_eigvals) @ prec_eigvecs.T
-            precision = 0.5 * (precision + precision.T)
+        # Diagonal preconditioning: rescale to (approximately) unit diagonal so
+        # the eigen-flooring and inversion below act on a well-conditioned
+        # matrix.  This is the shared normalisation trick from GWFish/gwfast and
+        # removes most of the parameter-scale-driven ill-conditioning.  The
+        # observed-information matrix can be indefinite (unlike a pure Fisher),
+        # so fall back to no scaling if the diagonal is not strictly positive.
+        diag = np.diag(precision)
+        if np.all(np.isfinite(diag)) and np.all(diag > 0):
+            scale = np.sqrt(diag)
+        else:
+            logger.warning("Precision diagonal is not strictly positive; skipping preconditioning.")
+            scale = np.ones(self.N)
+        outer_scale = np.outer(scale, scale)
+        precision_norm = precision / outer_scale
 
-        covariance = scipy.linalg.inv(precision)
+        cond_raw = np.linalg.cond(precision)
+        cond_norm = np.linalg.cond(precision_norm)
+        logger.info(f"Precision condition number: {cond_raw:.3g} -> {cond_norm:.3g} after preconditioning")
 
-        # Ensure the covariance is positive definite.  Apply the 1e-6 * max
-        # floor unconditionally: inversion of an ill-conditioned precision
-        # (condition number ~1e10) can leave tiny-but-positive eigenvalues that
-        # are still below scipy's _PSD tolerance (eps ≈ 2.22e-10 * max).
-        # Flooring at 1e-6 * max keeps the condition number at most 1e6, well
-        # inside that threshold.
-        eigvals, eigvecs = np.linalg.eigh(covariance)
-        n_neg = int(np.sum(eigvals < 0))
-        if n_neg > 0:
+        # Invert via the eigendecomposition of the normalised matrix, flooring
+        # small or negative eigenvalues at a relative threshold.  Flooring the
+        # *precision* eigenvalues up to a positive value yields large-but-finite
+        # variance in poorly-constrained or indefinite directions -- the right
+        # behaviour for a proposal covariance (wide where the data does not
+        # constrain).  This is deliberately NOT GWFish-style truncation, which
+        # would instead zero out those directions.
+        eigvals, eigvecs = np.linalg.eigh(precision_norm)
+        max_abs = max(np.max(np.abs(eigvals)), 1e-30)
+        threshold = self.COVARIANCE_REL_FLOOR * max_abs
+        n_floored = int(np.sum(eigvals < threshold))
+        if n_floored > 0:
             logger.warning(
-                f"Covariance matrix has {n_neg} negative "
-                f"eigenvalue(s); projecting to nearest "
-                f"positive-definite matrix"
+                f"{n_floored} preconditioned precision eigenvalue(s) below "
+                f"{threshold:.2g} (min={eigvals.min():.3g}); flooring before "
+                f"inversion. Those directions are poorly constrained or indefinite."
             )
-        floor = 1e-6 * np.max(eigvals)
-        if eigvals.min() < floor:
-            eigvals = np.maximum(eigvals, floor)
-            covariance = eigvecs @ np.diag(eigvals) @ eigvecs.T
-            # Re-symmetrise to remove floating-point drift
-            covariance = 0.5 * (covariance + covariance.T)
+            eigvals = np.maximum(eigvals, threshold)
+
+        # M^{-1} = V diag(1/λ) Vᵀ, then undo the scaling: Σ = D⁻¹ M⁻¹ D⁻¹.
+        # All eigenvalues are now positive, so Σ is positive definite by
+        # construction.
+        covariance_norm = (eigvecs / eigvals) @ eigvecs.T
+        covariance = covariance_norm / outer_scale
+        covariance = 0.5 * (covariance + covariance.T)
 
         return covariance
 
