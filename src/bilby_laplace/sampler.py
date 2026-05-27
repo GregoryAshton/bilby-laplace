@@ -182,6 +182,18 @@ class Laplace(Sampler):
             result = bilby.run_sampler(
                 ..., sampler="laplace", sampling_cov=(parameter_names, C)
             )
+    fisher_method : str
+        How to estimate the posterior precision. ``'hessian'`` (default)
+        finite-differences the scalar log-posterior. ``'waveform'`` builds the
+        genuine Fisher matrix from gravitational-wave waveform derivatives
+        (positive semi-definite by construction). Requires a
+        ``GravitationalWaveTransient``-like likelihood without marginalisation
+        and not a reduced-order (ROQ / relative-binning / multi-band) variant;
+        it works directly in parameter space, so ``use_unit_cube`` and
+        ``jacobian_cap_scale`` are ignored.
+    fisher_kwargs : dict or None
+        Keyword arguments forwarded to the waveform-Fisher computation when
+        ``fisher_method='waveform'`` (recognised keys: ``eps``, ``eps_mass``).
     use_injection_for_map : bool
         If True and injection_parameters are set, use them as the starting
         point for the MAP search.
@@ -243,6 +255,8 @@ class Laplace(Sampler):
         use_unit_cube=True,
         jacobian_cap_scale=1.0,
         hessian_kwargs=None,
+        fisher_method="hessian",
+        fisher_kwargs=None,
         n_modes=1,
         mode_search_nsamples=500,
         smc_kwargs=None,
@@ -410,6 +424,8 @@ class Laplace(Sampler):
             use_unit_cube=self.kwargs["use_unit_cube"],
             jacobian_cap_scale=self.kwargs["jacobian_cap_scale"],
             hessian_kwargs=self.kwargs["hessian_kwargs"],
+            fisher_method=self.kwargs["fisher_method"],
+            fisher_kwargs=self.kwargs["fisher_kwargs"],
         )
 
         # Validate any user-provided sampling covariance up-front (before the
