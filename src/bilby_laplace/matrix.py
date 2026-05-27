@@ -1,11 +1,10 @@
 import numpy as np
 import pandas as pd
-import scipy
+import scipy.differentiate as sd
 import scipy.linalg
 import tqdm
 from bilby.core.prior import PriorDict
 from bilby.core.utils import logger, random
-from packaging import version
 from scipy.optimize import differential_evolution, minimize
 
 
@@ -20,7 +19,6 @@ class FisherMatrixPosteriorEstimator:
         priors,
         parameters=None,
         minimization_method="Nelder-Mead",
-        fd_eps=1e-6,
         n_prior_samples=100,
         use_unit_cube=True,
         jacobian_cap_scale=1.0,
@@ -43,9 +41,6 @@ class FisherMatrixPosteriorEstimator:
         minimization_method: str
             The method to use in scipy.optimize.minimize for MAP finding.
             Default is ``'Nelder-Mead'``.
-        fd_eps: float
-            A parameter to control the size of perturbation used when finite
-            differencing the log-posterior.
         n_prior_samples: int
             The number of prior samples to draw and use as starting points
             for the MAP search (multi-start mode).
@@ -75,7 +70,6 @@ class FisherMatrixPosteriorEstimator:
         else:
             self.parameter_names = parameters
         self.minimization_method = minimization_method
-        self.fd_eps = fd_eps
         self.n_prior_samples = n_prior_samples
         self.use_unit_cube = use_unit_cube
         self.jacobian_cap_scale = jacobian_cap_scale
@@ -215,71 +209,31 @@ class FisherMatrixPosteriorEstimator:
 
         return np.apply_along_axis(wrapped, 0, u_array)
 
-    def _second_deriv_unit_cube(self, u_map, ii, jj):
-        """Finite-difference second derivative of log-posterior in unit-cube coords."""
-        h = self.fd_eps
-        ei = np.zeros(self.N)
-        ei[ii] = h
-        ej = np.zeros(self.N)
-        ej[jj] = h
-        if ii == jj:
-            return (
-                self.log_posterior_in_unit_cube(u_map + ei)
-                - 2 * self.log_posterior_in_unit_cube(u_map)
-                + self.log_posterior_in_unit_cube(u_map - ei)
-            ) / h**2
-        else:
-            return (
-                self.log_posterior_in_unit_cube(u_map + ei + ej)
-                - self.log_posterior_in_unit_cube(u_map + ei - ej)
-                - self.log_posterior_in_unit_cube(u_map - ei + ej)
-                + self.log_posterior_in_unit_cube(u_map - ei - ej)
-            ) / (4 * h**2)
-
     def calculate_FIM(self, sample):
         if self.use_unit_cube:
             return self._calculate_FIM_unit_cube(sample)
         return self._calculate_FIM_parameter_space(sample)
 
     def _calculate_FIM_parameter_space(self, sample):
-        if version.parse(scipy.__version__) < version.parse("1.15"):
-            logger.info("Computing Hessian of log-posterior (finite differences, scipy < 1.15)")
-            FIM = np.zeros((self.N, self.N))
-            for ii, ii_key in enumerate(self.parameter_names):
-                for jj, jj_key in enumerate(self.parameter_names):
-                    FIM[ii, jj] = -self.get_second_order_derivative(sample, ii_key, jj_key)
-            return FIM
-        else:
-            import scipy.differentiate as sd
-
-            logger.info("Computing Hessian of log-posterior (scipy.differentiate)")
-            point = np.array([sample[key] for key in self.parameter_names])
-            kw = {"initial_step": 0.5, **self.hessian_kwargs}
-            res = sd.hessian(self.log_posterior_from_array, point, **kw)
-            FIM = -res.ddf
-            logger.debug(f"Estimated Hessian:\n{FIM}")
-            return FIM
+        logger.info("Computing Hessian of log-posterior (scipy.differentiate)")
+        point = np.array([sample[key] for key in self.parameter_names])
+        kw = {"initial_step": 0.5, **self.hessian_kwargs}
+        res = sd.hessian(self.log_posterior_from_array, point, **kw)
+        FIM = -res.ddf
+        logger.debug(f"Estimated Hessian:\n{FIM}")
+        return FIM
 
     def _calculate_FIM_unit_cube(self, sample):
         x_array = np.array([sample[key] for key in self.parameter_names])
         u_map = self._to_unit_cube(x_array)
 
-        if version.parse(scipy.__version__) < version.parse("1.15"):
-            logger.info("Computing Hessian of log-posterior in unit cube (finite differences, scipy < 1.15)")
-            FIM_u = np.zeros((self.N, self.N))
-            for ii in range(self.N):
-                for jj in range(self.N):
-                    FIM_u[ii, jj] = -self._second_deriv_unit_cube(u_map, ii, jj)
-        else:
-            import scipy.differentiate as sd
+        kw = {"initial_step": 0.001, "step_factor": 2, "maxiter": 20, **self.hessian_kwargs}
+        logger.info(f"Computing Hessian of log-posterior in unit cube (scipy.differentiate) with {kw}")
+        res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
+        logger.debug(f"Hessian computed: success={res.success}, status={res.status}, nfev={res.nfev}")
 
-            kw = {"initial_step": 0.001, "step_factor": 2, "maxiter": 20, **self.hessian_kwargs}
-            logger.info(f"Computing Hessian of log-posterior in unit cube (scipy.differentiate) with {kw}")
-            res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
-            print(f"Completed with success={res.success}, status={res.status}, and nfev={res.nfev}")
-
-            FIM_u = -res.ddf
-            logger.debug(f"Hessian (unit cube):\n{FIM_u}")
+        FIM_u = -res.ddf
+        logger.debug(f"Hessian (unit cube):\n{FIM_u}")
 
         J_inv = 1.0 / self._jacobian_diag(x_array)  # = p(θ_MAP)
 
@@ -390,57 +344,6 @@ class FisherMatrixPosteriorEstimator:
     def sample_dataframe(self, sample, n=1):
         samples = self.sample_array(sample, n)
         return pd.DataFrame(samples, columns=self.parameter_names)
-
-    def get_second_order_derivative(self, sample, ii, jj):
-        if ii == jj:
-            return self.get_finite_difference_xx(sample, ii)
-        else:
-            return self.get_finite_difference_xy(sample, ii, jj)
-
-    def get_finite_difference_xx(self, sample, ii):
-        p = self._shift_sample_x(sample, ii, 1)
-        m = self._shift_sample_x(sample, ii, -1)
-
-        dx = 0.5 * (p[ii] - m[ii])
-
-        loglp = self.log_posterior(p)
-        logl = self.log_posterior(sample)
-        loglm = self.log_posterior(m)
-
-        return (loglp - 2 * logl + loglm) / dx**2
-
-    def get_finite_difference_xy(self, sample, ii, jj):
-        pp = self._shift_sample_xy(sample, ii, 1, jj, 1)
-        pm = self._shift_sample_xy(sample, ii, 1, jj, -1)
-        mp = self._shift_sample_xy(sample, ii, -1, jj, 1)
-        mm = self._shift_sample_xy(sample, ii, -1, jj, -1)
-
-        dx = 0.5 * (pp[ii] - mm[ii])
-        dy = 0.5 * (pp[jj] - mm[jj])
-
-        loglpp = self.log_posterior(pp)
-        loglpm = self.log_posterior(pm)
-        loglmp = self.log_posterior(mp)
-        loglmm = self.log_posterior(mm)
-
-        return (loglpp - loglpm - loglmp + loglmm) / (4 * dx * dy)
-
-    def _shift_sample_x(self, sample, x_key, x_coef):
-        vx = sample[x_key]
-        dvx = self.fd_eps * self.prior_width_dict[x_key]
-        shift_sample = sample.copy()
-        shift_sample[x_key] = vx + x_coef * dvx
-        return shift_sample
-
-    def _shift_sample_xy(self, sample, x_key, x_coef, y_key, y_coef):
-        vx = sample[x_key]
-        vy = sample[y_key]
-        dvx = self.fd_eps * self.prior_width_dict[x_key]
-        dvy = self.fd_eps * self.prior_width_dict[y_key]
-        shift_sample = sample.copy()
-        shift_sample[x_key] = vx + x_coef * dvx
-        shift_sample[y_key] = vy + y_coef * dvy
-        return shift_sample
 
     def _maximize_posterior_differential_evolution(self):
         def neg_log_post(x):
