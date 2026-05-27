@@ -22,6 +22,8 @@ class LaplacePosteriorEstimator:
         use_unit_cube=True,
         jacobian_cap_scale=1.0,
         hessian_kwargs=None,
+        fisher_method="hessian",
+        fisher_kwargs=None,
     ):
         """Estimate posteriors using the Laplace approximation.
 
@@ -58,6 +60,17 @@ class LaplacePosteriorEstimator:
             Defaults are ``{"initial_step": 0.5}`` in parameter space and
             ``{"initial_step": 0.1}`` in unit-cube space. Any key provided
             here overrides the corresponding default.
+        fisher_method: str
+            How to estimate the posterior precision. ``'hessian'`` (default)
+            finite-differences the scalar log-posterior. ``'waveform'`` builds
+            the genuine Fisher matrix from gravitational-wave waveform
+            derivatives (likelihood Fisher plus prior precision); it requires a
+            ``GravitationalWaveTransient``-like likelihood and works directly in
+            parameter space (``use_unit_cube`` and ``jacobian_cap_scale`` are
+            ignored).
+        fisher_kwargs: dict, optional
+            Keyword arguments forwarded to the waveform-Fisher computation when
+            ``fisher_method='waveform'`` (e.g. ``eps``, ``eps_mass``).
         """
         self.likelihood = likelihood
 
@@ -73,6 +86,14 @@ class LaplacePosteriorEstimator:
         self.use_unit_cube = use_unit_cube
         self.jacobian_cap_scale = jacobian_cap_scale
         self.hessian_kwargs = hessian_kwargs if hessian_kwargs is not None else {}
+        self.fisher_method = fisher_method
+        self.fisher_kwargs = fisher_kwargs if fisher_kwargs is not None else {}
+        if fisher_method == "waveform":
+            from .gw_fisher import validate_waveform_likelihood
+
+            validate_waveform_likelihood(likelihood)
+        elif fisher_method != "hessian":
+            raise ValueError(f"fisher_method must be 'hessian' or 'waveform', got {fisher_method!r}.")
         self.N = len(self.parameter_names)
         self.priors_dict = {key: priors[key] for key in self.parameter_names}
 
@@ -209,9 +230,44 @@ class LaplacePosteriorEstimator:
         return np.apply_along_axis(wrapped, 0, u_array)
 
     def calculate_posterior_precision(self, sample):
+        if self.fisher_method == "waveform":
+            return self._calculate_precision_waveform(sample)
         if self.use_unit_cube:
             return self._calculate_precision_unit_cube(sample)
         return self._calculate_precision_parameter_space(sample)
+
+    def _calculate_precision_waveform(self, sample):
+        """Posterior precision from the GW waveform Fisher plus prior precision.
+
+        Returns the likelihood Fisher ``F_ij = (d_i h | d_j h)`` (in parameter
+        space) plus the diagonal prior precision, so the result has the same
+        "negative Hessian of the log-posterior" meaning as the other paths.
+        """
+        from .gw_fisher import waveform_fisher_matrix
+
+        base = {**getattr(self.likelihood, "parameters", {}), **self.fixed_parameters, **sample}
+        fisher = waveform_fisher_matrix(self.likelihood, self.parameter_names, base, **self.fisher_kwargs)
+        return fisher + np.diag(self._prior_precision_diag(sample))
+
+    def _prior_precision_diag(self, sample):
+        """Diagonal prior precision ``-d^2/dtheta^2 log pi_i`` at the MAP.
+
+        Computed by central differences on each 1-D prior log-density (priors
+        are smooth and cheap to difference).  Returns zeros for flat priors and
+        where the density is non-finite (e.g. at a boundary).
+        """
+        precision = np.zeros(self.N)
+        for i, key in enumerate(self.parameter_names):
+            prior = self.priors_dict[key]
+            x = float(sample[key])
+            h = 1e-4 * self.prior_width_dict[key]
+            with np.errstate(divide="ignore"):
+                lp = np.log(prior.prob(x))
+                lp_plus = np.log(prior.prob(x + h))
+                lp_minus = np.log(prior.prob(x - h))
+            d2 = (lp_plus - 2.0 * lp + lp_minus) / h**2
+            precision[i] = -d2 if np.isfinite(d2) else 0.0
+        return precision
 
     def _calculate_precision_parameter_space(self, sample):
         logger.info("Computing Hessian of log-posterior (scipy.differentiate)")
