@@ -9,10 +9,11 @@ The method is fast, scales well to moderate dimensions, and produces asymptotica
 exact posterior samples when the true posterior is close to Gaussian. It is
 useful as a cheap cross-check against nested sampling results.
 
+> **Documentation:** full guides, the configuration/API reference, and background on
+> the method are at **<https://gregoryashton.github.io/bilby-laplace/>**.
+
 NOTE: This is currently in development and derived from
 [bilby PR #933](https://github.com/bilby-dev/bilby/pull/933) (Gregory Ashton).
-
----
 
 ## Installation
 
@@ -20,18 +21,16 @@ NOTE: This is currently in development and derived from
 pip install bilby-laplace
 ```
 
-Or, to install from source:
+Or from source:
 
 ```bash
-git clone https://github.com/your-org/bilby-laplace
+git clone https://github.com/GregoryAshton/bilby-laplace
 cd bilby-laplace
 pip install -e .
 ```
 
-Once installed, Bilby discovers the sampler automatically via its plugin entry-point
-system — no further configuration is needed.
-
----
+Bilby discovers the sampler automatically via its plugin entry-point system — no
+further configuration is needed.
 
 ## Quick start
 
@@ -48,99 +47,37 @@ result = bilby.run_sampler(
 
 result.plot_corner()
 print(result.posterior)
-print(result.meta_data["run_statistics"])
 ```
 
----
+## Features
 
-## How it works
+- Several resampling strategies to correct for non-Gaussianity: `rejection`,
+  `importance`, `inprior`, `smc` (via [aspire](https://github.com/bilby-dev/aspire)),
+  or none.
+- Two covariance routes: the numerical Hessian (`fisher_method="hessian"`, any
+  likelihood) or the genuine waveform Fisher matrix (`fisher_method="waveform"`, for
+  gravitational-wave likelihoods).
+- Supply a precomputed covariance via `sampling_cov` (e.g. from gwfast / GWFish).
+- Multimodal posteriors via SMC with `n_modes > 1`.
+- Laplace log-evidence always available; rejection and SMC add independent estimates.
 
-1. **MAP estimation** — The maximum a posteriori (MAP) point is found by
-   maximising `log L(θ) + log π(θ)`. By default uses `differential_evolution`
-   (a global optimizer); alternatively multi-start `Nelder-Mead` can be used.
-
-2. **Covariance estimation** — The Hessian of the log-posterior is computed at
-   the MAP using `scipy.differentiate.hessian` (scipy ≥ 1.15) or a
-   finite-difference fallback. Its inverse serves as the Gaussian proposal
-   covariance. When `use_unit_cube=True` (default), the Hessian is computed in
-   unit-cube space via the prior CDFs, avoiding boundary issues for parameters
-   near prior edges.
-
-3. **Proposal construction** — A per-marginal truncated Gaussian proposal is
-   built, clipped to the prior bounds. This ensures all drawn samples fall
-   within the prior support, even when the Gaussian approximation is much wider
-   than the prior.
-
-4. **Batched sampling** — Samples are drawn in batches from the truncated
-   Gaussian proposal until the target number of posterior samples is reached.
-
-5. **Resampling** — Proposal samples are reweighted by
-   `w ∝ L(θ) π(θ) / g(θ)` where `g` is the proposal density, then either:
-   - **rejection**: accept each sample with probability `w / max(w)`
-   - **importance**: resample `ESS` indices proportional to `w`
-   - **smc**: use the Laplace Gaussian as a starting distribution for
-     [aspire](https://github.com/bilby-dev/aspire) SMC posterior sampling,
-     which iteratively refines samples toward the true posterior
-   - **inprior**: draw from the proposal and keep only samples within the
-     prior support, evaluating the likelihood for retained samples. Useful
-     as a fast filter when the proposal is well-matched to the prior.
-   - **None**: skip resampling entirely and return raw Gaussian samples
-
-6. **Evidence estimation** — The Laplace log-evidence
-   `log Z ≈ log L(θ_MAP) + log π(θ_MAP) + (d/2) log(2π) + (1/2) log det(Σ)`
-   is always computed. Rejection sampling and SMC provide independent evidence
-   estimates.
-
----
-
-## Configuration
-
-All keyword arguments are passed through `bilby.run_sampler`:
-
-| Argument | Default | Description |
-|---|---|---|
-| `resample` | `'rejection'` | Resampling method: `'rejection'`, `'importance'`, `'smc'`, `'inprior'`, or `None` |
-| `target_nsamples` | `10000` | Target number of posterior samples |
-| `batch_nsamples` | `1000` | Proposal samples drawn per batch |
-| `prior_nsamples` | `100` | Prior draws used in the MAP search (multi-start only) |
-| `minimization_method` | `'differential_evolution'` | `scipy.optimize` method for MAP finding |
-| `cov_scaling` | `1` | Multiplicative scale applied to the Laplace covariance |
-| `use_injection_for_map` | `True` | Use `injection_parameters` as MAP starting point if set |
-| `use_unit_cube` | `True` | Compute the Hessian in unit-cube space via prior CDFs |
-| `jacobian_cap_scale` | `1.0` | Scale the Jacobian cap for prior-dominated parameters (< 1 widens proposal) |
-| `hessian_kwargs` | `None` | Dict of kwargs forwarded to `scipy.differentiate.hessian` |
-| `plot_diagnostic` | `False` | Save diagnostic plots (proposal vs prior, SMC stages) |
-| `fail_on_error` | `True` | Raise an error when sampling fails (vs. log a warning) |
-| `n_modes` | `1` | Number of posterior modes to search for (SMC only) |
-| `mode_search_nsamples` | `500` | Prior draws for multi-mode search (`n_modes > 1`) |
-| `max_iterations` | `1e6` | Maximum number of proposal samples before aborting (rejection/importance only) |
-| `smc_kwargs` | `None` | Dict of aspire SMC configuration (see docstring for keys) |
-| `save` | — | Result file format: `'hdf5'`, `'json'`, etc. |
-
----
+See the [documentation](https://gregoryashton.github.io/bilby-laplace/) for the full list
+of options and guidance on choosing between them.
 
 ## Examples
 
-Example scripts are provided in the `examples/` directory, each supporting
-multiple samplers and a `--compare` mode that prints a summary table and
-corner plot:
+Runnable examples are in [`examples/`](examples/) (gaussian, rosenbrock, BBH, BNS).
+Each has a `Makefile`:
 
 ```bash
-cd examples
-
-# Gaussian (2D, exact match for Laplace)
-make gaussian-laplace
-make gaussian-dynesty
-make gaussian-compare
-
-# Rosenbrock (2D, non-Gaussian — stress test)
-make rosenbrock-smc
-make rosenbrock-compare
-
-# HLV BBH injection (simulated GW data, no download needed)
-make hlv-laplace
-make hlv-smc
-make hlv-compare
+cd examples/gaussian
+make laplace
+make compare
 ```
 
-Run `make help` in the examples directory for the full list of targets.
+## Documentation development
+
+```bash
+pip install -e ".[docs]"
+mkdocs serve
+```

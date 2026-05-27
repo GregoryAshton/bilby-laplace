@@ -1,0 +1,76 @@
+site_name: bilby-laplace
+site_description: A Bilby sampler plugin for the Laplace approximation
+repo_url: https://github.com/GregoryAshton/bilby-laplace
+repo_name: bilby-laplace
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - content.code.copy
+    - toc.follow
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Quick start: quickstart.md
+  - Guide:
+      - How it works: guide/how-it-works.md
+      - Choosing a resampling method: guide/resampling.md
+      - Covariance estimation: guide/covariance.md
+  - Background:
+      - Fisher, Hessian & precision: background/theory.md
+  - Reference:
+      - Configuration & API: reference/api.md
+  - Examples: examples.md
+  - Changelog: changelog.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: numpy
+            docstring_options:
+              # The Laplace sampler documents run_sampler/default_kwargs options
+              # (passed via **kwargs) in its class docstring, so they are not in
+              # the __init__ signature. Don't warn about that mismatch.
+              warn_unknown_params: false
+            show_root_heading: true
+            show_source: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.arithmatex:
+      generic: true
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
