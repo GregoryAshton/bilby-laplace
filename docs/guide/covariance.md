@@ -1,0 +1,100 @@
+# Covariance estimation
+
+The proposal covariance is the most important ingredient: too narrow and the
+proposal misses posterior mass, too wide and acceptance collapses. There are two
+routes for estimating it, plus several options that shape the result.
+
+## The two routes (`fisher_method`)
+
+### `"hessian"` (default)
+
+Finite-differences the scalar log-posterior at the MAP and inverts the result. Works
+for **any** Bilby likelihood. This computes the *negative Hessian of the
+log-posterior* — see [Background](../background/theory.md) for why this is the
+observed information (including the prior), not the Fisher matrix.
+
+The Hessian is computed with `scipy.differentiate.hessian` (adaptive step,
+Richardson extrapolation). In unit-cube space (`use_unit_cube=True`) the parameter
+scales are already normalised by the prior CDF transform.
+
+### `"waveform"` (gravitational-wave likelihoods)
+
+Builds the genuine Fisher matrix
+
+\[
+F_{ij} = \sum_{\rm detectors} \mathrm{Re}\,(\partial_i h \mid \partial_j h)
+\]
+
+from derivatives of the projected detector strain, where \( (a\mid b) \) is the
+noise-weighted inner product. This is **positive semi-definite by construction**,
+needs only *first* derivatives of the waveform (far better behaved under finite
+differencing than a scalar second derivative), and drops the noisy,
+realisation-dependent term that can make the Hessian indefinite. The result is the
+likelihood Fisher plus a diagonal prior precision, returned in parameter space.
+
+```python
+result = bilby.run_sampler(
+    likelihood=gw_likelihood, priors=priors, sampler="laplace",
+    fisher_method="waveform",
+    fisher_kwargs=dict(eps=1e-6, eps_mass=1e-8),  # finite-difference steps
+)
+```
+
+!!! warning "Requirements and limitations"
+    `fisher_method="waveform"` requires a `GravitationalWaveTransient`-like
+    likelihood (exposing `interferometers` and `waveform_generator`). It **refuses**:
+
+    - any marginalisation (phase / time / distance / calibration) — the waveform
+      Fisher cannot account for marginalised parameters;
+    - reduced-order likelihoods (ROQ / relative-binning / multi-band), whose inner
+      product differs from the full-resolution one used here.
+
+    It works directly in parameter space, so `use_unit_cube` and
+    `jacobian_cap_scale` are ignored.
+
+## Conditioning
+
+Before inversion the precision is **diagonally preconditioned** (rescaled by
+\( \sqrt{\mathrm{diag}} \) to near-unit diagonal). This removes scale-driven
+ill-conditioning — most effective in the parameter-space path, where raw parameter
+scales differ by orders of magnitude. Small or negative eigenvalues are then floored
+at a relative threshold, which keeps poorly-constrained or indefinite directions
+*wide* (the right behaviour for a proposal) rather than zeroing them out. The
+before/after condition number is logged.
+
+## Shaping the proposal
+
+| Option | Effect |
+|---|---|
+| `cov_scaling` | Multiplies the covariance. Increase (`>1`) to widen the proposal when acceptance is low or the posterior is wider than the Gaussian predicts. |
+| `sampling_cov` | Bypass estimation entirely and supply a precomputed covariance (see below). |
+| `jacobian_cap_scale` | (Hessian unit-cube path) Caps the Jacobian for prior-dominated parameters; values `<1` widen the proposal for those parameters. |
+| `prior_parameters` | Replace the proposal for listed parameters with independent prior draws — for parameters whose posterior is essentially the prior and which the Hessian constrains poorly. |
+| `hessian_kwargs` | Forwarded to `scipy.differentiate.hessian` (e.g. `initial_step`). |
+
+Additionally, the Hessian-derived covariance is validated along its principal axes:
+at 1-sigma from the MAP the log-likelihood should drop by 0.5; directions where the
+posterior is notably wider are inflated to match (never shrunk).
+
+## Supplying your own covariance (`sampling_cov`)
+
+If you already have a covariance — for example from a [gwfast](https://github.com/CosmoStatGW/gwfast)
+or [GWFish](https://github.com/janosch314/GWFish) Fisher analysis — pass it directly
+and skip the MAP-based estimate of the matrix (the MAP search still runs for the
+mean):
+
+```python
+import pandas as pd
+
+# Either a parameter-named DataFrame...
+cov_df = pd.DataFrame(C, index=parameter_names, columns=parameter_names)
+result = bilby.run_sampler(..., sampler="laplace", sampling_cov=cov_df)
+
+# ...or a (names, matrix) tuple
+result = bilby.run_sampler(..., sampler="laplace", sampling_cov=(parameter_names, C))
+```
+
+The names are validated against the model parameters (missing/extra/duplicate names,
+wrong shape, non-symmetry, and non-positive-semi-definiteness all raise up front).
+`cov_scaling` and the covariance validation still apply. Not compatible with
+`n_modes > 1`.

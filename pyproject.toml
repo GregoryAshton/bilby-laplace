@@ -15,6 +15,13 @@ dependencies = [
     "tqdm",
 ]
 
+[project.optional-dependencies]
+docs = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
+    "pymdown-extensions",
+]
+
 [project.entry-points."bilby.samplers"]
 "bilby.laplace" = "bilby_laplace.sampler:Laplace"
 
