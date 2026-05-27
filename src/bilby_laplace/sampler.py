@@ -148,8 +148,6 @@ class Laplace(Sampler):
         Optimization method. Default is ``'differential_evolution'`` (global
         optimizer; recommended for real data). Set to ``'Nelder-Mead'`` to use
         the legacy multi-start local optimizer.
-    fd_eps : float
-        Finite-difference step size relative to prior width.
     plot_diagnostic : bool
         If True, produce a corner diagnostic plot after resampling.
     cov_scaling : float
@@ -237,7 +235,6 @@ class Laplace(Sampler):
         batch_nsamples=1000,
         prior_nsamples=100,
         minimization_method="differential_evolution",
-        fd_eps=1e-6,
         plot_diagnostic=False,
         cov_scaling=1,
         sampling_cov=None,
@@ -410,7 +407,6 @@ class Laplace(Sampler):
             priors=self.priors,
             minimization_method=self.kwargs["minimization_method"],
             n_prior_samples=self.kwargs["prior_nsamples"],
-            fd_eps=self.kwargs["fd_eps"],
             use_unit_cube=self.kwargs["use_unit_cube"],
             jacobian_cap_scale=self.kwargs["jacobian_cap_scale"],
             hessian_kwargs=self.kwargs["hessian_kwargs"],

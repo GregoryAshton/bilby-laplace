@@ -10,10 +10,9 @@ requires-python = ">=3.9"
 dependencies = [
     "bilby>=2.7",
     "numpy",
-    "scipy>=1.9",
+    "scipy>=1.15",
     "pandas",
     "tqdm",
-    "packaging",
 ]
 
 [project.entry-points."bilby.samplers"]
