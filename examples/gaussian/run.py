@@ -109,7 +109,7 @@ def run_rejection(_common_laplace):
 def run_rejection_user(_common_laplace, sampling_cov):
     """Rejection sampling using a user-supplied covariance.
 
-    Skips the FIM/Hessian estimation by passing the known likelihood
+    Skips the Hessian/covariance estimation by passing the known likelihood
     covariance directly through the ``sampling_cov`` kwarg.
     """
     return bilby.run_sampler(

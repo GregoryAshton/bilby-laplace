@@ -1,4 +1,4 @@
-from .matrix import FisherMatrixPosteriorEstimator
+from .laplace import LaplacePosteriorEstimator
 from .sampler import Laplace
 
 try:
@@ -6,4 +6,4 @@ try:
 except ImportError:
     __version__ = "unknown"
 
-__all__ = ["Laplace", "FisherMatrixPosteriorEstimator", "__version__"]
+__all__ = ["Laplace", "LaplacePosteriorEstimator", "__version__"]

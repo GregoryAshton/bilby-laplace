@@ -12,7 +12,7 @@ def array_to_dict(keys, array):
     return dict(zip(keys, array))
 
 
-class FisherMatrixPosteriorEstimator:
+class LaplacePosteriorEstimator:
     def __init__(
         self,
         likelihood,
@@ -209,21 +209,21 @@ class FisherMatrixPosteriorEstimator:
 
         return np.apply_along_axis(wrapped, 0, u_array)
 
-    def calculate_FIM(self, sample):
+    def calculate_posterior_precision(self, sample):
         if self.use_unit_cube:
-            return self._calculate_FIM_unit_cube(sample)
-        return self._calculate_FIM_parameter_space(sample)
+            return self._calculate_precision_unit_cube(sample)
+        return self._calculate_precision_parameter_space(sample)
 
-    def _calculate_FIM_parameter_space(self, sample):
+    def _calculate_precision_parameter_space(self, sample):
         logger.info("Computing Hessian of log-posterior (scipy.differentiate)")
         point = np.array([sample[key] for key in self.parameter_names])
         kw = {"initial_step": 0.5, **self.hessian_kwargs}
         res = sd.hessian(self.log_posterior_from_array, point, **kw)
-        FIM = -res.ddf
-        logger.debug(f"Estimated Hessian:\n{FIM}")
-        return FIM
+        precision = -res.ddf
+        logger.debug(f"Estimated Hessian:\n{precision}")
+        return precision
 
-    def _calculate_FIM_unit_cube(self, sample):
+    def _calculate_precision_unit_cube(self, sample):
         x_array = np.array([sample[key] for key in self.parameter_names])
         u_map = self._to_unit_cube(x_array)
 
@@ -232,15 +232,15 @@ class FisherMatrixPosteriorEstimator:
         res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
         logger.debug(f"Hessian computed: success={res.success}, status={res.status}, nfev={res.nfev}")
 
-        FIM_u = -res.ddf
-        logger.debug(f"Hessian (unit cube):\n{FIM_u}")
+        precision_u = -res.ddf
+        logger.debug(f"Hessian (unit cube):\n{precision_u}")
 
         J_inv = 1.0 / self._jacobian_diag(x_array)  # = p(θ_MAP)
 
         # Cap the Jacobian at the uniform-prior value (1/width) for each
         # parameter.  When the prior is strongly peaked (p(θ) >> 1/width),
-        # the uncapped J_inv amplifies the unit-cube FIM and collapses the
-        # parameter-space covariance.  Capping prevents this for prior-
+        # the uncapped J_inv amplifies the unit-cube precision and collapses
+        # the parameter-space covariance.  Capping prevents this for prior-
         # dominated parameters while leaving likelihood-constrained
         # parameters unaffected.
         uniform_cap = np.array([self.jacobian_cap_scale / self.prior_width_dict[k] for k in self.parameter_names])
@@ -250,18 +250,18 @@ class FisherMatrixPosteriorEstimator:
             logger.info(f"Capping Jacobian for prior-dominated parameter(s): " f"{', '.join(names)}")
             J_inv = np.minimum(J_inv, uniform_cap)
 
-        return J_inv[:, None] * FIM_u * J_inv[None, :]
+        return J_inv[:, None] * precision_u * J_inv[None, :]
 
-    def log_evidence_laplace(self, sample, iFIM):
+    def log_evidence_laplace(self, sample, covariance):
         """Laplace approximation to the log evidence.
 
         Parameters
         ----------
         sample : dict
             MAP parameter values.
-        iFIM : array
-            Inverse of the negative Hessian of the log-posterior (covariance
-            at the MAP).
+        covariance : array
+            Inverse of the negative Hessian of the log-posterior (the
+            posterior covariance at the MAP).
 
         Returns
         -------
@@ -272,9 +272,9 @@ class FisherMatrixPosteriorEstimator:
         d = len(self.parameter_names)
         log_l_map = self.log_likelihood(sample)
         log_pi_map = sum(np.log(self.priors_dict[k].prob(float(sample[k]))) for k in self.parameter_names)
-        sign, log_det = np.linalg.slogdet(iFIM)
+        sign, log_det = np.linalg.slogdet(covariance)
         if sign <= 0:
-            logger.warning("iFIM has non-positive determinant; " "Laplace evidence estimate may be unreliable")
+            logger.warning("covariance has non-positive determinant; " "Laplace evidence estimate may be unreliable")
         log_z = log_l_map + log_pi_map + 0.5 * d * np.log(2 * np.pi) + 0.5 * log_det
         logger.info(
             f"Laplace log-evidence: {log_z:.2f} "
@@ -284,39 +284,39 @@ class FisherMatrixPosteriorEstimator:
         )
         return log_z
 
-    def calculate_iFIM(self, sample):
-        FIM = self.calculate_FIM(sample)
+    def calculate_posterior_covariance(self, sample):
+        precision = self.calculate_posterior_precision(sample)
 
-        # Force the FIM to be symmetric by averaging off-diagonal estimates
-        upper_off_diagonal_average = 0.5 * (np.triu(FIM, 1) + np.triu(FIM.T, 1))
-        FIM = np.diag(np.diag(FIM)) + upper_off_diagonal_average + upper_off_diagonal_average.T
+        # Force the precision to be symmetric by averaging off-diagonal estimates
+        upper_off_diagonal_average = 0.5 * (np.triu(precision, 1) + np.triu(precision.T, 1))
+        precision = np.diag(np.diag(precision)) + upper_off_diagonal_average + upper_off_diagonal_average.T
 
-        # Regularise near-singular FIM by flooring small/negative eigenvalues
-        # before inversion.  This prevents LinAlgError on singular matrices
-        # when some parameters are poorly constrained by the data.
-        fim_eigvals, fim_eigvecs = np.linalg.eigh(FIM)
-        max_abs = max(np.max(np.abs(fim_eigvals)), 1e-30)
+        # Regularise a near-singular precision by flooring small/negative
+        # eigenvalues before inversion.  This prevents LinAlgError on singular
+        # matrices when some parameters are poorly constrained by the data.
+        prec_eigvals, prec_eigvecs = np.linalg.eigh(precision)
+        max_abs = max(np.max(np.abs(prec_eigvals)), 1e-30)
         threshold = 1e-10 * max_abs
-        n_small = int(np.sum(fim_eigvals < threshold))
+        n_small = int(np.sum(prec_eigvals < threshold))
         if n_small > 0:
             logger.warning(
-                f"FIM has {n_small} eigenvalue(s) below {threshold:.2g} "
-                f"(min={fim_eigvals.min():.3g}); some parameters appear poorly "
+                f"Precision has {n_small} eigenvalue(s) below {threshold:.2g} "
+                f"(min={prec_eigvals.min():.3g}); some parameters appear poorly "
                 f"constrained. Flooring to {threshold:.2g} before inversion."
             )
-            fim_eigvals = np.maximum(fim_eigvals, threshold)
-            FIM = fim_eigvecs @ np.diag(fim_eigvals) @ fim_eigvecs.T
-            FIM = 0.5 * (FIM + FIM.T)
+            prec_eigvals = np.maximum(prec_eigvals, threshold)
+            precision = prec_eigvecs @ np.diag(prec_eigvals) @ prec_eigvecs.T
+            precision = 0.5 * (precision + precision.T)
 
-        iFIM = scipy.linalg.inv(FIM)
+        covariance = scipy.linalg.inv(precision)
 
-        # Ensure iFIM is positive definite.  Apply the 1e-6 * max floor
-        # unconditionally: inversion of an ill-conditioned FIM (condition
-        # number ~1e10) can leave tiny-but-positive eigenvalues that are still
-        # below scipy's _PSD tolerance (eps ≈ 2.22e-10 * max).  Flooring at
-        # 1e-6 * max keeps the condition number at most 1e6, well inside that
-        # threshold.
-        eigvals, eigvecs = np.linalg.eigh(iFIM)
+        # Ensure the covariance is positive definite.  Apply the 1e-6 * max
+        # floor unconditionally: inversion of an ill-conditioned precision
+        # (condition number ~1e10) can leave tiny-but-positive eigenvalues that
+        # are still below scipy's _PSD tolerance (eps ≈ 2.22e-10 * max).
+        # Flooring at 1e-6 * max keeps the condition number at most 1e6, well
+        # inside that threshold.
+        eigvals, eigvecs = np.linalg.eigh(covariance)
         n_neg = int(np.sum(eigvals < 0))
         if n_neg > 0:
             logger.warning(
@@ -327,19 +327,19 @@ class FisherMatrixPosteriorEstimator:
         floor = 1e-6 * np.max(eigvals)
         if eigvals.min() < floor:
             eigvals = np.maximum(eigvals, floor)
-            iFIM = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            covariance = eigvecs @ np.diag(eigvals) @ eigvecs.T
             # Re-symmetrise to remove floating-point drift
-            iFIM = 0.5 * (iFIM + iFIM.T)
+            covariance = 0.5 * (covariance + covariance.T)
 
-        return iFIM
+        return covariance
 
     def sample_array(self, sample, n=1):
         if sample == "maxL":
             sample = self.get_maximum_likelihood_sample()
 
         self.mean = np.array(list(sample.values()))
-        self.iFIM = self.calculate_iFIM(sample)
-        return random.rng.multivariate_normal(self.mean, self.iFIM, n)
+        self.covariance = self.calculate_posterior_covariance(sample)
+        return random.rng.multivariate_normal(self.mean, self.covariance, n)
 
     def sample_dataframe(self, sample, n=1):
         samples = self.sample_array(sample, n)

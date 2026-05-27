@@ -104,8 +104,7 @@ All keyword arguments are passed through `bilby.run_sampler`:
 | `batch_nsamples` | `1000` | Proposal samples drawn per batch |
 | `prior_nsamples` | `100` | Prior draws used in the MAP search (multi-start only) |
 | `minimization_method` | `'differential_evolution'` | `scipy.optimize` method for MAP finding |
-| `fd_eps` | `1e-6` | Finite-difference step size (relative to prior width) |
-| `cov_scaling` | `1` | Multiplicative scale applied to the iFIM covariance |
+| `cov_scaling` | `1` | Multiplicative scale applied to the Laplace covariance |
 | `use_injection_for_map` | `True` | Use `injection_parameters` as MAP starting point if set |
 | `use_unit_cube` | `True` | Compute the Hessian in unit-cube space via prior CDFs |
 | `jacobian_cap_scale` | `1.0` | Scale the Jacobian cap for prior-dominated parameters (< 1 widens proposal) |

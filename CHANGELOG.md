@@ -17,6 +17,7 @@ Versions correspond to git tags; version numbers follow
 - Aligned initial samples for SMC — uses `_draw_inprior_samples()` helper to match rejection/importance sampling.
 - `jacobian_cap_scale` parameter — caps the Jacobian at user-specified fraction of uniform-prior density, addressing prior-dominated parameters.
 - `hessian_kwargs` parameter — forwards custom kwargs to `scipy.differentiate.hessian` for finer control.
+- `sampling_cov` parameter — pass a precomputed covariance (parameter-named DataFrame or `(names, cov)` tuple) to use in place of the Laplace estimate.
 - `max_iterations` parameter (default 1e6) — aborts rejection/importance sampling if acceptance rate drops below 1%.
 - Unit-cube Hessian computation (`use_unit_cube=True`) — avoids boundary issues when MAP sits near prior edges.
 - Validation of Hessian-derived covariance along principal axes — inflates eigendirections where posterior is wider than Gaussian predicts.
@@ -33,6 +34,16 @@ Versions correspond to git tags; version numbers follow
 - Jacobian cap now scaled by `jacobian_cap_scale` parameter rather than hardcoded at 1.0.
 - SMC pre-scan for rejection sampling uses in-prior-filtered calibration samples.
 - Finite-difference step for unit-cube Hessian reduced from 0.01 to 0.1.
+- Renamed for terminological precision: the estimated matrix is the negative Hessian of the
+  log-posterior (the posterior precision), not the Fisher information matrix. `matrix.py` →
+  `laplace.py`; `FisherMatrixPosteriorEstimator` → `LaplacePosteriorEstimator`; `calculate_FIM` →
+  `calculate_posterior_precision`; `calculate_iFIM` → `calculate_posterior_covariance`. No
+  backwards-compatible aliases (alpha).
+
+### Removed
+
+- Manual finite-difference Hessian fallback and the `fd_eps` parameter — `scipy.differentiate.hessian`
+  (scipy ≥ 1.15) is now required and used unconditionally. Dropped the `packaging` dependency.
 
 ---
 
