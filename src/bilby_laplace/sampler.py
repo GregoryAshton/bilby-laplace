@@ -9,7 +9,7 @@ from bilby.core.utils import logger, random
 from scipy.special import logsumexp
 from scipy.stats import multivariate_normal, truncnorm
 
-from .matrix import FisherMatrixPosteriorEstimator
+from .laplace import LaplacePosteriorEstimator
 
 try:
     from bilby.core.sampler.base_sampler import SamplerError
@@ -151,10 +151,10 @@ class Laplace(Sampler):
     plot_diagnostic : bool
         If True, produce a corner diagnostic plot after resampling.
     cov_scaling : float
-        Multiplicative scale applied to the iFIM covariance.
+        Multiplicative scale applied to the Laplace covariance.
     sampling_cov : pd.DataFrame, tuple, or None
-        Pre-computed covariance to use in place of the FIM-derived iFIM.
-        Must be one of:
+        Pre-computed covariance to use in place of the Laplace-estimated
+        covariance. Must be one of:
 
         - A pandas DataFrame whose row index and column index are both the
           parameter names. Any ordering is accepted; the matrix is reordered
@@ -162,8 +162,8 @@ class Laplace(Sampler):
         - A two-element tuple ``(parameter_names, cov)`` where
           ``parameter_names`` is a sequence of parameter-name strings and
           ``cov`` is an ``(N, N)`` array-like covariance in that order.
-        - ``None`` (default) to compute the inverse Fisher information matrix
-          from the likelihood at the MAP.
+        - ``None`` (default) to compute the posterior covariance from the
+          Hessian of the log-posterior at the MAP.
 
         The MAP search still runs; only the covariance step is replaced.
         ``cov_scaling`` and the eigenvalue-based covariance validation are
@@ -222,7 +222,7 @@ class Laplace(Sampler):
     prior_parameters : list or None
         List of parameter names for which initial proposal samples should be
         replaced with independent draws from the prior. Use this for parameters
-        with wide posteriors consistent with their prior, where the FIM
+        with wide posteriors consistent with their prior, where the Hessian
         poorly constrains the proposal covariance. Default is None (no
         replacement).
     """
@@ -361,7 +361,7 @@ class Laplace(Sampler):
         For parameters in self.kwargs['prior_parameters'], replace values
         in the samples DataFrame with independent draws from their priors.
         This is useful for parameters with wide posteriors consistent with
-        their prior, where the FIM poorly constrains the proposal covariance.
+        their prior, where the Hessian poorly constrains the proposal covariance.
 
         Parameters
         ----------
@@ -402,7 +402,7 @@ class Laplace(Sampler):
         self.start_time = datetime.datetime.now()
         cov_scaling = self.kwargs["cov_scaling"]
 
-        fisher_mpe = FisherMatrixPosteriorEstimator(
+        estimator = LaplacePosteriorEstimator(
             likelihood=self.likelihood,
             priors=self.priors,
             minimization_method=self.kwargs["minimization_method"],
@@ -414,7 +414,7 @@ class Laplace(Sampler):
 
         # Validate any user-provided sampling covariance up-front (before the
         # MAP search) so naming/shape errors surface immediately.
-        user_cov = self._resolve_sampling_cov(self.kwargs["sampling_cov"], fisher_mpe.parameter_names)
+        user_cov = self._resolve_sampling_cov(self.kwargs["sampling_cov"], estimator.parameter_names)
         if user_cov is not None and self.kwargs["n_modes"] > 1:
             raise SamplerError(
                 "sampling_cov cannot be combined with n_modes > 1; "
@@ -423,28 +423,28 @@ class Laplace(Sampler):
 
         # Choose starting point for MAP search
         if self.injection_parameters and self.kwargs["use_injection_for_map"]:
-            fallback = self.priors.sample_subset(fisher_mpe.parameter_names)
-            missing = [k for k in fisher_mpe.parameter_names if k not in self.injection_parameters]
+            fallback = self.priors.sample_subset(estimator.parameter_names)
+            missing = [k for k in estimator.parameter_names if k not in self.injection_parameters]
             if missing:
                 logger.warning(
                     f"use_injection_for_map=True but the following parameters are not in "
                     f"injection_parameters (using prior samples as fallback): {missing}"
                 )
             initial_sample = {
-                key: self.injection_parameters.get(key, fallback[key]) for key in fisher_mpe.parameter_names
+                key: self.injection_parameters.get(key, fallback[key]) for key in estimator.parameter_names
             }
         else:
             initial_sample = None
 
-        map_sample_dict = fisher_mpe.get_MAP_sample(initial_sample)
+        map_sample_dict = estimator.get_MAP_sample(initial_sample)
         mean = np.array(list(map_sample_dict.values()))
         if user_cov is not None:
-            logger.info("Using user-provided sampling covariance (skipping iFIM)")
-            iFIM = user_cov
+            logger.info("Using user-provided sampling covariance (skipping Laplace estimate)")
+            covariance = user_cov
         else:
-            iFIM = fisher_mpe.calculate_iFIM(map_sample_dict)
-        cov = cov_scaling * iFIM
-        cov = self._validate_covariance(fisher_mpe, mean, cov)
+            covariance = estimator.calculate_posterior_covariance(map_sample_dict)
+        cov = cov_scaling * covariance
+        cov = self._validate_covariance(estimator, mean, cov)
 
         msg = "Gaussian proposal (MAP +/- 1-sigma):\n " + "\n ".join(
             f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}" for (key, val), var in zip(map_sample_dict.items(), np.diag(cov))
@@ -455,21 +455,21 @@ class Laplace(Sampler):
         # sampling we use a truncated Gaussian (per-marginal independent
         # truncated normals) so that every draw lands within the prior support.
         # This eliminates wasted likelihood evaluations on out-of-bounds
-        # samples and is especially important when the iFIM-derived sigma is
+        # samples and is especially important when the Laplace-derived sigma is
         # much larger than the prior width.
         proposal = TruncatedMVNProposal(
             mean,
             cov,
-            lower=fisher_mpe.prior_bounds_min,
-            upper=fisher_mpe.prior_bounds_max,
+            lower=estimator.prior_bounds_min,
+            upper=estimator.prior_bounds_max,
         )
 
         if self.kwargs["plot_diagnostic"]:
-            init_samples = self._draw_inprior_samples(proposal, 5000, fisher_mpe.parameter_names)
-            self.create_proposal_diagnostic(mean, cov, fisher_mpe.parameter_names, init_samples)
+            init_samples = self._draw_inprior_samples(proposal, 5000, estimator.parameter_names)
+            self.create_proposal_diagnostic(mean, cov, estimator.parameter_names, init_samples)
 
         # Laplace evidence (always available)
-        log_evidence_laplace = fisher_mpe.log_evidence_laplace(map_sample_dict, iFIM)
+        log_evidence_laplace = estimator.log_evidence_laplace(map_sample_dict, covariance)
         log_evidence = log_evidence_laplace
         log_evidence_err = np.nan
 
@@ -479,25 +479,25 @@ class Laplace(Sampler):
             resample = None
 
         if resample is None:
-            samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, fisher_mpe, target_nsamples)
+            samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, estimator, target_nsamples)
         elif resample == "smc":
             samples, logl, g_samples, efficiency, smc_log_z, smc_log_z_err = self._run_smc(
-                mean, cov, proposal, fisher_mpe, cov_scaling
+                mean, cov, proposal, estimator, cov_scaling
             )
             if smc_log_z is not None:
                 log_evidence = float(smc_log_z)
                 log_evidence_err = float(smc_log_z_err)
         elif resample == "rejection":
             samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_rejection_sampling(
-                proposal, fisher_mpe, map_sample_dict
+                proposal, estimator, map_sample_dict
             )
         elif resample == "inprior":
-            samples, logl, g_samples, efficiency = self._run_inprior(proposal, fisher_mpe)
+            samples, logl, g_samples, efficiency = self._run_inprior(proposal, estimator)
             log_evidence = np.nan
             log_evidence_err = np.nan
         elif resample == "importance":
             samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_importance_sampling(
-                proposal, fisher_mpe, map_sample_dict
+                proposal, estimator, map_sample_dict
             )
         else:
             raise ValueError(
@@ -545,12 +545,12 @@ class Laplace(Sampler):
         run_stats["sampling_time_s"] = self.sampling_time.total_seconds()
         self.result.meta_data["run_statistics"] = run_stats
 
-    def _sample_laplace(self, mean, cov, fisher_mpe, target_nsamples):
+    def _sample_laplace(self, mean, cov, estimator, target_nsamples):
         """Draw samples directly from the Gaussian approximation without resampling."""
         logger.info(f"Drawing {target_nsamples} samples from " f"Gaussian approximation (no resampling)")
         samples_array = random.rng.multivariate_normal(mean, cov, target_nsamples)
-        samples = pd.DataFrame(samples_array, columns=fisher_mpe.parameter_names)
-        samples = self._replace_with_prior_samples(samples, fisher_mpe.parameter_names)
+        samples = pd.DataFrame(samples_array, columns=estimator.parameter_names)
+        samples = self._replace_with_prior_samples(samples, estimator.parameter_names)
         logl = np.full(target_nsamples, np.nan)
         return samples, logl, samples, 100.0
 
@@ -618,7 +618,7 @@ class Laplace(Sampler):
             logger.error(msg)
         return True
 
-    def _run_inprior(self, proposal, fisher_mpe):
+    def _run_inprior(self, proposal, estimator):
         """Draw and filter samples to those within prior bounds.
 
         Draws from the proposal and keeps only samples within the prior support,
@@ -649,10 +649,10 @@ class Laplace(Sampler):
                 pbar.close()
                 break
             x_batch = proposal.sample(batch_nsamples)
-            g_batch = pd.DataFrame(x_batch, columns=fisher_mpe.parameter_names)
+            g_batch = pd.DataFrame(x_batch, columns=estimator.parameter_names)
 
             # Apply prior replacement BEFORE checking if in prior
-            g_batch = self._replace_with_prior_samples(g_batch, fisher_mpe.parameter_names)
+            g_batch = self._replace_with_prior_samples(g_batch, estimator.parameter_names)
             x_batch = g_batch.values
 
             logpi = np.real(np.array(self.priors.ln_prob(g_batch, axis=0)))
@@ -663,7 +663,7 @@ class Laplace(Sampler):
 
             if in_prior.any():
                 x_in = x_batch[in_prior]
-                logl_in = fisher_mpe.log_likelihood_from_array(x_in.T)
+                logl_in = estimator.log_likelihood_from_array(x_in.T)
 
                 samples_list.append(x_in)
                 logl_list.append(logl_in)
@@ -681,19 +681,19 @@ class Laplace(Sampler):
         pbar.close()
 
         if not samples_list:
-            empty = pd.DataFrame(columns=fisher_mpe.parameter_names)
+            empty = pd.DataFrame(columns=estimator.parameter_names)
             return empty, np.array([]), empty, 0.0
 
         x_out = np.vstack(samples_list)[:target_nsamples]
         logl_out = np.hstack(logl_list)[:target_nsamples]
-        samples = pd.DataFrame(x_out, columns=fisher_mpe.parameter_names)
+        samples = pd.DataFrame(x_out, columns=estimator.parameter_names)
 
         efficiency = 100.0 * n_accepted / total_drawn if total_drawn else 0.0
         logger.info(f"Filtering complete: kept {len(x_out)} of {total_drawn} samples ({efficiency:.1f}% efficiency)")
 
         return samples, logl_out, samples, efficiency
 
-    def _run_smc(self, mean, cov, proposal, fisher_mpe, cov_scaling):
+    def _run_smc(self, mean, cov, proposal, estimator, cov_scaling):
         """Build the Laplace proposal flow and run SMC sampling.
 
         Handles multi-mode discovery when ``n_modes > 1``, then delegates to
@@ -703,7 +703,7 @@ class Laplace(Sampler):
         """
         n_modes = self.kwargs["n_modes"]
         if n_modes > 1:
-            map_estimates = self._find_multiple_maps(fisher_mpe, n_modes, cov_scaling)
+            map_estimates = self._find_multiple_maps(estimator, n_modes, cov_scaling)
             proposal_flow = GaussianMixtureFlow(
                 [m for m, _ in map_estimates],
                 [c for _, c in map_estimates],
@@ -711,14 +711,14 @@ class Laplace(Sampler):
         else:
             proposal_flow = GaussianFlow(mean, cov)
 
-        samples, logl, smc_log_z, smc_log_z_err = self._smc_sample(proposal_flow, proposal, fisher_mpe)
+        samples, logl, smc_log_z, smc_log_z_err = self._smc_sample(proposal_flow, proposal, estimator)
 
         if self.kwargs["plot_diagnostic"]:
             self.create_smc_diagnostic(samples, proposal_flow)
 
         return samples, logl, samples, 100.0, smc_log_z, smc_log_z_err
 
-    def _compute_ln_ratios(self, x, g_df, proposal, fisher_mpe):
+    def _compute_ln_ratios(self, x, g_df, proposal, estimator):
         """Compute log[L(x)π(x)/g(x)] for a batch of proposal samples.
 
         Returns ``(ln_r, logl)`` arrays of length ``len(g_df)``.
@@ -728,7 +728,7 @@ class Laplace(Sampler):
         in_prior = ~np.isinf(logpi)
         logl = np.full(len(g_df), -np.inf)
         if in_prior.any():
-            logl[in_prior] = fisher_mpe.log_likelihood_from_array(x[in_prior].T)
+            logl[in_prior] = estimator.log_likelihood_from_array(x[in_prior].T)
         else:
             msg = "All proposal samples fell outside the prior"
             if self.kwargs["fail_on_error"]:
@@ -738,7 +738,7 @@ class Laplace(Sampler):
         ln_r = logl + logpi - log_g
         return ln_r, logl
 
-    def _run_rejection_sampling(self, proposal, fisher_mpe, map_sample_dict):
+    def _run_rejection_sampling(self, proposal, estimator, map_sample_dict):
         """Draw samples from the proposal using rejection sampling.
 
         The acceptance probability for a proposal θ is L(θ)π(θ) / (M·g(θ)),
@@ -756,9 +756,9 @@ class Laplace(Sampler):
         # --- Establish the rejection bound ln_M ---
         # Start from the analytic value at the MAP.
         ln_M = (
-            float(fisher_mpe.log_likelihood_from_array(mean))
+            float(estimator.log_likelihood_from_array(mean))
             + sum(
-                np.log(max(self.priors[k].prob(float(map_sample_dict[k])), 1e-300)) for k in fisher_mpe.parameter_names
+                np.log(max(self.priors[k].prob(float(map_sample_dict[k])), 1e-300)) for k in estimator.parameter_names
             )
             - float(proposal.logpdf(mean.reshape(1, -1))[0])
         )
@@ -768,9 +768,9 @@ class Laplace(Sampler):
         # calibration evaluations on out-of-bounds points and gives a tighter
         # bound estimate.  These samples are discarded (not accepted/rejected)
         # so the bound is fixed before the main loop begins.
-        x_cal = self._draw_inprior_samples(proposal, batch_nsamples, fisher_mpe.parameter_names)
-        g_cal = pd.DataFrame(x_cal, columns=fisher_mpe.parameter_names)
-        ln_r_cal, _ = self._compute_ln_ratios(x_cal, g_cal, proposal, fisher_mpe)
+        x_cal = self._draw_inprior_samples(proposal, batch_nsamples, estimator.parameter_names)
+        g_cal = pd.DataFrame(x_cal, columns=estimator.parameter_names)
+        ln_r_cal, _ = self._compute_ln_ratios(x_cal, g_cal, proposal, estimator)
         finite_cal = np.isfinite(ln_r_cal)
         if finite_cal.any():
             empirical_max = float(np.max(ln_r_cal[finite_cal]))
@@ -796,13 +796,13 @@ class Laplace(Sampler):
                 break
 
             x = proposal.sample(batch_nsamples)
-            g_df = pd.DataFrame(x, columns=fisher_mpe.parameter_names)
+            g_df = pd.DataFrame(x, columns=estimator.parameter_names)
 
             # Apply prior replacement BEFORE computing likelihoods
-            g_df = self._replace_with_prior_samples(g_df, fisher_mpe.parameter_names)
+            g_df = self._replace_with_prior_samples(g_df, estimator.parameter_names)
             x = g_df.values
 
-            ln_r, logl = self._compute_ln_ratios(x, g_df, proposal, fisher_mpe)
+            ln_r, logl = self._compute_ln_ratios(x, g_df, proposal, estimator)
             finite = np.isfinite(ln_r)
 
             # Count samples that exceed the bound (accepted with prob 1,
@@ -830,7 +830,7 @@ class Laplace(Sampler):
         pbar.close()
 
         if not all_samples:
-            empty = pd.DataFrame(columns=fisher_mpe.parameter_names)
+            empty = pd.DataFrame(columns=estimator.parameter_names)
             return empty, np.array([]), empty, 0.0, np.nan, np.nan
 
         if n_bound_violations > 0:
@@ -864,7 +864,7 @@ class Laplace(Sampler):
 
         return samples, logl, g_samples, efficiency, log_evidence, log_evidence_err
 
-    def _run_importance_sampling(self, proposal, fisher_mpe, map_sample_dict):
+    def _run_importance_sampling(self, proposal, estimator, map_sample_dict):
         """Draw samples from the proposal using importance resampling.
 
         Accumulates batches until ``target_nsamples`` are collected by
@@ -887,17 +887,17 @@ class Laplace(Sampler):
                 break
 
             x = proposal.sample(batch_nsamples)
-            g_df = pd.DataFrame(x, columns=fisher_mpe.parameter_names)
+            g_df = pd.DataFrame(x, columns=estimator.parameter_names)
 
             # Apply prior replacement BEFORE computing likelihoods
-            g_df = self._replace_with_prior_samples(g_df, fisher_mpe.parameter_names)
+            g_df = self._replace_with_prior_samples(g_df, estimator.parameter_names)
             x = g_df.values
 
             logpi = np.real(np.array(self.priors.ln_prob(g_df, axis=0)))
             in_prior = ~np.isinf(logpi)
             logl = np.full(batch_nsamples, -np.inf)
             if in_prior.any():
-                logl[in_prior] = fisher_mpe.log_likelihood_from_array(x[in_prior].T)
+                logl[in_prior] = estimator.log_likelihood_from_array(x[in_prior].T)
             else:
                 msg = "All proposal samples fell outside the prior"
                 if self.kwargs["fail_on_error"]:
@@ -943,7 +943,7 @@ class Laplace(Sampler):
         pbar.close()
 
         if not all_samples:
-            empty = pd.DataFrame(columns=fisher_mpe.parameter_names)
+            empty = pd.DataFrame(columns=estimator.parameter_names)
             return empty, np.array([]), empty, 0.0, np.nan, np.nan
 
         samples = pd.concat(all_samples, ignore_index=True)
@@ -986,7 +986,7 @@ class Laplace(Sampler):
         logger.info(f"IS log-evidence: {log_z:.2f} +/- {log_z_err:.2f}")
         return log_z, log_z_err
 
-    def _smc_sample(self, proposal_flow, proposal, fisher_mpe):
+    def _smc_sample(self, proposal_flow, proposal, estimator):
         """Run posterior sampling via aspire, starting from the Laplace proposal.
 
         Initial samples are drawn from *proposal* (a ``TruncatedMVNProposal``)
@@ -998,7 +998,7 @@ class Laplace(Sampler):
         from aspire.samples import Samples
         from aspire_bilby.utils import get_aspire_functions
 
-        parameter_names = fisher_mpe.parameter_names
+        parameter_names = estimator.parameter_names
 
         prior_bounds = {key: (self.priors[key].minimum, self.priors[key].maximum) for key in parameter_names}
 
@@ -1031,7 +1031,7 @@ class Laplace(Sampler):
 
         x_out = np.asarray(result.x)
         samples = pd.DataFrame(x_out, columns=parameter_names)
-        logl = fisher_mpe.log_likelihood_from_array(x_out.T)
+        logl = estimator.log_likelihood_from_array(x_out.T)
 
         smc_log_z = getattr(result, "log_evidence", None)
         smc_log_z_err = getattr(result, "log_evidence_error", np.nan)
@@ -1040,7 +1040,7 @@ class Laplace(Sampler):
 
         return samples, logl, smc_log_z, smc_log_z_err
 
-    def _validate_covariance(self, fisher_mpe, mean, cov):
+    def _validate_covariance(self, estimator, mean, cov):
         """Validate the covariance by checking likelihood along
         each principal axis.
 
@@ -1051,7 +1051,7 @@ class Laplace(Sampler):
         match.  Directions are never shrunk.
         """
         eigvals, eigvecs = np.linalg.eigh(cov)
-        logl_peak = float(fisher_mpe.log_likelihood_from_array(mean))
+        logl_peak = float(estimator.log_likelihood_from_array(mean))
 
         any_inflated = False
         for i in range(len(eigvals)):
@@ -1059,8 +1059,8 @@ class Laplace(Sampler):
             direction = eigvecs[:, i]
 
             # Evaluate at +/- 1 sigma
-            logl_plus = float(fisher_mpe.log_likelihood_from_array(mean + sigma_i * direction))
-            logl_minus = float(fisher_mpe.log_likelihood_from_array(mean - sigma_i * direction))
+            logl_plus = float(estimator.log_likelihood_from_array(mean + sigma_i * direction))
+            logl_minus = float(estimator.log_likelihood_from_array(mean - sigma_i * direction))
 
             # Collect finite drops only (skip out-of-bounds)
             drops = []
@@ -1130,7 +1130,7 @@ class Laplace(Sampler):
 
         return samples
 
-    def _find_multiple_maps(self, fisher_mpe, n_modes, cov_scaling):
+    def _find_multiple_maps(self, estimator, n_modes, cov_scaling):
         """Find up to *n_modes* distinct MAP estimates and their
         covariances.
 
@@ -1142,23 +1142,23 @@ class Laplace(Sampler):
         Returns a list of ``(mean_array, cov_array)`` pairs sorted by
         descending log-posterior.
         """
-        parameter_names = fisher_mpe.parameter_names
+        parameter_names = estimator.parameter_names
         logger.info(f"Searching for up to {n_modes} posterior " f"mode(s)")
 
         # --- 1. Find primary mode with DE ---
-        result = fisher_mpe._maximize_posterior_differential_evolution()
+        result = estimator._maximize_posterior_differential_evolution()
         best_mean = np.array(result.x)
         best_logp = -result.fun
         best_dict = dict(zip(parameter_names, best_mean))
         logger.info(f"Primary mode found: " f"log-posterior = {best_logp:.2f}")
 
         try:
-            iFIM = fisher_mpe.calculate_iFIM(best_dict)
-            cov = cov_scaling * iFIM
-            cov = self._validate_covariance(fisher_mpe, best_mean, cov)
+            covariance = estimator.calculate_posterior_covariance(best_dict)
+            cov = cov_scaling * covariance
+            cov = self._validate_covariance(estimator, best_mean, cov)
             std_scale = np.sqrt(np.diag(cov))
         except Exception as exc:
-            raise SamplerError(f"iFIM failed for primary mode: {exc}")
+            raise SamplerError(f"Covariance estimation failed for primary mode: {exc}")
 
         found_modes = [(best_mean, cov, best_logp)]
 
@@ -1172,7 +1172,7 @@ class Laplace(Sampler):
 
         # Latin hypercube in [0,1]^D, then map to prior
         prior_x = self._latin_hypercube_prior(parameter_names, n_starts)
-        prior_logp = np.array([float(fisher_mpe.log_posterior_from_array(x)) for x in prior_x])
+        prior_logp = np.array([float(estimator.log_posterior_from_array(x)) for x in prior_x])
 
         # Sort descending by posterior
         order = np.argsort(prior_logp)[::-1]
@@ -1197,7 +1197,7 @@ class Laplace(Sampler):
             # Polish with local optimizer
             n_polished += 1
             sample_dict = dict(zip(parameter_names, x))
-            polished = fisher_mpe._maximize_posterior_from_initial_sample(sample_dict)
+            polished = estimator._maximize_posterior_from_initial_sample(sample_dict)
             p_mean = np.array(polished.x)
             p_logp = -polished.fun
             logger.debug(f"Candidate {n_polished}: " f"log-posterior = {p_logp:.2f} " f"after local optimisation")
@@ -1210,9 +1210,9 @@ class Laplace(Sampler):
 
             try:
                 p_dict = dict(zip(parameter_names, p_mean))
-                p_iFIM = fisher_mpe.calculate_iFIM(p_dict)
-                p_cov = cov_scaling * p_iFIM
-                p_cov = self._validate_covariance(fisher_mpe, p_mean, p_cov)
+                p_covariance = estimator.calculate_posterior_covariance(p_dict)
+                p_cov = cov_scaling * p_covariance
+                p_cov = self._validate_covariance(estimator, p_mean, p_cov)
                 found_modes.append((p_mean, p_cov, p_logp))
                 logger.info(f"Secondary mode {len(found_modes) - 1} " f"found: log-posterior = {p_logp:.2f}")
             except Exception as exc:
