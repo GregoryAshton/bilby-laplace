@@ -21,7 +21,8 @@ from bilby.gw.prior import (
     UniformInComponentsMassRatio,
 )
 
-from bilby_laplace.comparison import compare as compare_results, overlay_injection_lines
+from bilby_laplace.comparison import compare as compare_results
+from bilby_laplace.comparison import overlay_injection_lines
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
