@@ -28,7 +28,8 @@ from bilby.gw.prior import (
     UniformInComponentsMassRatio,
 )
 
-from bilby_laplace.comparison import compare as compare_results, overlay_injection_lines
+from bilby_laplace.comparison import compare as compare_results
+from bilby_laplace.comparison import overlay_injection_lines
 
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
@@ -110,7 +111,7 @@ def setup(likelihood_type="rb"):
             mass_1=Constraint(name="mass_1", minimum=1.0, maximum=2.8),
             mass_2=Constraint(name="mass_2", minimum=1.0, maximum=2.8),
             luminosity_distance=bilby.gw.prior.UniformSourceFrame(
-                name='luminosity_distance',
+                name="luminosity_distance",
                 minimum=100,
                 maximum=10000,
                 unit="Mpc",
@@ -354,7 +355,7 @@ def compare(outdir, base_label):
             if samples is not None and np.ptp(samples) > 0:
                 plot_parameters.append(p)
 
-        if len(plot_parameters)==0:
+        if len(plot_parameters) == 0:
             logger.info(f"No sampled parameters found for {suffix} plot; skipping")
             continue
 
