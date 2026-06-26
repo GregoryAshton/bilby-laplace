@@ -231,6 +231,15 @@ class Laplace(Sampler):
         Any other keys are forwarded directly to
         ``aspire.Aspire.sample_posterior()``, so all aspire parameters are
         accessible this way.
+    smc_progress : bool
+        If True (default) and ``resample='smc'`` with an SMC-family sampler,
+        register a per-iteration callback that (a) logs a one-line progress
+        summary at INFO and (b) when ``plot_diagnostic=True`` overwrites the
+        SMC stats and evolution-and-marginals diagnostic figures so they
+        track the live state. Set to False to disable both. To throttle (e.g.
+        only every 5 iterations), pass ``smc_kwargs=dict(checkpoint_every=5)``;
+        to override the callback entirely, pass your own
+        ``smc_kwargs=dict(checkpoint_callback=...)``.
     prior_parameters : list or None
         List of parameter names for which initial proposal samples should be
         replaced with independent draws from the prior. Use this for parameters
@@ -260,6 +269,7 @@ class Laplace(Sampler):
         n_modes=1,
         mode_search_nsamples=500,
         smc_kwargs=None,
+        smc_progress=True,
         max_iterations=1e6,
         prior_parameters=None,
     )
@@ -1040,6 +1050,15 @@ class Laplace(Sampler):
         initial_samples = Samples(initial_theta, parameters=parameter_names)
         aspire_sampler.fit(initial_samples)
 
+        # Register a per-iteration callback for SMC-family samplers when
+        # `smc_progress` is enabled: logs a progress line, and (if
+        # plot_diagnostic) overwrites the stats and evolution-and-marginals
+        # figures.  The user can override either by passing their own
+        # checkpoint_callback / checkpoint_every in smc_kwargs.
+        if self.kwargs.get("smc_progress", True) and "smc" in sampler_type.lower():
+            smc_kw.setdefault("checkpoint_callback", self._make_smc_callback(aspire_sampler))
+            smc_kw.setdefault("checkpoint_every", 1)
+
         logger.info(f"Starting Aspire sampling (sampler: {sampler_type})")
         result, self._smc_history = aspire_sampler.sample_posterior(
             n_final, sampler=sampler_type, return_history=True, **smc_kw
@@ -1055,6 +1074,220 @@ class Laplace(Sampler):
             logger.info(f"Aspire log-evidence: {smc_log_z:.2f} " f"+/- {smc_log_z_err:.2f}")
 
         return samples, logl, smc_log_z, smc_log_z_err
+
+    def _make_smc_callback(self, aspire_sampler):
+        """Return a ``checkpoint_callback`` for the SMC sampler.
+
+        The callback runs once per iteration: it logs a one-line summary, and
+        when ``plot_diagnostic`` is enabled, overwrites the stats and
+        evolution-and-marginals figures so they reflect the latest state.
+        """
+        plot_diagnostic = bool(self.kwargs.get("plot_diagnostic", False))
+        # Aspire force-calls the callback once more at the end with the same
+        # iteration number; track the last-logged iteration so the per-iter log
+        # line is not duplicated.  Plotting stays idempotent.
+        last_logged_iter = [-1]
+
+        def callback(state):
+            inner = getattr(aspire_sampler, "sampler", None) or getattr(aspire_sampler, "_sampler", None)
+            history = getattr(inner, "history", None)
+            if history is None:
+                return
+            iteration = state.get("iteration", -1)
+            if iteration != last_logged_iter[0]:
+                try:
+                    self._log_smc_iteration(state, history)
+                except Exception as exc:  # logging is best-effort
+                    logger.debug(f"SMC per-iter logging failed: {exc}")
+                last_logged_iter[0] = iteration
+            if not plot_diagnostic:
+                return
+            try:
+                self._save_smc_stats_figure(history)
+                live_samples = state.get("samples")
+                if live_samples is not None and history.sample_history:
+                    self._save_smc_evolution_marginals_figure(history, live_samples)
+            except Exception as exc:  # plotting is best-effort
+                logger.warning(f"SMC per-iter plotting failed: {exc}")
+
+        return callback
+
+    def _log_smc_iteration(self, state, history):
+        """One-line per-iteration SMC progress summary."""
+        iteration = state.get("iteration", -1)
+        meta = state.get("meta") or {}
+        beta = meta.get("beta", float("nan"))
+        live_samples = state.get("samples")
+
+        parts = [f"SMC iter {iteration}", f"β={beta:.3g}"]
+        if history.ess:
+            parts.append(f"ESS={history.ess[-1]:.0f}")
+        if getattr(history, "ess_target", None):
+            parts.append(f"target={history.ess_target[-1]:.0f}")
+        log_z = getattr(live_samples, "log_evidence", None) if live_samples is not None else None
+        if log_z is not None and np.isfinite(log_z):
+            parts.append(f"log Z≈{float(log_z):.2f}")
+        if getattr(history, "mcmc_acceptance", None):
+            parts.append(f"accept={history.mcmc_acceptance[-1]:.2f}")
+        if getattr(history, "mcmc_autocorr", None):
+            parts.append(f"autocorr={history.mcmc_autocorr[-1]:.1f}")
+        logger.info(", ".join(parts))
+
+    def _save_smc_stats_figure(self, history):
+        """Overwrite the SMC stats figure with the current history."""
+        import matplotlib.pyplot as plt
+
+        fig_stats, _ = plt.subplots(6, 1, sharex=True, figsize=(8, 14))
+        fig_stats = history.plot(fig=fig_stats)
+        fig_stats.suptitle("SMC diagnostics")
+        fig_stats.tight_layout()
+        safe_save_figure(
+            fig=fig_stats,
+            filename=f"{self.outdir}/{self.label}_diagnostic_smc_stats.png",
+            dpi=150,
+        )
+        plt.close(fig_stats)
+
+    def _save_smc_evolution_marginals_figure(self, history, live_samples):
+        """Overwrite the SMC evolution figure with weighted-particle scatter
+        evolution (left) and weighted current 1-D marginals (right) per
+        parameter.  The left panel resamples each iteration's particles
+        according to their weights so the visible density matches the SMC
+        approximation to the posterior at that iteration."""
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as mticker
+
+        parameter_names = list(self.search_parameter_keys)
+        n_params = len(parameter_names)
+        fig, axs = plt.subplots(
+            n_params,
+            2,
+            figsize=(11, 2.2 * n_params),
+            gridspec_kw={"width_ratios": [3, 1.5]},
+            squeeze=False,
+        )
+
+        # Pre-compute per-iteration data:
+        #   - (subsampled, weight-resampled) particle cloud for the sina scatter
+        #   - full particle array + normalised weights for the median/interval
+        max_per_iter = 500
+        rng = random.rng
+        per_iter = []  # list of (it, x_for_scatter, x_full, weights_full_or_None)
+        for it, smc_samples in enumerate(history.sample_history):
+            x_full = np.asarray(smc_samples.x)
+            n_pts = len(x_full)
+            if n_pts == 0:
+                continue
+            try:
+                log_w = np.asarray(smc_samples.log_weights())
+                w = np.exp(log_w - logsumexp(log_w))
+            except Exception:
+                w = None
+            if n_pts > max_per_iter:
+                if w is not None:
+                    idx = rng.choice(n_pts, size=max_per_iter, replace=True, p=w)
+                else:
+                    idx = rng.choice(n_pts, size=max_per_iter, replace=False)
+                x_scatter = x_full[idx]
+            else:
+                x_scatter = x_full
+            per_iter.append((it, x_scatter, x_full, w))
+
+        def _weighted_quantile(values, weights, q):
+            """Linear-interpolated weighted quantile."""
+            if weights is None:
+                return np.quantile(values, q)
+            order = np.argsort(values)
+            v = values[order]
+            cum_w = np.cumsum(weights[order])
+            total = cum_w[-1]
+            if total <= 0:
+                return np.quantile(values, q)
+            return np.interp(q, cum_w / total, v)
+
+        # Live (current) marginals — weighted histogram on the right.
+        x_now = np.asarray(live_samples.x)
+        try:
+            log_w_now = np.asarray(live_samples.log_weights())
+            w_now = np.exp(log_w_now - logsumexp(log_w_now))
+        except Exception:
+            w_now = None
+
+        # Sina-style jitter: horizontal offset proportional to local 1-D
+        # density, so each iteration's column bulges where particles are dense.
+        # Half-width is kept below 0.5 so adjacent iterations don't overlap.
+        from scipy.stats import gaussian_kde
+
+        sina_half_width = 0.4
+
+        for i, name in enumerate(parameter_names):
+            ax_left = axs[i, 0]
+            for it, x_scatter, x_full, w in per_iter:
+                vals = x_scatter[:, i]
+                n = len(vals)
+                if n >= 2 and np.ptp(vals) > 0:
+                    try:
+                        kde = gaussian_kde(vals)
+                        density = kde(vals)
+                        peak = density.max()
+                        density_norm = density / peak if peak > 0 else np.zeros(n)
+                    except Exception:
+                        density_norm = np.zeros(n)
+                else:
+                    density_norm = np.zeros(n)
+                jitter = rng.uniform(-1.0, 1.0, size=n) * sina_half_width * density_norm
+                ax_left.scatter(
+                    it + jitter,
+                    vals,
+                    s=4,
+                    alpha=min(0.8, 250.0 / max(n, 1)),
+                    color="C0",
+                    edgecolors="none",
+                    zorder=2,
+                )
+
+                # Weighted median and 90% interval from the full ensemble.
+                full_vals = x_full[:, i]
+                lo = _weighted_quantile(full_vals, w, 0.05)
+                med = _weighted_quantile(full_vals, w, 0.5)
+                hi = _weighted_quantile(full_vals, w, 0.95)
+                ax_left.errorbar(
+                    it,
+                    med,
+                    yerr=[[med - lo], [hi - med]],
+                    fmt="o",
+                    color="black",
+                    markersize=4,
+                    markerfacecolor="white",
+                    markeredgewidth=1.2,
+                    elinewidth=1.2,
+                    capsize=4,
+                    zorder=5,
+                )
+
+            ax_left.set_ylabel(name.replace("_", " "))
+            ax_left.set_xlabel("Iteration")
+            ax_left.xaxis.set_major_locator(mticker.MultipleLocator(1))
+
+            axs[i, 1].hist(
+                x_now[:, i],
+                bins=40,
+                weights=w_now,
+                density=True,
+                color="C0",
+                alpha=0.75,
+                edgecolor="none",
+            )
+            axs[i, 1].set_xlabel(name.replace("_", " "))
+            axs[i, 1].set_yticks([])
+        fig.suptitle("SMC parameter evolution and current marginals")
+        fig.tight_layout()
+        safe_save_figure(
+            fig=fig,
+            filename=f"{self.outdir}/{self.label}_diagnostic_smc_evolution.png",
+            dpi=150,
+        )
+        plt.close(fig)
 
     def _validate_covariance(self, estimator, mean, cov):
         """Validate the covariance by checking likelihood along
@@ -1626,39 +1859,8 @@ class Laplace(Sampler):
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
 
-        # History diagnostics (beta schedule, ESS, acceptance, etc.)
-        history = getattr(self, "_smc_history", None)
-        if history is not None and history.beta:
-            fig_stats, _ = plt.subplots(6, 1, sharex=True, figsize=(8, 14))
-            fig_stats = history.plot(fig=fig_stats)
-            fig_stats.suptitle("SMC diagnostics")
-            fig_stats.tight_layout()
-            safe_save_figure(
-                fig=fig_stats,
-                filename=f"{self.outdir}/{self.label}_diagnostic_smc_stats.png",
-                dpi=150,
-            )
-            plt.close(fig_stats)
-
-            if history.sample_history:
-                n_params = len(self.search_parameter_keys)
-                fig_bands, axs = plt.subplots(
-                    n_params,
-                    1,
-                    sharex=True,
-                    figsize=(8, 2.5 * n_params),
-                )
-                history.plot_quantile_bands(
-                    parameters=self.search_parameter_keys,
-                    ax=axs,
-                )
-                fig_bands.suptitle("SMC parameter evolution")
-                fig_bands.tight_layout()
-                safe_save_figure(
-                    fig=fig_bands,
-                    filename=f"{self.outdir}/{self.label}_diagnostic_smc_evolution.png",
-                    dpi=150,
-                )
-                plt.close(fig_bands)
+        # The stats and evolution-and-marginals figures are produced
+        # incrementally by the per-iteration callback (see _make_smc_callback),
+        # so the files already reflect the final state.
 
         return fig
