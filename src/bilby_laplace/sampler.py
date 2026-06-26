@@ -251,22 +251,26 @@ class Laplace(Sampler):
         poorly constrains the proposal covariance. Default is None (no
         replacement).
     resume : bool
-        If True (default) and a resume file exists at
-        ``{outdir}/{label}_resume.pickle``, load it and continue from where
-        the previous run left off. Set to False to ignore any existing
-        resume file and start fresh.
+        If True (default) and a resume file exists, load it and continue
+        from where the previous run left off. The path depends on the
+        resampling mode: ``{outdir}/{label}_resume.pickle`` for the batched
+        modes (rejection / importance / inprior), and
+        ``{outdir}/{label}_smc_resume.h5`` for SMC (written and read by
+        aspire). Set to False to ignore any existing resume file and start
+        fresh. Resuming a batched mode skips the MAP search and covariance
+        estimation; resuming SMC currently still re-runs MAP+covariance and
+        restarts aspire from its checkpointed SMC iteration.
     checkpoint_signal : int or None
         Optional additional signal number (e.g. ``signal.SIGUSR1``) that, when
         received, triggers a clean checkpoint and exit with ``exit_code``.
         ``SIGTERM`` / ``SIGINT`` / ``SIGALRM`` are always wired by the base
         class.
     check_point_delta_t : float
-        Periodic in-loop checkpoint interval in seconds (default 600). Each
-        batched-resampling method writes the resume file no more often than
-        this. Set to 0 to disable periodic saves (signal-driven only).
-        Only applies to ``resample='rejection'`` / ``'importance'`` /
-        ``'inprior'`` in this release; SMC resume is handled separately by
-        aspire.
+        Periodic in-loop checkpoint interval in seconds (default 600) for
+        the batched resampling modes (rejection / importance / inprior).
+        Set to 0 to disable periodic saves (signal-driven only). SMC uses
+        aspire's per-iteration HDF5 checkpoint instead and is not affected
+        by this kwarg.
     """
 
     sampler_name = "laplace"
@@ -483,14 +487,23 @@ class Laplace(Sampler):
         )
         return True
 
+    def _smc_resume_file_path(self):
+        """Canonical SMC HDF5 resume file path (aspire requires .h5/.hdf5)."""
+        return f"{self.outdir}/{self.label}_smc_resume.h5"
+
     def _cleanup_resume_file(self):
-        """Remove the resume file after a clean run finishes."""
-        try:
-            if os.path.isfile(self.resume_file):
-                os.remove(self.resume_file)
-                logger.info(f"Removed resume file {self.resume_file}")
-        except OSError as exc:
-            logger.warning(f"Could not remove resume file {self.resume_file}: {exc}")
+        """Remove any resume files after a clean run finishes.
+
+        Removes both the batched-loop pickle file (rejection / importance /
+        inprior) and the SMC HDF5 file written by aspire, if present.
+        """
+        for path in (self.resume_file, self._smc_resume_file_path()):
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+                    logger.info(f"Removed resume file {path}")
+            except OSError as exc:
+                logger.warning(f"Could not remove resume file {path}: {exc}")
 
     def _resolve_sampling_cov(self, sampling_cov, parameter_names):
         """Normalize a user-provided sampling covariance to an ndarray.
@@ -1374,13 +1387,34 @@ class Laplace(Sampler):
         initial_samples = Samples(initial_theta, parameters=parameter_names)
         aspire_sampler.fit(initial_samples)
 
-        # Register a per-iteration callback for SMC-family samplers when
-        # `smc_progress` is enabled: logs a progress line, and (if
-        # plot_diagnostic) overwrites the stats and evolution-and-marginals
-        # figures.  The user can override either by passing their own
-        # checkpoint_callback / checkpoint_every in smc_kwargs.
-        if self.kwargs.get("smc_progress", True) and "smc" in sampler_type.lower():
-            smc_kw.setdefault("checkpoint_callback", self._make_smc_callback(aspire_sampler))
+        # SMC checkpoint/resume integration (only for SMC-family samplers,
+        # which support aspire's checkpoint_file_path / resume_from kwargs).
+        is_smc = "smc" in sampler_type.lower()
+        smc_file_checkpoint = None
+        if is_smc and bool(self.kwargs.get("resume", True)):
+            smc_file_checkpoint = self._smc_resume_file_path()
+            from bilby.core.utils import check_directory_exists_and_if_not_mkdir
+
+            check_directory_exists_and_if_not_mkdir(self.outdir)
+            if os.path.isfile(smc_file_checkpoint):
+                smc_kw.setdefault("resume_from", smc_file_checkpoint)
+                logger.info(f"Resuming SMC from {smc_file_checkpoint}")
+            else:
+                # Make sure aspire's default file callback fires when no
+                # custom callback is provided.
+                smc_kw.setdefault("checkpoint_file_path", smc_file_checkpoint)
+                smc_kw.setdefault("checkpoint_every", 1)
+
+        # Register a per-iteration progress callback for SMC-family samplers
+        # when `smc_progress` is enabled.  When a checkpoint file path is set
+        # (resume=True), the callback also writes aspire's HDF5 checkpoint so
+        # both behaviours coexist.  The user can override either by passing
+        # their own checkpoint_callback / checkpoint_every in smc_kwargs.
+        if self.kwargs.get("smc_progress", True) and is_smc:
+            smc_kw.setdefault(
+                "checkpoint_callback",
+                self._make_smc_callback(aspire_sampler, file_checkpoint_path=smc_file_checkpoint),
+            )
             smc_kw.setdefault("checkpoint_every", 1)
 
         logger.info(f"Starting Aspire sampling (sampler: {sampler_type})")
@@ -1399,24 +1433,51 @@ class Laplace(Sampler):
 
         return samples, logl, smc_log_z, smc_log_z_err
 
-    def _make_smc_callback(self, aspire_sampler):
+    def _make_smc_callback(self, aspire_sampler, file_checkpoint_path=None):
         """Return a ``checkpoint_callback`` for the SMC sampler.
 
         The callback runs once per iteration: it logs a one-line summary, and
         when ``plot_diagnostic`` is enabled, overwrites the stats and
         evolution-and-marginals figures so they reflect the latest state.
+
+        If ``file_checkpoint_path`` is set, the callback also writes the
+        aspire HDF5 checkpoint file for that iteration so the SMC run can be
+        resumed from disk via ``resume_from``.  The aspire SMC sampler
+        normally installs its default file callback only when
+        ``checkpoint_callback`` is ``None``; we have to compose the two by
+        hand to keep both behaviours.
         """
         plot_diagnostic = bool(self.kwargs.get("plot_diagnostic", False))
         # Aspire force-calls the callback once more at the end with the same
         # iteration number; track the last-logged iteration so the per-iter log
         # line is not duplicated.  Plotting stays idempotent.
         last_logged_iter = [-1]
+        # Aspire's default file callback lives on the inner SMC sampler
+        # instance, which only exists once ``sample_posterior`` has built it.
+        # Resolve it lazily and cache.
+        file_cb_cache = [None]
 
         def callback(state):
             inner = getattr(aspire_sampler, "sampler", None) or getattr(aspire_sampler, "_sampler", None)
             history = getattr(inner, "history", None)
             if history is None:
                 return
+
+            # Write aspire's file checkpoint first so resume state is durable
+            # even if logging/plotting raise below.
+            if file_checkpoint_path is not None and inner is not None:
+                if file_cb_cache[0] is None:
+                    try:
+                        file_cb_cache[0] = inner.default_file_checkpoint_callback(str(file_checkpoint_path))
+                    except Exception as exc:  # never crash the run for a failed checkpoint
+                        logger.warning(f"Could not initialise SMC file checkpoint: {exc}")
+                        file_cb_cache[0] = False  # sentinel: don't try again
+                if file_cb_cache[0] not in (None, False):
+                    try:
+                        file_cb_cache[0](state)
+                    except Exception as exc:
+                        logger.warning(f"SMC file checkpoint write failed: {exc}")
+
             iteration = state.get("iteration", -1)
             if iteration != last_logged_iter[0]:
                 try:
