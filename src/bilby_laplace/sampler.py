@@ -1,5 +1,9 @@
 import datetime
+import hashlib
+import os
+import signal
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -246,6 +250,23 @@ class Laplace(Sampler):
         with wide posteriors consistent with their prior, where the Hessian
         poorly constrains the proposal covariance. Default is None (no
         replacement).
+    resume : bool
+        If True (default) and a resume file exists at
+        ``{outdir}/{label}_resume.pickle``, load it and continue from where
+        the previous run left off. Set to False to ignore any existing
+        resume file and start fresh.
+    checkpoint_signal : int or None
+        Optional additional signal number (e.g. ``signal.SIGUSR1``) that, when
+        received, triggers a clean checkpoint and exit with ``exit_code``.
+        ``SIGTERM`` / ``SIGINT`` / ``SIGALRM`` are always wired by the base
+        class.
+    check_point_delta_t : float
+        Periodic in-loop checkpoint interval in seconds (default 600). Each
+        batched-resampling method writes the resume file no more often than
+        this. Set to 0 to disable periodic saves (signal-driven only).
+        Only applies to ``resample='rejection'`` / ``'importance'`` /
+        ``'inprior'`` in this release; SMC resume is handled separately by
+        aspire.
     """
 
     sampler_name = "laplace"
@@ -272,6 +293,9 @@ class Laplace(Sampler):
         smc_progress=True,
         max_iterations=1e6,
         prior_parameters=None,
+        resume=True,
+        checkpoint_signal=None,
+        check_point_delta_t=600,
     )
 
     def __init__(
@@ -297,6 +321,176 @@ class Laplace(Sampler):
             exit_code=exit_code,
             **kwargs,
         )
+
+    # ------------------------------------------------------------------
+    # Resume / checkpoint scaffolding
+    # ------------------------------------------------------------------
+    # The kwargs below are operational and not part of the
+    # checkpoint-identity hash (changing them between runs is allowed).
+    _CHECKPOINT_IGNORE_KWARGS = frozenset(
+        {
+            "resume",
+            "checkpoint_signal",
+            "check_point_delta_t",
+            "plot_diagnostic",
+            "fail_on_error",
+            "smc_progress",
+            "max_iterations",
+        }
+    )
+
+    def _checkpoint_versions(self):
+        """Versions of the packages whose drift we report on resume."""
+        import bilby
+
+        from . import __version__ as bilby_laplace_version
+
+        return dict(
+            bilby_laplace=bilby_laplace_version,
+            bilby=bilby.__version__,
+            numpy=np.__version__,
+        )
+
+    def _checkpoint_kwargs_hash(self):
+        """A sha256 hash identifying the kwargs/priors that affect the run.
+
+        Mismatch on resume signals that the configuration has changed and the
+        accumulated state is not valid to continue from.
+        """
+        import dill
+
+        identity = {
+            "kwargs": {k: v for k, v in self.kwargs.items() if k not in self._CHECKPOINT_IGNORE_KWARGS},
+            "priors": repr(self.priors),
+            "search_keys": list(self.search_parameter_keys),
+            "injection_parameters": self.injection_parameters,
+        }
+        return hashlib.sha256(dill.dumps(identity)).hexdigest()
+
+    def _init_checkpoint_state(self, mode, mean, cov):
+        """Initialise the in-memory checkpoint payload after MAP+covariance."""
+        self._checkpoint_state = dict(mode=mode, mean=mean, cov=cov)
+
+    def _update_checkpoint_state(self, **fields):
+        """Merge fields into the in-memory checkpoint payload."""
+        if self._checkpoint_state is None:
+            return
+        self._checkpoint_state.update(fields)
+
+    def _maybe_periodic_checkpoint(self):
+        """Save the resume file if `check_point_delta_t` seconds have elapsed."""
+        delta_t = float(self.kwargs.get("check_point_delta_t") or 0)
+        if delta_t <= 0:
+            return
+        now = time.time()
+        if now - self._last_save_t > delta_t:
+            self.write_current_state()
+            self._last_save_t = now
+
+    def write_current_state(self):
+        """Snapshot the current sampler state to the resume file.
+
+        Called by the base class's signal handler (``SIGTERM`` / ``SIGINT`` /
+        ``SIGALRM`` and any user-wired ``checkpoint_signal``) and periodically
+        from inside the batched resampling loops.  Idempotent: if no
+        checkpoint state has been initialised yet (e.g. the run was killed
+        before MAP+covariance finished), no file is written.
+        """
+        if self._checkpoint_state is None:
+            return
+        import dill
+        from bilby.core.utils import (
+            check_directory_exists_and_if_not_mkdir,
+            safe_file_dump,
+        )
+
+        check_directory_exists_and_if_not_mkdir(self.outdir)
+
+        # Update the cumulative sampling time so the resumed run reports
+        # honest total wall-time.
+        now = datetime.datetime.now()
+        sampling_time_s = (now - self.start_time).total_seconds()
+
+        payload = dict(self._checkpoint_state)
+        payload["kwargs_hash"] = self._checkpoint_kwargs_hash()
+        payload["search_keys"] = list(self.search_parameter_keys)
+        payload["versions"] = self._checkpoint_versions()
+        payload["rng_state"] = random.rng.bit_generator.state
+        payload["sampling_time_s"] = sampling_time_s
+        try:
+            safe_file_dump(payload, self.resume_file, dill)
+            logger.info(f"Wrote checkpoint to {self.resume_file}")
+        except Exception as exc:  # never crash the run for a failed checkpoint
+            logger.warning(f"Could not write resume file {self.resume_file}: {exc}")
+
+    def _read_saved_state(self):
+        """Load and validate the resume file, returning True on success.
+
+        Raises ``SamplerError`` on a kwargs/priors/parameter-name mismatch
+        (the run cannot meaningfully continue from a different configuration).
+        Version drift in bilby/bilby_laplace/numpy is logged as a warning but
+        is not fatal.
+        """
+        if not os.path.isfile(self.resume_file):
+            logger.info(f"No resume file at {self.resume_file}; starting fresh.")
+            return False
+        if os.stat(self.resume_file).st_size == 0:
+            logger.info(f"Resume file {self.resume_file} is empty; starting fresh.")
+            return False
+
+        import dill
+
+        try:
+            with open(self.resume_file, "rb") as f:
+                payload = dill.load(f)
+        except Exception as exc:
+            raise SamplerError(
+                f"Failed to load resume file {self.resume_file}: {exc}. "
+                f"Delete the file or pass resume=False to start fresh."
+            )
+
+        expected_hash = self._checkpoint_kwargs_hash()
+        if payload.get("kwargs_hash") != expected_hash:
+            raise SamplerError(
+                f"Resume file {self.resume_file} was written with a different "
+                "configuration (kwargs / priors / injection_parameters). "
+                "Delete the file or pass resume=False to start fresh."
+            )
+        if payload.get("search_keys") != list(self.search_parameter_keys):
+            raise SamplerError(
+                f"Resume file {self.resume_file} has different parameter names. "
+                "Delete the file or pass resume=False to start fresh."
+            )
+
+        stored_versions = payload.get("versions") or {}
+        for pkg, ver in self._checkpoint_versions().items():
+            old = stored_versions.get(pkg)
+            if old is not None and old != ver:
+                logger.warning(
+                    f"Resume file was written with {pkg}={old}; " f"this run uses {pkg}={ver}. Continuing anyway."
+                )
+
+        random.rng.bit_generator.state = payload["rng_state"]
+        prior_s = float(payload.get("sampling_time_s") or 0.0)
+        # Shift start_time backwards so end - start = prior + current.
+        self.start_time = datetime.datetime.now() - datetime.timedelta(seconds=prior_s)
+        _meta_keys = ("kwargs_hash", "search_keys", "versions", "rng_state", "sampling_time_s")
+        self._checkpoint_state = {k: payload[k] for k in payload if k not in _meta_keys}
+        logger.info(
+            f"Resumed from {self.resume_file} "
+            f"(mode={self._checkpoint_state.get('mode')!r}, "
+            f"prior sampling {prior_s:.1f}s)."
+        )
+        return True
+
+    def _cleanup_resume_file(self):
+        """Remove the resume file after a clean run finishes."""
+        try:
+            if os.path.isfile(self.resume_file):
+                os.remove(self.resume_file)
+                logger.info(f"Removed resume file {self.resume_file}")
+        except OSError as exc:
+            logger.warning(f"Could not remove resume file {self.resume_file}: {exc}")
 
     def _resolve_sampling_cov(self, sampling_cov, parameter_names):
         """Normalize a user-provided sampling covariance to an ndarray.
@@ -426,6 +620,13 @@ class Laplace(Sampler):
         self.start_time = datetime.datetime.now()
         cov_scaling = self.kwargs["cov_scaling"]
 
+        # Checkpoint scaffolding.  resume_file is the on-disk location; the
+        # in-memory _checkpoint_state holds whatever the signal handler / the
+        # periodic save would dump.  _last_save_t throttles periodic saves.
+        self.resume_file = f"{self.outdir}/{self.label}_resume.pickle"
+        self._checkpoint_state = None
+        self._last_save_t = time.time()
+
         estimator = LaplacePosteriorEstimator(
             likelihood=self.likelihood,
             priors=self.priors,
@@ -447,30 +648,50 @@ class Laplace(Sampler):
                 "multi-mode search builds an independent covariance per mode."
             )
 
-        # Choose starting point for MAP search
-        if self.injection_parameters and self.kwargs["use_injection_for_map"]:
-            fallback = self.priors.sample_subset(estimator.parameter_names)
-            missing = [k for k in estimator.parameter_names if k not in self.injection_parameters]
-            if missing:
-                logger.warning(
-                    f"use_injection_for_map=True but the following parameters are not in "
-                    f"injection_parameters (using prior samples as fallback): {missing}"
-                )
-            initial_sample = {
-                key: self.injection_parameters.get(key, fallback[key]) for key in estimator.parameter_names
-            }
-        else:
-            initial_sample = None
+        # Wire any user-requested extra signal (SIGTERM/SIGINT/SIGALRM are
+        # already handled by signal_wrapper).
+        extra_sig = self.kwargs.get("checkpoint_signal")
+        if extra_sig is not None:
+            try:
+                signal.signal(int(extra_sig), self.write_current_state_and_exit)
+                logger.info(f"Wired signal {int(extra_sig)} for checkpoint + exit")
+            except (AttributeError, OSError, TypeError, ValueError) as exc:
+                logger.warning(f"Could not wire checkpoint_signal={extra_sig}: {exc}")
 
-        map_sample_dict = estimator.get_MAP_sample(initial_sample)
-        mean = np.array(list(map_sample_dict.values()))
-        if user_cov is not None:
-            logger.info("Using user-provided sampling covariance (skipping Laplace estimate)")
-            covariance = user_cov
+        # Attempt to resume.  If a valid file exists we skip MAP & covariance
+        # and restore (mean, cov, accumulators); a mismatched file is fatal.
+        resumed = bool(self.kwargs.get("resume", True)) and self._read_saved_state()
+
+        if resumed:
+            mean = np.asarray(self._checkpoint_state["mean"])
+            cov = np.asarray(self._checkpoint_state["cov"])
+            map_sample_dict = dict(zip(estimator.parameter_names, mean))
+            logger.info("Skipping MAP and covariance estimation (resumed from checkpoint).")
         else:
-            covariance = estimator.calculate_posterior_covariance(map_sample_dict)
-        cov = cov_scaling * covariance
-        cov = self._validate_covariance(estimator, mean, cov)
+            # Choose starting point for MAP search
+            if self.injection_parameters and self.kwargs["use_injection_for_map"]:
+                fallback = self.priors.sample_subset(estimator.parameter_names)
+                missing = [k for k in estimator.parameter_names if k not in self.injection_parameters]
+                if missing:
+                    logger.warning(
+                        f"use_injection_for_map=True but the following parameters are not in "
+                        f"injection_parameters (using prior samples as fallback): {missing}"
+                    )
+                initial_sample = {
+                    key: self.injection_parameters.get(key, fallback[key]) for key in estimator.parameter_names
+                }
+            else:
+                initial_sample = None
+
+            map_sample_dict = estimator.get_MAP_sample(initial_sample)
+            mean = np.array(list(map_sample_dict.values()))
+            if user_cov is not None:
+                logger.info("Using user-provided sampling covariance (skipping Laplace estimate)")
+                covariance = user_cov
+            else:
+                covariance = estimator.calculate_posterior_covariance(map_sample_dict)
+            cov = cov_scaling * covariance
+            cov = self._validate_covariance(estimator, mean, cov)
 
         msg = "Gaussian proposal (MAP +/- 1-sigma):\n " + "\n ".join(
             f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}" for (key, val), var in zip(map_sample_dict.items(), np.diag(cov))
@@ -490,19 +711,30 @@ class Laplace(Sampler):
             upper=estimator.prior_bounds_max,
         )
 
-        if self.kwargs["plot_diagnostic"]:
+        if self.kwargs["plot_diagnostic"] and not resumed:
             init_samples = self._draw_inprior_samples(proposal, 5000, estimator.parameter_names)
             self.create_proposal_diagnostic(mean, cov, estimator.parameter_names, init_samples)
-
-        # Laplace evidence (always available)
-        log_evidence_laplace = estimator.log_evidence_laplace(map_sample_dict, covariance)
-        log_evidence = log_evidence_laplace
-        log_evidence_err = np.nan
 
         target_nsamples = self.kwargs["target_nsamples"]
         resample = self.kwargs["resample"]
         if resample == "None":
             resample = None
+
+        # Laplace evidence (always available).  Compute fresh, or restore from
+        # the checkpoint if we're resuming (we no longer have `covariance`).
+        if resumed:
+            log_evidence_laplace = self._checkpoint_state["log_evidence_laplace"]
+        else:
+            log_evidence_laplace = estimator.log_evidence_laplace(map_sample_dict, covariance)
+            # Initialise the checkpoint payload for resumable modes.  Other
+            # modes (`None`, `'smc'`) are not yet checkpointable; leave
+            # _checkpoint_state as None so no file is written.
+            if resample in ("rejection", "importance", "inprior"):
+                self._init_checkpoint_state(mode=resample, mean=mean, cov=cov)
+                self._checkpoint_state["log_evidence_laplace"] = log_evidence_laplace
+
+        log_evidence = log_evidence_laplace
+        log_evidence_err = np.nan
 
         if resample is None:
             samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, estimator, target_nsamples)
@@ -553,6 +785,10 @@ class Laplace(Sampler):
             efficiency=efficiency,
             nlikelihood=len(g_samples),
         )
+
+        # The run finished cleanly; the resume file is no longer needed.
+        self._cleanup_resume_file()
+        self._checkpoint_state = None
 
         return self.result
 
@@ -658,16 +894,34 @@ class Laplace(Sampler):
 
         logger.info(f"Drawing samples from proposal and filtering to prior support " f"(target: {target_nsamples})")
 
-        samples_list = []
-        logl_list = []
-        total_drawn = 0
-        n_accepted = 0
+        state = self._checkpoint_state
+        resumed_loop = state is not None and "samples_list" in state
+        if resumed_loop:
+            samples_list = list(state["samples_list"])
+            logl_list = list(state["logl_list"])
+            total_drawn = int(state["total_drawn"])
+            n_accepted = int(state["n_accepted"])
+            logger.info(
+                f"Resumed in-prior sampling at {n_accepted}/{target_nsamples} " f"accepted ({total_drawn} drawn)"
+            )
+        else:
+            samples_list = []
+            logl_list = []
+            total_drawn = 0
+            n_accepted = 0
+            self._update_checkpoint_state(
+                samples_list=samples_list,
+                logl_list=logl_list,
+                total_drawn=total_drawn,
+                n_accepted=n_accepted,
+            )
 
         pbar = tqdm.tqdm(
             total=target_nsamples,
             desc="Filtering to prior",
             unit="sample",
             dynamic_ncols=True,
+            initial=min(n_accepted, target_nsamples),
         )
 
         while n_accepted < target_nsamples:
@@ -703,6 +957,9 @@ class Laplace(Sampler):
                         "eff": f"{100.0 * n_accepted / total_drawn:.1f}%",
                     }
                 )
+
+            self._update_checkpoint_state(n_accepted=n_accepted, total_drawn=total_drawn)
+            self._maybe_periodic_checkpoint()
 
         pbar.close()
 
@@ -779,40 +1036,73 @@ class Laplace(Sampler):
         batch_nsamples = self.kwargs["batch_nsamples"]
         mean = proposal.mean
 
-        # --- Establish the rejection bound ln_M ---
-        # Start from the analytic value at the MAP.
-        ln_M = (
-            float(estimator.log_likelihood_from_array(mean))
-            + sum(
-                np.log(max(self.priors[k].prob(float(map_sample_dict[k])), 1e-300)) for k in estimator.parameter_names
+        state = self._checkpoint_state
+        resumed_loop = state is not None and "all_samples" in state
+
+        if resumed_loop:
+            # Restore accumulators (including the pre-scan ln_M, which must not
+            # be recomputed: every prior accept used this bound, and changing
+            # it mid-run would invalidate the rejection sample).
+            ln_M = float(state["ln_M"])
+            all_samples = list(state["all_samples"])
+            all_logl = list(state["all_logl"])
+            all_g_samples = list(state["all_g_samples"])
+            all_ln_r = list(state["all_ln_r"])
+            n_accepted = int(state["n_accepted"])
+            n_proposed = int(state["n_proposed"])
+            n_bound_violations = int(state.get("n_bound_violations", 0))
+            logger.info(
+                f"Resumed rejection sampling at {n_accepted}/{target_nsamples} "
+                f"accepted ({n_proposed} proposed, ln_M = {ln_M:.2f})"
             )
-            - float(proposal.logpdf(mean.reshape(1, -1))[0])
-        )
+        else:
+            # --- Establish the rejection bound ln_M ---
+            # Start from the analytic value at the MAP.
+            ln_M = (
+                float(estimator.log_likelihood_from_array(mean))
+                + sum(
+                    np.log(max(self.priors[k].prob(float(map_sample_dict[k])), 1e-300))
+                    for k in estimator.parameter_names
+                )
+                - float(proposal.logpdf(mean.reshape(1, -1))[0])
+            )
 
-        # Pre-scan: draw in-prior calibration samples to find the empirical
-        # maximum of L(x)π(x)/g(x).  Using in-prior samples avoids wasting
-        # calibration evaluations on out-of-bounds points and gives a tighter
-        # bound estimate.  These samples are discarded (not accepted/rejected)
-        # so the bound is fixed before the main loop begins.
-        x_cal = self._draw_inprior_samples(proposal, batch_nsamples, estimator.parameter_names)
-        g_cal = pd.DataFrame(x_cal, columns=estimator.parameter_names)
-        ln_r_cal, _ = self._compute_ln_ratios(x_cal, g_cal, proposal, estimator)
-        finite_cal = np.isfinite(ln_r_cal)
-        if finite_cal.any():
-            empirical_max = float(np.max(ln_r_cal[finite_cal]))
-            if empirical_max > ln_M:
-                logger.info(f"Pre-scan raised rejection bound " f"{ln_M:.2f} → {empirical_max:.2f}")
-                ln_M = empirical_max
+            # Pre-scan: draw in-prior calibration samples to find the empirical
+            # maximum of L(x)π(x)/g(x).  Using in-prior samples avoids wasting
+            # calibration evaluations on out-of-bounds points and gives a tighter
+            # bound estimate.  These samples are discarded (not accepted/rejected)
+            # so the bound is fixed before the main loop begins.
+            x_cal = self._draw_inprior_samples(proposal, batch_nsamples, estimator.parameter_names)
+            g_cal = pd.DataFrame(x_cal, columns=estimator.parameter_names)
+            ln_r_cal, _ = self._compute_ln_ratios(x_cal, g_cal, proposal, estimator)
+            finite_cal = np.isfinite(ln_r_cal)
+            if finite_cal.any():
+                empirical_max = float(np.max(ln_r_cal[finite_cal]))
+                if empirical_max > ln_M:
+                    logger.info(f"Pre-scan raised rejection bound " f"{ln_M:.2f} → {empirical_max:.2f}")
+                    ln_M = empirical_max
 
-        logger.info(
-            f"Drawing {target_nsamples} samples using rejection sampling "
-            f"(batch size {batch_nsamples}, ln_M = {ln_M:.2f})"
-        )
+            logger.info(
+                f"Drawing {target_nsamples} samples using rejection sampling "
+                f"(batch size {batch_nsamples}, ln_M = {ln_M:.2f})"
+            )
 
-        # --- Main rejection loop ---
-        all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
-        n_accepted = n_proposed = 0
-        n_bound_violations = 0
+            # --- Main rejection loop ---
+            all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
+            n_accepted = n_proposed = 0
+            n_bound_violations = 0
+            # Stash the post-pre-scan state so an interruption before the
+            # first batch still preserves ln_M.
+            self._update_checkpoint_state(
+                ln_M=ln_M,
+                all_samples=all_samples,
+                all_logl=all_logl,
+                all_g_samples=all_g_samples,
+                all_ln_r=all_ln_r,
+                n_accepted=n_accepted,
+                n_proposed=n_proposed,
+                n_bound_violations=n_bound_violations,
+            )
 
         pbar = tqdm.tqdm(total=target_nsamples, desc="Rejection sampling", file=sys.stdout)
 
@@ -852,6 +1142,16 @@ class Laplace(Sampler):
             all_logl.append(logl[accepted])
             all_g_samples.append(g_df)
             all_ln_r.append(ln_r)
+
+            # Update the checkpoint payload after each batch, then optionally
+            # save it (throttled by check_point_delta_t).  A signal handler can
+            # fire between batches and dump this state at any time.
+            self._update_checkpoint_state(
+                n_accepted=n_accepted,
+                n_proposed=n_proposed,
+                n_bound_violations=n_bound_violations,
+            )
+            self._maybe_periodic_checkpoint()
 
         pbar.close()
 
@@ -901,8 +1201,29 @@ class Laplace(Sampler):
         target_nsamples = self.kwargs["target_nsamples"]
         batch_nsamples = self.kwargs["batch_nsamples"]
 
-        all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
-        n_accepted = n_proposed = 0
+        state = self._checkpoint_state
+        resumed_loop = state is not None and "all_samples" in state
+        if resumed_loop:
+            all_samples = list(state["all_samples"])
+            all_logl = list(state["all_logl"])
+            all_g_samples = list(state["all_g_samples"])
+            all_ln_r = list(state["all_ln_r"])
+            n_accepted = int(state["n_accepted"])
+            n_proposed = int(state["n_proposed"])
+            logger.info(
+                f"Resumed importance sampling at {n_accepted}/{target_nsamples} " f"drawn ({n_proposed} proposed)"
+            )
+        else:
+            all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
+            n_accepted = n_proposed = 0
+            self._update_checkpoint_state(
+                all_samples=all_samples,
+                all_logl=all_logl,
+                all_g_samples=all_g_samples,
+                all_ln_r=all_ln_r,
+                n_accepted=n_accepted,
+                n_proposed=n_proposed,
+            )
 
         logger.info(f"Drawing {target_nsamples} samples using importance resampling " f"(batch size {batch_nsamples})")
         pbar = tqdm.tqdm(total=target_nsamples, desc="Importance sampling", file=sys.stdout)
@@ -965,6 +1286,9 @@ class Laplace(Sampler):
             all_logl.append(logl[idx])
             all_g_samples.append(g_df)
             all_ln_r.append(ln_r)
+
+            self._update_checkpoint_state(n_accepted=n_accepted, n_proposed=n_proposed)
+            self._maybe_periodic_checkpoint()
 
         pbar.close()
 
