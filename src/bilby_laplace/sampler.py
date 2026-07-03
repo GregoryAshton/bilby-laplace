@@ -1543,12 +1543,14 @@ class Laplace(Sampler):
         import matplotlib.ticker as mticker
 
         parameter_names = list(self.search_parameter_keys)
-        n_params = len(parameter_names)
+        # Extra rows for log-likelihood and log-prior
+        n_rows = len(parameter_names) + 2
         fig, axs = plt.subplots(
-            n_params,
+            n_rows,
             2,
-            figsize=(11, 2.2 * n_params),
+            figsize=(11, 2.2 * n_rows),
             gridspec_kw={"width_ratios": [3, 1.5]},
+            sharex="col",
             squeeze=False,
         )
 
@@ -1605,15 +1607,26 @@ class Laplace(Sampler):
 
         sina_half_width = 0.4
 
-        for i, name in enumerate(parameter_names):
-            ax_left = axs[i, 0]
-            for it, x_scatter, x_full, w in per_iter:
-                vals = x_scatter[:, i]
-                n = len(vals)
-                if n >= 2 and np.ptp(vals) > 0:
+        # Helper to plot one row (evolution scatter on left, marginal on right).
+        def _plot_row(row_idx, vals_per_iter, vals_now, label, is_last, true_val=None):
+            ax_left = axs[row_idx, 0]
+
+            # True value line behind scatter.
+            if true_val is not None:
+                ax_left.axhline(
+                    true_val,
+                    color="lightgray",
+                    ls="--",
+                    lw=1.2,
+                    zorder=1,
+                )
+
+            for it, v_scatter, v_full, w in vals_per_iter:
+                n = len(v_scatter)
+                if n >= 2 and np.ptp(v_scatter) > 0:
                     try:
-                        kde = gaussian_kde(vals)
-                        density = kde(vals)
+                        kde = gaussian_kde(v_scatter)
+                        density = kde(v_scatter)
                         peak = density.max()
                         density_norm = density / peak if peak > 0 else np.zeros(n)
                     except Exception:
@@ -1623,7 +1636,7 @@ class Laplace(Sampler):
                 jitter = rng.uniform(-1.0, 1.0, size=n) * sina_half_width * density_norm
                 ax_left.scatter(
                     it + jitter,
-                    vals,
+                    v_scatter,
                     s=4,
                     alpha=min(0.8, 250.0 / max(n, 1)),
                     color="C0",
@@ -1632,10 +1645,9 @@ class Laplace(Sampler):
                 )
 
                 # Weighted median and 90% interval from the full ensemble.
-                full_vals = x_full[:, i]
-                lo = _weighted_quantile(full_vals, w, 0.05)
-                med = _weighted_quantile(full_vals, w, 0.5)
-                hi = _weighted_quantile(full_vals, w, 0.95)
+                lo = _weighted_quantile(v_full, w, 0.05)
+                med = _weighted_quantile(v_full, w, 0.5)
+                hi = _weighted_quantile(v_full, w, 0.95)
                 ax_left.errorbar(
                     it,
                     med,
@@ -1650,12 +1662,16 @@ class Laplace(Sampler):
                     zorder=5,
                 )
 
-            ax_left.set_ylabel(name.replace("_", " "))
-            ax_left.set_xlabel("Iteration")
+            ax_left.set_ylabel(label)
             ax_left.xaxis.set_major_locator(mticker.MultipleLocator(1))
+            if is_last:
+                ax_left.set_xlabel("Iteration")
+            else:
+                ax_left.tick_params(labelbottom=False)
 
-            axs[i, 1].hist(
-                x_now[:, i],
+            ax_right = axs[row_idx, 1]
+            ax_right.hist(
+                vals_now,
                 bins=40,
                 weights=w_now,
                 density=True,
@@ -1663,8 +1679,61 @@ class Laplace(Sampler):
                 alpha=0.75,
                 edgecolor="none",
             )
-            axs[i, 1].set_xlabel(name.replace("_", " "))
-            axs[i, 1].set_yticks([])
+            ax_right.set_yticks([])
+            if is_last:
+                ax_right.set_xlabel(label)
+            else:
+                ax_right.tick_params(labelbottom=False)
+
+        # --- Parameter rows ---
+        for i, name in enumerate(parameter_names):
+            true_val = None
+            if self.injection_parameters:
+                true_val = self.injection_parameters.get(name)
+
+            vals_iter = [(it, x_scatter[:, i], x_full[:, i], w) for it, x_scatter, x_full, w in per_iter]
+            _plot_row(
+                i,
+                vals_iter,
+                x_now[:, i],
+                name.replace("_", " "),
+                is_last=False,
+                true_val=true_val,
+            )
+
+        # --- Log-likelihood and log-prior rows ---
+        for extra_idx, (attr, label) in enumerate([("log_likelihood", "log likelihood"), ("log_prior", "log prior")]):
+            row = len(parameter_names) + extra_idx
+            is_last = extra_idx == 1
+
+            vals_iter = []
+            for it, _x_scatter, _x_full, w in per_iter:
+                smc_samples = history.sample_history[it]
+                raw = getattr(smc_samples, attr, None)
+                if raw is None:
+                    continue
+                arr_full = np.asarray(raw)
+                if len(arr_full) == 0:
+                    continue
+                n_pts = len(arr_full)
+                if n_pts > max_per_iter:
+                    if w is not None:
+                        idx = rng.choice(n_pts, size=max_per_iter, replace=True, p=w)
+                    else:
+                        idx = rng.choice(n_pts, size=max_per_iter, replace=False)
+                    arr_scatter = arr_full[idx]
+                else:
+                    arr_scatter = arr_full
+                vals_iter.append((it, arr_scatter, arr_full, w))
+
+            raw_now = getattr(live_samples, attr, None)
+            if raw_now is None:
+                now_arr = np.zeros(len(x_now))
+            else:
+                now_arr = np.asarray(raw_now)
+
+            _plot_row(row, vals_iter, now_arr, label, is_last=is_last)
+
         fig.suptitle("SMC parameter evolution and current marginals")
         fig.tight_layout()
         safe_save_figure(
