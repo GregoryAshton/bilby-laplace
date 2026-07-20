@@ -749,10 +749,15 @@ class Laplace(Sampler):
         log_evidence = log_evidence_laplace
         log_evidence_err = np.nan
 
+        # For most modes the number of likelihood evaluations equals the number
+        # of proposal draws (``len(g_samples)``).  SMC is different: the real
+        # work happens inside aspire's iterations, invisible to ``g_samples``,
+        # so ``_run_smc`` returns the true count explicitly.
+        nlikelihood = None
         if resample is None:
             samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, estimator, target_nsamples)
         elif resample == "smc":
-            samples, logl, g_samples, efficiency, smc_log_z, smc_log_z_err = self._run_smc(
+            samples, logl, g_samples, efficiency, smc_log_z, smc_log_z_err, nlikelihood = self._run_smc(
                 mean, cov, proposal, estimator, cov_scaling
             )
             if smc_log_z is not None:
@@ -789,6 +794,9 @@ class Laplace(Sampler):
             f"+/- {log_evidence_err:.2f}"
         )
 
+        if nlikelihood is None:
+            nlikelihood = len(g_samples)
+
         self._generate_result(
             samples,
             logl,
@@ -796,7 +804,7 @@ class Laplace(Sampler):
             log_evidence_err=log_evidence_err,
             log_evidence_laplace=log_evidence_laplace,
             efficiency=efficiency,
-            nlikelihood=len(g_samples),
+            nlikelihood=nlikelihood,
         )
 
         # The run finished cleanly; the resume file is no longer needed.
@@ -817,6 +825,12 @@ class Laplace(Sampler):
         self.result.log_likelihood_evaluations = log_likelihood_evaluations
         self.result.log_evidence = log_evidence
         self.result.log_evidence_err = log_evidence_err
+        # Populate bilby's standard field so `result.num_likelihood_evaluations`
+        # reports the true count (the custom run_statistics["nlikelihood"] is
+        # kept too for the comparison table).
+        nlikelihood = run_stats.get("nlikelihood")
+        if nlikelihood is not None:
+            self.result.num_likelihood_evaluations = int(nlikelihood)
         run_stats["sampling_time_s"] = self.sampling_time.total_seconds()
         self.result.meta_data["run_statistics"] = run_stats
 
@@ -995,7 +1009,9 @@ class Laplace(Sampler):
         Handles multi-mode discovery when ``n_modes > 1``, then delegates to
         ``_smc_sample``.  Returns ``(samples, logl, g_samples, efficiency,
         smc_log_z, smc_log_z_err, nlikelihood)`` where ``smc_log_z`` is
-        ``None`` if the aspire result did not carry a log-evidence attribute.
+        ``None`` if the aspire result did not carry a log-evidence attribute,
+        and ``nlikelihood`` is the true number of likelihood evaluations
+        performed by aspire (plus the final output evaluation).
         """
         n_modes = self.kwargs["n_modes"]
         if n_modes > 1:
@@ -1007,12 +1023,12 @@ class Laplace(Sampler):
         else:
             proposal_flow = GaussianFlow(mean, cov)
 
-        samples, logl, smc_log_z, smc_log_z_err = self._smc_sample(proposal_flow, proposal, estimator)
+        samples, logl, smc_log_z, smc_log_z_err, nlikelihood = self._smc_sample(proposal_flow, proposal, estimator)
 
         if self.kwargs["plot_diagnostic"]:
             self.create_smc_diagnostic(samples, proposal_flow)
 
-        return samples, logl, samples, 100.0, smc_log_z, smc_log_z_err
+        return samples, logl, samples, 100.0, smc_log_z, smc_log_z_err, nlikelihood
 
     def _compute_ln_ratios(self, x, g_df, proposal, estimator):
         """Compute log[L(x)π(x)/g(x)] for a batch of proposal samples.
@@ -1367,8 +1383,23 @@ class Laplace(Sampler):
 
         functions = get_aspire_functions(self.likelihood, self.priors, parameter_names)
 
+        # Wrap the likelihood so we can count the *true* number of likelihood
+        # evaluations aspire performs internally.  aspire only evaluates the
+        # likelihood at points whose log-prior is finite (see
+        # ``get_aspire_functions``); we count exactly those so the reported
+        # figure matches the work actually done, not the output-sample count.
+        n_likelihood_evaluations = [0]
+        _raw_log_likelihood = functions.log_likelihood
+
+        def counting_log_likelihood(samples, *args, **kwargs):
+            if getattr(samples, "log_prior", None) is not None:
+                n_likelihood_evaluations[0] += int(np.sum(np.isfinite(samples.log_prior)))
+            else:
+                n_likelihood_evaluations[0] += int(len(samples.x))
+            return _raw_log_likelihood(samples, *args, **kwargs)
+
         aspire_sampler = Aspire(
-            log_likelihood=functions.log_likelihood,
+            log_likelihood=counting_log_likelihood,
             log_prior=functions.log_prior,
             dims=len(parameter_names),
             parameters=parameter_names,
@@ -1426,12 +1457,21 @@ class Laplace(Sampler):
         samples = pd.DataFrame(x_out, columns=parameter_names)
         logl = estimator.log_likelihood_from_array(x_out.T)
 
+        # True likelihood-evaluation count: everything aspire evaluated
+        # internally, plus the final evaluation of the output samples above.
+        nlikelihood = int(n_likelihood_evaluations[0]) + len(x_out)
+        logger.info(
+            f"SMC used {n_likelihood_evaluations[0]} likelihood evaluations "
+            f"internally (+{len(x_out)} for the final output samples); "
+            f"total {nlikelihood}"
+        )
+
         smc_log_z = getattr(result, "log_evidence", None)
         smc_log_z_err = getattr(result, "log_evidence_error", np.nan)
         if smc_log_z is not None:
             logger.info(f"Aspire log-evidence: {smc_log_z:.2f} " f"+/- {smc_log_z_err:.2f}")
 
-        return samples, logl, smc_log_z, smc_log_z_err
+        return samples, logl, smc_log_z, smc_log_z_err, nlikelihood
 
     def _make_smc_callback(self, aspire_sampler, file_checkpoint_path=None):
         """Return a ``checkpoint_callback`` for the SMC sampler.

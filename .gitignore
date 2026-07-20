@@ -26,3 +26,10 @@ outdir/
 
 # MkDocs build output
 site/
+
+# Test / coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/

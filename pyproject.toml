@@ -21,6 +21,25 @@ docs = [
     "mkdocstrings[python]",
     "pymdown-extensions",
 ]
+test = [
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: end-to-end sampler runs (deselect with '-m \"not slow\"')",
+    "gw: requires the bilby.gw stack",
+    "smc: requires aspire + aspire_bilby",
+]
+
+[tool.coverage.run]
+source = ["bilby_laplace"]
+omit = ["*/_version.py"]
+
+[tool.coverage.report]
+show_missing = true
 
 [project.entry-points."bilby.samplers"]
 "bilby.laplace" = "bilby_laplace.sampler:Laplace"
