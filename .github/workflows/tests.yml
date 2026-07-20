@@ -1,0 +1,44 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs history/tags for the version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      # The gw / smc markers require the (heavy) bilby.gw and aspire stacks,
+      # which are not installed here; they are deselected so the core suite
+      # runs on the standard runner.
+      - name: Run tests with coverage
+        run: |
+          pytest -m "not gw and not smc" \
+            --cov=bilby_laplace \
+            --cov-report=term-missing \
+            --cov-report=xml
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          echo "## Coverage (Python ${{ matrix.python-version }})" >> "$GITHUB_STEP_SUMMARY"
+          python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
