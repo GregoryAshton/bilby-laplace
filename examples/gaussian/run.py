@@ -93,7 +93,7 @@ def setup():
 def run_laplace(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}_laplace",
+        label="laplace",
         resample="None",
     )
 
@@ -101,7 +101,7 @@ def run_laplace(_common_laplace):
 def run_rejection(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}_rejection",
+        label="rejection",
         resample="rejection",
     )
 
@@ -114,7 +114,7 @@ def run_rejection_user(_common_laplace, sampling_cov):
     """
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}_rejection_user",
+        label="rejection_user",
         resample="rejection",
         sampling_cov=sampling_cov,
     )
@@ -123,7 +123,7 @@ def run_rejection_user(_common_laplace, sampling_cov):
 def run_smc(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}_smc",
+        label="smc",
         resample="smc",
         smc_kwargs=dict(
             sampler="minipcn_smc",
@@ -145,7 +145,7 @@ def run_dynesty(_common):
     return bilby.run_sampler(
         **_common,
         sampler="dynesty",
-        label=f"{base_label}_dynesty",
+        label="dynesty",
         clean=True,
         nlive=1000,
     )
@@ -187,5 +187,5 @@ if __name__ == "__main__":
 
         # Compare only needs to read result files
         if args.compare:
-            pattern = f"{outdir}/{base_label}_*_result.*"
-            _results, _labels = compare(pattern, f"{base_label}_comparison.png")
+            pattern = f"{outdir}/*_result.*"
+            _results, _labels = compare(pattern, f"{base_label}_comparison.png", sampler_only_labels=True)

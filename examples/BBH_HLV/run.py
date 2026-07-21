@@ -21,6 +21,7 @@ from bilby.gw.prior import (
     UniformInComponentsMassRatio,
 )
 
+from bilby_laplace.comparison import colours_for_results
 from bilby_laplace.comparison import compare as compare_results
 from bilby_laplace.comparison import overlay_injection_lines
 
@@ -159,6 +160,8 @@ def setup():
         sampler="laplace",
         target_nsamples=1000,
         use_unit_cube=True,
+        fisher_method="waveform",
+        npool=8,
     )
 
     return _common, _common_laplace
@@ -186,7 +189,7 @@ def run_rejection(_common_laplace):
         resample="rejection",
         cov_scaling=2,
         jacobian_cap_scale=1,
-        max_iterations=10000,
+        max_iterations=1000000,
         batch_nsamples=10000,
     )
 
@@ -262,6 +265,7 @@ def compare():
             fig = bilby.core.result.plot_multiple(
                 results,
                 labels=labels,
+                colours=colours_for_results(results),
                 parameters=parameters,
                 filename=filename,
                 titles=False,

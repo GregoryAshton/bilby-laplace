@@ -6,6 +6,93 @@ import os
 import bilby
 import numpy as np
 
+# ---------------------------------------------------------------------------
+# Fixed, colourblind-safe colours per sampler family
+# ---------------------------------------------------------------------------
+# Giving each sampler a fixed colour lets a reader recognise the same method at
+# a glance across every example plot.  The palette is Okabe-Ito, designed to
+# stay distinguishable under all common forms of colour-vision deficiency; its
+# low-contrast yellow is deliberately omitted.  We avoid matplotlib's default
+# "C0"/"C1"... cycle so the mapping is stable regardless of the order in which
+# results happen to load.
+SAMPLER_COLOURS = {
+    "laplace": "#E69F00",  # orange          - raw Laplace/Gaussian approximation
+    "inprior": "#CC79A7",  # reddish purple
+    "rejection": "#D55E00",  # vermillion
+    "importance": "#56B4E9",  # sky blue
+    "smc": "#009E73",  # bluish green
+    "dynesty": "#0072B2",  # blue            - reference nested sampler
+}
+
+# Colour for any result whose sampler family is not recognised.
+DEFAULT_SAMPLER_COLOUR = "#999999"  # neutral grey
+
+# Colour for injection/truth overlay lines; black keeps them distinct from
+# every sampler colour above.
+TRUTH_COLOUR = "#000000"
+
+
+def sampler_family(label):
+    """Return the sampler-family key for a result label, or ``None``.
+
+    The examples label results ``"{base}_{method}"`` (e.g. ``"hlv_rejection"``,
+    ``"rosenbrock_smc"``).  Configuration variants collapse to their base
+    family -- ``"..._rejection_user"`` maps to ``"rejection"`` -- so a method
+    keeps a single colour regardless of how it was configured.
+    """
+    tokens = os.path.basename(str(label)).lower().split("_")
+    for token in tokens:
+        if token in SAMPLER_COLOURS:
+            return token
+    return None
+
+
+def colours_for_results(results):
+    """List of plot colours aligned to *results*, keyed by sampler family.
+
+    Pass directly to ``bilby.core.result.plot_multiple(..., colours=...)``.
+    Unrecognised samplers fall back to a neutral grey.
+    """
+    return [SAMPLER_COLOURS.get(sampler_family(r.label), DEFAULT_SAMPLER_COLOUR) for r in results]
+
+
+def _prettify_method(method):
+    """Turn a method token like ``"rejection_user"`` into ``"Rejection user"``.
+
+    ``"smc"`` is upper-cased as an acronym; other tokens are capitalised.
+    """
+    text = method.replace("_", " ").strip()
+    if not text:
+        return method
+    words = [("SMC" if w.lower() == "smc" else w.capitalize()) for w in text.split()]
+    return " ".join(words)
+
+
+def _format_duration(secs):
+    """Human-readable run time as a bracketed suffix, e.g. ``" (1.2 min)"``."""
+    if secs >= 3600:
+        return f" ({secs / 3600:.1f} hr)"
+    if secs >= 60:
+        return f" ({secs / 60:.1f} min)"
+    return f" ({secs:.0f} s)"
+
+
+def sampler_labels(results):
+    """Short legend labels naming just the sampler for each result.
+
+    Strips the shared ``{base}_`` prefix that every result in an example carries
+    (e.g. ``"gaussian_rejection"`` -> ``"Rejection"``) while keeping
+    configuration variants distinct (``"gaussian_rejection_user"`` ->
+    ``"Rejection user"``).  Falls back to the full basename when there is no
+    common prefix to strip.
+    """
+    names = [os.path.basename(str(r.label)) for r in results]
+    if len(names) > 1:
+        prefix = os.path.commonprefix(names)
+        cut = prefix.rfind("_") + 1  # 0 when there is no shared prefix
+        names = [n[cut:] if len(n) > cut else n for n in names]
+    return [_prettify_method(n) for n in names]
+
 
 def overlay_injection_lines(fig, parameters, injection_parameters):
     """Overlay injection truth values as dashed lines on a corner plot.
@@ -34,15 +121,15 @@ def overlay_injection_lines(fig, parameters, injection_parameters):
             ax = axes_grid[row, col]
             if row == col:
                 if truths[col] is not None:
-                    ax.axvline(truths[col], color="C3", ls="--", lw=1.0)
+                    ax.axvline(truths[col], color=TRUTH_COLOUR, ls="--", lw=1.0)
             elif row > col:
                 if truths[col] is not None:
-                    ax.axvline(truths[col], color="C3", ls="--", lw=0.8, alpha=0.7)
+                    ax.axvline(truths[col], color=TRUTH_COLOUR, ls="--", lw=0.8, alpha=0.7)
                 if truths[row] is not None:
-                    ax.axhline(truths[row], color="C3", ls="--", lw=0.8, alpha=0.7)
+                    ax.axhline(truths[row], color=TRUTH_COLOUR, ls="--", lw=0.8, alpha=0.7)
 
 
-def compare(pattern, filename, injection_parameters=None):
+def compare(pattern, filename, injection_parameters=None, sampler_only_labels=False):
     """Load result files matching pattern, print comparison table, and create corner plot.
 
     Parameters
@@ -54,6 +141,11 @@ def compare(pattern, filename, injection_parameters=None):
     injection_parameters : dict, optional
         Dictionary of injection parameter values to overlay on the plot.
         If None, will be extracted from the first result object if available.
+    sampler_only_labels : bool
+        If True, legend labels name just the sampler (e.g. ``"Rejection"``),
+        dropping the shared example prefix and the run time.  Useful when the
+        default ``"{Base}_{method} (time)"`` labels are long enough to crowd the
+        legend.  Default False.
 
     Returns
     -------
@@ -75,18 +167,20 @@ def compare(pattern, filename, injection_parameters=None):
         try:
             r = bilby.core.result.read_in_result(filename=f)
             results.append(r)
-            label = os.path.basename(r.label).capitalize()
-            secs = r.sampling_time.total_seconds()
-            if secs >= 3600:
-                label += f" ({secs / 3600:.1f} hr)"
-            elif secs >= 60:
-                label += f" ({secs / 60:.1f} min)"
-            else:
-                label += f" ({secs:.0f} s)"
+            label = os.path.basename(r.label).capitalize() + _format_duration(r.sampling_time.total_seconds())
             labels.append(label)
             logger.info(f"Loaded {f} ({label})")
         except Exception as exc:
             logger.warning(f"Could not load {f}: {exc}")
+
+    # Optionally shorten the legend to just the sampler name, dropping the shared
+    # example prefix but keeping the run time (computed after loading so the
+    # shared prefix can be detected across all results).
+    if sampler_only_labels and results:
+        labels = [
+            name + _format_duration(r.sampling_time.total_seconds())
+            for name, r in zip(sampler_labels(results), results)
+        ]
 
     # Extract injection parameters from first result if not provided
     if injection_parameters is None and results:
@@ -117,6 +211,7 @@ def compare(pattern, filename, injection_parameters=None):
     fig = bilby.core.result.plot_multiple(
         results,
         labels=labels,
+        colours=colours_for_results(results),
         filename=filename,
         titles=False,
         save=False,
