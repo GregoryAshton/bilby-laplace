@@ -53,18 +53,17 @@ def validate_waveform_likelihood(likelihood):
             f"got {type(likelihood).__name__}. Use fisher_method='hessian'."
         )
 
-    for flag in (
-        "phase_marginalization",
-        "time_marginalization",
-        "distance_marginalization",
-        "calibration_marginalization",
-    ):
-        if getattr(likelihood, flag, False):
-            raise ValueError(
-                f"fisher_method='waveform' does not support {flag}: the waveform "
-                "Fisher cannot account for marginalised parameters. Disable "
-                "marginalisation or use fisher_method='hessian'."
-            )
+    # Phase / time / distance marginalisation are supported: those parameters
+    # are reinstated in the Fisher and then marginalised out via the Schur
+    # complement (see LaplacePosteriorEstimator._calculate_precision_waveform).
+    # Calibration marginalisation is not: it integrates a *discrete* index over
+    # calibration curves, which is not a continuous Fisher direction.
+    if getattr(likelihood, "calibration_marginalization", False):
+        raise ValueError(
+            "fisher_method='waveform' does not support calibration_marginalization: "
+            "it marginalises a discrete calibration index, not a continuous "
+            "parameter. Use fisher_method='hessian'."
+        )
 
     name = type(likelihood).__name__
     if any(marker in name for marker in _REDUCED_ORDER_MARKERS):
@@ -82,7 +81,13 @@ def _step(name, value, eps, eps_mass):
     return max(eps, eps * abs(value))
 
 
-def waveform_fisher_matrix(likelihood, parameter_names, base_parameters, eps=DEFAULT_EPS, eps_mass=DEFAULT_EPS_MASS):
+def waveform_fisher_matrix(
+    likelihood,
+    parameter_names,
+    base_parameters,
+    eps=DEFAULT_EPS,
+    eps_mass=DEFAULT_EPS_MASS,
+):
     """Fisher matrix ``F_ij = sum_det Re (d_i h | d_j h)`` via central differences.
 
     Parameters

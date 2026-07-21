@@ -478,7 +478,13 @@ class Laplace(Sampler):
         prior_s = float(payload.get("sampling_time_s") or 0.0)
         # Shift start_time backwards so end - start = prior + current.
         self.start_time = datetime.datetime.now() - datetime.timedelta(seconds=prior_s)
-        _meta_keys = ("kwargs_hash", "search_keys", "versions", "rng_state", "sampling_time_s")
+        _meta_keys = (
+            "kwargs_hash",
+            "search_keys",
+            "versions",
+            "rng_state",
+            "sampling_time_s",
+        )
         self._checkpoint_state = {k: payload[k] for k in payload if k not in _meta_keys}
         logger.info(
             f"Resumed from {self.resume_file} "
@@ -650,6 +656,7 @@ class Laplace(Sampler):
             hessian_kwargs=self.kwargs["hessian_kwargs"],
             fisher_method=self.kwargs["fisher_method"],
             fisher_kwargs=self.kwargs["fisher_kwargs"],
+            marginalized_reference=self.injection_parameters,
         )
 
         # Validate any user-provided sampling covariance up-front (before the
@@ -757,9 +764,15 @@ class Laplace(Sampler):
         if resample is None:
             samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, estimator, target_nsamples)
         elif resample == "smc":
-            samples, logl, g_samples, efficiency, smc_log_z, smc_log_z_err, nlikelihood = self._run_smc(
-                mean, cov, proposal, estimator, cov_scaling
-            )
+            (
+                samples,
+                logl,
+                g_samples,
+                efficiency,
+                smc_log_z,
+                smc_log_z_err,
+                nlikelihood,
+            ) = self._run_smc(mean, cov, proposal, estimator, cov_scaling)
             if smc_log_z is not None:
                 log_evidence = float(smc_log_z)
                 log_evidence_err = float(smc_log_z_err)

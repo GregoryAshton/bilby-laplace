@@ -12,6 +12,16 @@ Versions correspond to git tags; version numbers follow
 
 ### Added
 
+- `fisher_method='waveform'` now supports phase/time/distance-marginalised likelihoods: the
+  marginalised parameters are reinstated in the Fisher (evaluated at the injection, or reconstructed
+  from the likelihood at the MAP) and marginalised out via the Schur complement of that block —
+  equivalent to inverting the full precision and keeping the sampled-parameter sub-block. New
+  `marginalized_reference` argument on `LaplacePosteriorEstimator` supplies the reference point.
+  Calibration marginalisation (a discrete index) remains unsupported. The waveform precision is
+  floored at the prior precision (generalising the unit-cube prior bound to parameter space via
+  rescaling by the prior standard deviation), so unconstrained or phase-degenerate directions —
+  e.g. the polarisation angle under phase marginalisation — fall back to prior width instead of
+  producing a runaway variance.
 - SMC resampling via aspire (`resample='smc'`), including multi-mode discovery and Gaussian mixture proposals.
 - `inprior` resampling mode — filters proposal samples to prior support without likelihood evaluation.
 - Aligned initial samples for SMC — uses `_draw_inprior_samples()` helper to match rejection/importance sampling.

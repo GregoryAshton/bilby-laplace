@@ -54,12 +54,38 @@ result = bilby.run_sampler(
 )
 ```
 
+### Marginalised likelihoods
+
+Phase, time, and distance marginalisation are supported. Those parameters are
+*reinstated* in the Fisher — built over the augmented set (your sampled parameters
+plus the marginalised ones), evaluated at reference values (the injection where
+available, otherwise reconstructed from the likelihood at the MAP) — and then
+removed via the **Schur complement** of the marginalised block. This is equivalent
+to inverting the full precision and keeping the sampled-parameter sub-block, i.e.
+it *marginalises* over those parameters (propagating their degeneracies) rather than
+*conditioning* on (fixing) them.
+
+The reduced precision is then floored at the prior precision (the same bound as the
+unit-cube Hessian path, generalised to parameter space by rescaling with the prior
+standard deviation `width / sqrt(12)`), so no marginal variance can exceed the prior.
+
+!!! note "Accuracy of the marginalised block"
+    The Schur complement reproduces the analytic marginalisation exactly only where
+    the joint posterior is Gaussian in the marginalised parameters. Distance and time
+    are usually well-behaved; **phase is not** — it is periodic and often poorly
+    constrained, so its Gaussian approximation is weak and parameters degenerate with
+    it (notably the polarisation angle `psi`) tend to be only prior-constrained. The
+    prior floor keeps these bounded at prior width rather than letting them run away,
+    but if you need such a parameter *tightly* constrained, prefer
+    `fisher_method="hessian"`, which differentiates the actual marginalised
+    likelihood.
+
 !!! warning "Requirements and limitations"
     `fisher_method="waveform"` requires a `GravitationalWaveTransient`-like
     likelihood (exposing `interferometers` and `waveform_generator`). It **refuses**:
 
-    - any marginalisation (phase / time / distance / calibration) — the waveform
-      Fisher cannot account for marginalised parameters;
+    - calibration marginalisation — it integrates a *discrete* calibration index, not
+      a continuous Fisher direction;
     - reduced-order likelihoods (ROQ / relative-binning / multi-band), whose inner
       product differs from the full-resolution one used here.
 

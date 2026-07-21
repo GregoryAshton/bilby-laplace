@@ -24,6 +24,7 @@ class LaplacePosteriorEstimator:
         hessian_kwargs=None,
         fisher_method="hessian",
         fisher_kwargs=None,
+        marginalized_reference=None,
     ):
         """Estimate posteriors using the Laplace approximation.
 
@@ -77,10 +78,22 @@ class LaplacePosteriorEstimator:
             derivatives (likelihood Fisher plus prior precision); it requires a
             ``GravitationalWaveTransient``-like likelihood and works directly in
             parameter space (``use_unit_cube`` and ``jacobian_cap_scale`` are
-            ignored).
+            ignored). If the likelihood analytically marginalises over phase,
+            time, and/or distance, the Fisher is built over the augmented set
+            (sampled parameters plus the marginalised ones) and the marginalised
+            block is removed via its Schur complement -- equivalent to
+            marginalising, not conditioning, over those parameters. The result is
+            floored at the prior precision (as the unit-cube path is), so no
+            marginal variance exceeds the prior.
         fisher_kwargs: dict, optional
             Keyword arguments forwarded to the waveform-Fisher computation when
             ``fisher_method='waveform'`` (e.g. ``eps``, ``eps_mass``).
+        marginalized_reference: dict, optional
+            Point values for analytically-marginalised parameters (phase, time,
+            distance) at which to evaluate the waveform Fisher. Typically the
+            injection. Any marginalised parameter absent here is reconstructed
+            from the marginalised likelihood at the MAP. Only used by
+            ``fisher_method='waveform'``.
         """
         self.likelihood = likelihood
 
@@ -98,6 +111,7 @@ class LaplacePosteriorEstimator:
         self.hessian_kwargs = hessian_kwargs if hessian_kwargs is not None else {}
         self.fisher_method = fisher_method
         self.fisher_kwargs = fisher_kwargs if fisher_kwargs is not None else {}
+        self.marginalized_reference = marginalized_reference if marginalized_reference is not None else {}
         if fisher_method == "waveform":
             from .gw_fisher import validate_waveform_likelihood
 
@@ -246,32 +260,168 @@ class LaplacePosteriorEstimator:
             return self._calculate_precision_unit_cube(sample)
         return self._calculate_precision_parameter_space(sample)
 
+    # Analytically-marginalised parameters this path can reinstate in the
+    # Fisher and then marginalise out (calibration is excluded -- it marginalises
+    # a discrete index, not a continuous direction, and is refused at validation).
+    _SUPPORTED_MARGINALIZED = ("geocent_time", "phase", "luminosity_distance")
+
     def _calculate_precision_waveform(self, sample):
         """Posterior precision from the GW waveform Fisher plus prior precision.
 
-        Returns the likelihood Fisher ``F_ij = (d_i h | d_j h)`` (in parameter
-        space) plus the diagonal prior precision, so the result has the same
-        "negative Hessian of the log-posterior" meaning as the other paths.
+        The likelihood Fisher ``F_ij = (d_i h | d_j h)`` plus the diagonal prior
+        precision has the same "negative Hessian of the log-posterior" meaning as
+        the other paths.
+
+        If the likelihood analytically marginalises over phase/time/distance,
+        those parameters are reinstated: the full precision is built over the
+        augmented set (sampled + marginalised) and the marginalised block ``m``
+        is removed via its Schur complement,
+        ``P_r = P_rr - P_rm P_mm^{-1} P_mr``.  This equals the sampled-parameter
+        sub-block of the full covariance ``(P^{-1})_rr`` -- i.e. it marginalises
+        over the reconstructed parameters (accounting for their degeneracies),
+        rather than conditioning on (fixing) them.
         """
         from .gw_fisher import waveform_fisher_matrix
 
-        base = {**getattr(self.likelihood, "parameters", {}), **self.fixed_parameters, **sample}
-        fisher = waveform_fisher_matrix(self.likelihood, self.parameter_names, base, **self.fisher_kwargs)
-        return fisher + np.diag(self._prior_precision_diag(sample))
+        marg_names = self._supported_marginalized_names()
+        base = {
+            **getattr(self.likelihood, "parameters", {}),
+            **self.fixed_parameters,
+            **sample,
+        }
 
-    def _prior_precision_diag(self, sample):
+        if not marg_names:
+            fisher = waveform_fisher_matrix(self.likelihood, self.parameter_names, base, **self.fisher_kwargs)
+            precision = fisher + np.diag(self._prior_precision_diag(sample))
+            return self._floor_precision_at_prior(precision)
+
+        marg_values = self._resolve_marginalized_values(sample, marg_names)
+        full_names = list(self.parameter_names) + marg_names
+        base = {**base, **marg_values}
+        logger.info(
+            f"Waveform Fisher: reinstating marginalised parameter(s) {marg_names}, "
+            f"then marginalising them out via the Schur complement."
+        )
+        fisher = waveform_fisher_matrix(self.likelihood, full_names, base, **self.fisher_kwargs)
+        prior_prec = np.concatenate(
+            [
+                self._prior_precision_diag(sample),
+                self._prior_precision_diag(marg_values, marg_names),
+            ]
+        )
+        precision_full = fisher + np.diag(prior_prec)
+
+        nr = len(self.parameter_names)
+        p_rr = precision_full[:nr, :nr]
+        p_rm = precision_full[:nr, nr:]
+        p_mm = precision_full[nr:, nr:]
+        p_mr = precision_full[nr:, :nr]
+        try:
+            schur_term = p_rm @ np.linalg.solve(p_mm, p_mr)
+        except np.linalg.LinAlgError:
+            schur_term = p_rm @ np.linalg.pinv(p_mm) @ p_mr
+        precision = p_rr - schur_term
+        return self._floor_precision_at_prior(0.5 * (precision + precision.T))
+
+    def _floor_precision_at_prior(self, precision):
+        """Bound the parameter-space precision below by the prior precision.
+
+        The waveform Fisher (unlike the unit-cube Hessian) is not automatically
+        prior-bounded, so a direction the data leaves unconstrained -- e.g. the
+        polarisation angle under phase marginalisation, whose Schur complement
+        can be near-singular -- would otherwise invert to a runaway variance.
+
+        Rescaling by the prior standard deviation (``width / sqrt(12)``, the std
+        of a uniform prior over the support) maps the prior precision to the
+        identity; flooring the rescaled precision eigenvalues at 1 then enforces
+        ``posterior precision >= prior precision`` in every direction, i.e. no
+        marginal variance exceeds the prior. Well-constrained directions
+        (precision >> prior) are untouched. Skipped if any prior width is
+        non-finite (an unbounded prior cannot bound the posterior).
+        """
+        precision = 0.5 * (precision + precision.T)
+        widths = np.array([self.prior_width_dict[k] for k in self.parameter_names])
+        if not np.all(np.isfinite(widths)) or np.any(widths <= 0):
+            logger.warning(
+                "Non-finite or non-positive prior width(s); skipping the prior " "bound on the waveform precision."
+            )
+            return precision
+
+        prior_std = widths / np.sqrt(12.0)
+        outer_std = np.outer(prior_std, prior_std)
+        scaled = precision * outer_std  # D P D, with D = diag(prior_std)
+        eigvals, eigvecs = np.linalg.eigh(scaled)
+        n_floored = int(np.sum(eigvals < 1.0))
+        if n_floored > 0:
+            logger.info(
+                f"Flooring {n_floored} waveform precision eigenvalue(s) at the "
+                f"prior (min rescaled eigenvalue {eigvals.min():.3g}); those "
+                f"directions default to prior width."
+            )
+            eigvals = np.maximum(eigvals, 1.0)
+            scaled = (eigvecs * eigvals) @ eigvecs.T
+        precision = scaled / outer_std
+        return 0.5 * (precision + precision.T)
+
+    def _supported_marginalized_names(self):
+        """Marginalised parameters (excluding any already sampled) to reinstate."""
+        marg = list(getattr(self.likelihood, "marginalized_parameters", []) or [])
+        return [n for n in marg if n in self._SUPPORTED_MARGINALIZED and n not in self.parameter_names]
+
+    def _resolve_marginalized_values(self, sample, names):
+        """Point values for the marginalised parameters: reference (injection)
+        where finite, otherwise reconstructed from the likelihood at the MAP."""
+        values = {}
+        missing = []
+        for name in names:
+            ref = self.marginalized_reference.get(name)
+            if ref is not None and np.isfinite(float(ref)):
+                values[name] = float(ref)
+            else:
+                missing.append(name)
+        if missing:
+            values.update(self._reconstruct_marginalized(sample, missing))
+        return values
+
+    def _reconstruct_marginalized(self, sample, names):
+        """Reconstruct marginalised parameters at the MAP via bilby's built-in
+        conditional draw (a single, RNG-seeded sample)."""
+        base = {
+            **getattr(self.likelihood, "parameters", {}),
+            **self.fixed_parameters,
+            **sample,
+        }
+        reconstructed = self.likelihood.generate_posterior_sample_from_marginalized_likelihood(dict(base))
+        values = {name: float(reconstructed[name]) for name in names}
+        logger.info(
+            f"Reconstructed marginalised parameter(s) at the MAP: " f"{ {k: round(v, 6) for k, v in values.items()} }"
+        )
+        return values
+
+    def _prior_precision_diag(self, sample, names=None):
         """Diagonal prior precision ``-d^2/dtheta^2 log pi_i`` at the MAP.
 
         Computed by central differences on each 1-D prior log-density (priors
         are smooth and cheap to difference).  Returns zeros for flat priors and
-        where the density is non-finite (e.g. at a boundary).
+        where the density is non-finite (e.g. at a boundary).  ``names`` defaults
+        to the sampled parameters; pass an explicit list (e.g. marginalised
+        parameters, whose priors live on ``likelihood.priors``) to evaluate
+        those instead.
         """
-        precision = np.zeros(self.N)
-        for i, key in enumerate(self.parameter_names):
-            prior = self.priors_dict[key]
+        if names is None:
+            names = self.parameter_names
+        precision = np.zeros(len(names))
+        for i, key in enumerate(names):
+            # Sampled-parameter priors live on priors_dict; marginalised-parameter
+            # priors (phase/time/distance) live on the likelihood.
+            prior = self.priors_dict.get(key) or self.likelihood.priors[key]
+            width = self.prior_width_dict.get(key)
+            if width is None or not np.isfinite(width) or width == 0:
+                width = getattr(prior, "maximum", 1.0) - getattr(prior, "minimum", 0.0)
+                width = width if np.isfinite(width) and width != 0 else 1.0
             x = float(sample[key])
-            h = 1e-4 * self.prior_width_dict[key]
-            with np.errstate(divide="ignore"):
+            h = 1e-4 * width
+            with np.errstate(divide="ignore", invalid="ignore"):
                 lp = np.log(prior.prob(x))
                 lp_plus = np.log(prior.prob(x + h))
                 lp_minus = np.log(prior.prob(x - h))
@@ -303,7 +453,12 @@ class LaplacePosteriorEstimator:
         x_array = np.array([sample[key] for key in self.parameter_names])
         u_map = self._to_unit_cube(x_array)
 
-        kw = {"initial_step": 0.001, "step_factor": 2, "maxiter": 10, **self.hessian_kwargs}
+        kw = {
+            "initial_step": 0.001,
+            "step_factor": 2,
+            "maxiter": 10,
+            **self.hessian_kwargs,
+        }
         logger.info(f"Computing Hessian of log-posterior in unit cube (scipy.differentiate) with {kw}")
         res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
         logger.debug(f"Hessian computed: success={res.success}, status={res.status}, nfev={res.nfev}")
