@@ -48,7 +48,11 @@ class LaplacePosteriorEstimator:
         use_unit_cube: bool
             If True (default), compute the Hessian in unit-cube space via the
             prior CDFs. This avoids boundary clipping when the MAP is near a
-            prior edge, giving unbiased curvature estimates.
+            prior edge, giving unbiased curvature estimates. In this space the
+            precision is floored at the prior precision (the variance of a
+            uniform prior is 1/12) before inversion, so a noisy, indefinite, or
+            non-finite curvature estimate can never yield a posterior broader
+            than the prior; unconstrained directions default to prior width.
         jacobian_cap_scale: float
             Scales the Jacobian cap applied when transforming the unit-cube
             Hessian back to parameter space. The cap is
@@ -58,8 +62,14 @@ class LaplacePosteriorEstimator:
         hessian_kwargs: dict, optional
             Keyword arguments forwarded to ``scipy.differentiate.hessian``.
             Defaults are ``{"initial_step": 0.5}`` in parameter space and
-            ``{"initial_step": 0.1}`` in unit-cube space. Any key provided
-            here overrides the corresponding default.
+            ``{"initial_step": 0.001, "step_factor": 2, "maxiter": 10}`` in
+            unit-cube space. Any key provided here overrides the corresponding
+            default. Note that ``scipy.differentiate.hessian`` *shrinks* the
+            step each iteration (``initial_step / step_factor**k``); raising
+            ``maxiter`` drives the step toward zero, where a noisy objective
+            (e.g. a marginalised likelihood) becomes dominated by round-off and
+            the curvature estimate degrades. More iterations is not necessarily
+            better.
         fisher_method: str
             How to estimate the posterior precision. ``'hessian'`` (default)
             finite-differences the scalar log-posterior. ``'waveform'`` builds

@@ -23,7 +23,9 @@ clipping when the MAP sits near a prior edge.
 Before inversion the precision matrix is **diagonally preconditioned** (rescaled to
 near-unit diagonal), which removes scale-driven ill-conditioning, and small or
 negative eigenvalues are floored so that poorly-constrained or indefinite directions
-become wide rather than singular.
+become wide rather than singular. In the unit-cube path the precision is additionally
+floored at the prior precision, so the covariance is bounded by the prior: a noisy or
+indefinite Hessian degrades to prior width instead of producing a runaway proposal.
 
 For gravitational-wave likelihoods, `fisher_method="waveform"` instead builds the
 genuine Fisher matrix from waveform derivatives. See

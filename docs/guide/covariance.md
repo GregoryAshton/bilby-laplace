@@ -15,7 +15,21 @@ observed information (including the prior), not the Fisher matrix.
 
 The Hessian is computed with `scipy.differentiate.hessian` (adaptive step,
 Richardson extrapolation). In unit-cube space (`use_unit_cube=True`) the parameter
-scales are already normalised by the prior CDF transform.
+scales are already normalised by the prior CDF transform, and the precision is
+**floored at the prior precision** before inversion (a uniform prior has variance
+1/12 in unit-cube coordinates). Because a bounded posterior can never be broader
+than its prior, this bounds the covariance by the prior: a noisy, indefinite, or
+non-finite curvature estimate degrades gracefully to prior width instead of blowing
+up, while well-constrained directions (precision ≫ the prior) are untouched.
+
+!!! note "`hessian_kwargs` and `maxiter`"
+    `scipy.differentiate.hessian` *shrinks* the step each iteration
+    (`initial_step / step_factor**k`), so a larger `maxiter` reaches a *smaller*
+    final step. On a numerically noisy objective (e.g. a marginalised likelihood)
+    an over-small step is dominated by round-off and the curvature estimate
+    degrades — more iterations is not automatically better. The prior floor above
+    keeps such a degraded estimate bounded, but the accurate regime is a step that
+    is a modest fraction of the posterior width, not the smallest possible.
 
 ### `"waveform"` (gravitational-wave likelihoods)
 
@@ -61,6 +75,10 @@ scales differ by orders of magnitude. Small or negative eigenvalues are then flo
 at a relative threshold, which keeps poorly-constrained or indefinite directions
 *wide* (the right behaviour for a proposal) rather than zeroing them out. The
 before/after condition number is logged.
+
+In the unit-cube path this relative floor is a secondary safety net: the precision
+has already been floored at the prior precision (see above), so those directions are
+bounded at prior width rather than left arbitrarily wide.
 
 ## Shaping the proposal
 

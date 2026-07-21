@@ -33,12 +33,23 @@ Versions correspond to git tags; version numbers follow
 - Examples restructured: gaussian, rosenbrock, hlv (lorentzian kept from stub).
 - Jacobian cap now scaled by `jacobian_cap_scale` parameter rather than hardcoded at 1.0.
 - SMC pre-scan for rejection sampling uses in-prior-filtered calibration samples.
-- Finite-difference step for unit-cube Hessian reduced from 0.01 to 0.1.
+- Unit-cube Hessian finite-difference settings: `initial_step=0.001`, `step_factor=2`, `maxiter=10`
+  (all overridable via `hessian_kwargs`).
 - Renamed for terminological precision: the estimated matrix is the negative Hessian of the
   log-posterior (the posterior precision), not the Fisher information matrix. `matrix.py` →
   `laplace.py`; `FisherMatrixPosteriorEstimator` → `LaplacePosteriorEstimator`; `calculate_FIM` →
   `calculate_posterior_precision`; `calculate_iFIM` → `calculate_posterior_covariance`. No
   backwards-compatible aliases (alpha).
+
+### Fixed
+
+- Laplace covariance could collapse to the prior (posterior widths inflated ~250x). The unit-cube
+  Hessian's `maxiter` had been raised to 20, driving `scipy.differentiate.hessian` into the
+  objective's numerical-noise floor and producing a spurious indefinite curvature. Reverted to
+  `maxiter=10`, and — more robustly — the unit-cube precision is now floored at the prior precision
+  before inversion, so the covariance is bounded by the prior: a noisy, indefinite, or non-finite
+  Hessian degrades to prior width instead of blowing up. A too-large `initial_step` no longer
+  crashes the eigendecomposition.
 
 ### Removed
 
