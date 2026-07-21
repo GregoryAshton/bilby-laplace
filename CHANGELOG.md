@@ -21,7 +21,9 @@ Versions correspond to git tags; version numbers follow
   floored at the prior precision (generalising the unit-cube prior bound to parameter space via
   rescaling by the prior standard deviation), so unconstrained or phase-degenerate directions —
   e.g. the polarisation angle under phase marginalisation — fall back to prior width instead of
-  producing a runaway variance.
+  producing a runaway variance. Detector-based sky frames (`reference_frame`, i.e. zenith/azimuth
+  sampling) are supported: the Fisher applies the likelihood's zenith/azimuth-to-ra/dec conversion
+  at each finite-difference point so those parameters are constrained rather than appearing null.
 - SMC resampling via aspire (`resample='smc'`), including multi-mode discovery and Gaussian mixture proposals.
 - `inprior` resampling mode — filters proposal samples to prior support without likelihood evaluation.
 - Aligned initial samples for SMC — uses `_draw_inprior_samples()` helper to match rejection/importance sampling.

@@ -69,6 +69,11 @@ The reduced precision is then floored at the prior precision (the same bound as 
 unit-cube Hessian path, generalised to parameter space by rescaling with the prior
 standard deviation `width / sqrt(12)`), so no marginal variance can exceed the prior.
 
+Detector-based sky frames are handled: if the likelihood samples `zenith`/`azimuth`
+(via `reference_frame`), the Fisher applies the likelihood's own conversion to
+`ra`/`dec` at each finite-difference point, so those parameters are constrained
+correctly rather than appearing as null directions.
+
 !!! note "Accuracy of the marginalised block"
     The Schur complement reproduces the analytic marginalisation exactly only where
     the joint posterior is Gaussian in the marginalised parameters. Distance and time

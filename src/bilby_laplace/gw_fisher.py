@@ -114,6 +114,22 @@ def waveform_fisher_matrix(
     names = list(parameter_names)
     n = len(names)
 
+    # ``get_detector_response`` needs ra/dec/geocent_time. When the likelihood
+    # uses a detector-based reference frame it samples zenith/azimuth (and,
+    # optionally, a detector time) instead, converting to ra/dec internally.
+    # Reproduce that conversion here so derivatives w.r.t. zenith/azimuth (and the
+    # time-dependence of the sky location) flow through it.  No-op for the "sky"
+    # frame, where ra/dec are already the sampled parameters.
+    reference_frame = getattr(likelihood, "reference_frame", "sky")
+    needs_sky_conversion = reference_frame not in (None, "sky") and hasattr(likelihood, "get_sky_frame_parameters")
+
+    def response_params(params):
+        if not needs_sky_conversion:
+            return params
+        converted = dict(params)
+        converted.update(likelihood.get_sky_frame_parameters(params))
+        return converted
+
     # First derivatives of the projected detector strain, per detector.
     derivs = {ifo.name: [] for ifo in ifos}
     for name in names:
@@ -125,9 +141,11 @@ def waveform_fisher_matrix(
         minus[name] = value - 0.5 * dp
         pol_plus = wg.frequency_domain_strain(plus)
         pol_minus = wg.frequency_domain_strain(minus)
+        plus_response = response_params(plus)
+        minus_response = response_params(minus)
         for ifo in ifos:
-            h_plus = ifo.get_detector_response(pol_plus, plus)
-            h_minus = ifo.get_detector_response(pol_minus, minus)
+            h_plus = ifo.get_detector_response(pol_plus, plus_response)
+            h_minus = ifo.get_detector_response(pol_minus, minus_response)
             derivs[ifo.name].append((h_plus - h_minus) / dp)
 
     fisher = np.zeros((n, n))
