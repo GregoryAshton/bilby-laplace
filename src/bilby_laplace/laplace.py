@@ -1,3 +1,5 @@
+from functools import partial
+
 import numpy as np
 import pandas as pd
 import scipy.differentiate as sd
@@ -9,6 +11,30 @@ from scipy.optimize import differential_evolution, minimize
 
 def array_to_dict(keys, array):
     return dict(zip(keys, array))
+
+
+def _pool_log_likelihood(param_keys, fixed_parameters, bounds_min, bounds_max, clip_to_bounds, x_col):
+    """Evaluate the log-likelihood for a single parameter vector in a pool worker.
+
+    Mirrors the serial ``wrapped_logl`` in
+    :meth:`LaplacePosteriorEstimator.log_likelihood_from_array` exactly (same
+    bounds handling), so a parallel run is numerically identical to a serial
+    one.  The (heavy) likelihood is not shipped with each task: it is pulled
+    from bilby's per-worker global, populated once when the pool is created via
+    :meth:`bilby...Sampler._setup_pool`.  Only the small static arguments
+    (parameter names, fixed values, prior bounds) ride along, bound in with
+    ``functools.partial``.
+    """
+    from bilby.core.sampler.base_sampler import _sampling_convenience_dump
+
+    likelihood = _sampling_convenience_dump.likelihood
+    x = np.asarray(x_col, dtype=float)
+    if clip_to_bounds:
+        x = np.clip(x, bounds_min, bounds_max)
+    elif np.any(x < bounds_min) or np.any(x > bounds_max):
+        return -np.inf
+    parameters = {**fixed_parameters, **dict(zip(param_keys, x))}
+    return likelihood.log_likelihood(parameters=parameters)
 
 
 class LaplacePosteriorEstimator:
@@ -97,6 +123,11 @@ class LaplacePosteriorEstimator:
         """
         self.likelihood = likelihood
 
+        # Optional multiprocessing pool for vectorised likelihood evaluation.
+        # Set by the sampler after the pool is created; ``None`` means serial.
+        self.pool = None
+        self.npool = 1
+
         if not isinstance(priors, PriorDict):
             priors = PriorDict(priors)
 
@@ -166,6 +197,16 @@ class LaplacePosteriorEstimator:
         return self.log_likelihood(sample) + lp
 
     def log_likelihood_from_array(self, x_array, clip_to_bounds=False):
+        x_array = np.asarray(x_array)
+
+        # Parallel path: a batch of parameter vectors, column-stacked as
+        # ``(N_params, N_samples)``, evaluated across the worker pool.  The
+        # likelihood evaluation is the dominant cost in the resampling loops and
+        # is embarrassingly parallel (no RNG in the workers), so the result is
+        # numerically identical to the serial path.
+        if self.pool is not None and x_array.ndim == 2 and x_array.shape[1] > 1:
+            return self._log_likelihood_from_array_pool(x_array, clip_to_bounds)
+
         def wrapped_logl(x_array):
             if clip_to_bounds:
                 x_array = x_array.copy()
@@ -183,6 +224,28 @@ class LaplacePosteriorEstimator:
             return np.apply_along_axis(wrapped_logl, 0, x_array)
 
         return wrapped_logl_arb(x_array)
+
+    def _log_likelihood_from_array_pool(self, x_array, clip_to_bounds):
+        """Evaluate ``log_likelihood_from_array`` over a pool for a 2-D batch.
+
+        ``x_array`` is ``(N_params, N_samples)``; each column is one parameter
+        vector.  Returns a ``(N_samples,)`` array matching the serial path.
+        """
+        columns = [x_array[:, j] for j in range(x_array.shape[1])]
+        worker = partial(
+            _pool_log_likelihood,
+            list(self.parameter_names),
+            dict(self.fixed_parameters),
+            self.prior_bounds_min,
+            self.prior_bounds_max,
+            clip_to_bounds,
+        )
+        # Aim for a few chunks per worker so IPC overhead is amortised without
+        # starving workers at the tail of the batch.
+        npool = max(1, int(self.npool))
+        chunksize = max(1, len(columns) // (4 * npool))
+        results = self.pool.map(worker, columns, chunksize=chunksize)
+        return np.asarray(results, dtype=float)
 
     def log_posterior_from_array(self, x_array):
         """Evaluate log-posterior from a parameter array (or column-stacked arrays)."""

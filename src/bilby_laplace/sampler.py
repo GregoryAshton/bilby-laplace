@@ -141,6 +141,15 @@ class Laplace(Sampler):
         Resampling method: ``'rejection'`` (default), ``'importance'``, ``'smc'``, or
         ``None`` / ``'None'`` to skip resampling and return raw Laplace-approximation
         samples.
+    npool : int
+        Number of processes for parallel likelihood evaluation (bilby standard
+        argument, default 1). When ``> 1``, each batch of proposal samples in
+        the resampling loops (rejection / importance / inprior) is evaluated
+        across a ``multiprocessing.Pool``. Drawing and accept/reject decisions
+        stay in the main process, so a pooled run is numerically identical to a
+        serial one. Only worthwhile when a single likelihood evaluation is
+        expensive relative to inter-process overhead. Alternatively pass a
+        pre-built ``pool`` object.
     target_nsamples : int
         Target number of posterior samples.
     batch_nsamples : int
@@ -756,43 +765,56 @@ class Laplace(Sampler):
         log_evidence = log_evidence_laplace
         log_evidence_err = np.nan
 
+        # Set up the multiprocessing pool (bilby handles npool / a user-supplied
+        # ``pool`` kwarg and stashes the likelihood in each worker once).  The
+        # estimator uses it to evaluate batches of proposal likelihoods in
+        # parallel; all resampling modes route through
+        # ``log_likelihood_from_array`` so they all benefit.
+        self._setup_pool()
+        estimator.pool = self.pool
+        estimator.npool = self.npool or 1
+
         # For most modes the number of likelihood evaluations equals the number
         # of proposal draws (``len(g_samples)``).  SMC is different: the real
         # work happens inside aspire's iterations, invisible to ``g_samples``,
         # so ``_run_smc`` returns the true count explicitly.
         nlikelihood = None
-        if resample is None:
-            samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, estimator, target_nsamples)
-        elif resample == "smc":
-            (
-                samples,
-                logl,
-                g_samples,
-                efficiency,
-                smc_log_z,
-                smc_log_z_err,
-                nlikelihood,
-            ) = self._run_smc(mean, cov, proposal, estimator, cov_scaling)
-            if smc_log_z is not None:
-                log_evidence = float(smc_log_z)
-                log_evidence_err = float(smc_log_z_err)
-        elif resample == "rejection":
-            samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_rejection_sampling(
-                proposal, estimator, map_sample_dict
-            )
-        elif resample == "inprior":
-            samples, logl, g_samples, efficiency = self._run_inprior(proposal, estimator)
-            log_evidence = np.nan
-            log_evidence_err = np.nan
-        elif resample == "importance":
-            samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_importance_sampling(
-                proposal, estimator, map_sample_dict
-            )
-        else:
-            raise ValueError(
-                f"Unknown resample method {resample!r}. "
-                f"Expected one of: None, 'rejection', 'importance', 'inprior', 'smc'."
-            )
+        try:
+            if resample is None:
+                samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, estimator, target_nsamples)
+            elif resample == "smc":
+                (
+                    samples,
+                    logl,
+                    g_samples,
+                    efficiency,
+                    smc_log_z,
+                    smc_log_z_err,
+                    nlikelihood,
+                ) = self._run_smc(mean, cov, proposal, estimator, cov_scaling)
+                if smc_log_z is not None:
+                    log_evidence = float(smc_log_z)
+                    log_evidence_err = float(smc_log_z_err)
+            elif resample == "rejection":
+                samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_rejection_sampling(
+                    proposal, estimator, map_sample_dict
+                )
+            elif resample == "inprior":
+                samples, logl, g_samples, efficiency = self._run_inprior(proposal, estimator)
+                log_evidence = np.nan
+                log_evidence_err = np.nan
+            elif resample == "importance":
+                samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_importance_sampling(
+                    proposal, estimator, map_sample_dict
+                )
+            else:
+                raise ValueError(
+                    f"Unknown resample method {resample!r}. "
+                    f"Expected one of: None, 'rejection', 'importance', 'inprior', 'smc'."
+                )
+        finally:
+            self._close_pool()
+            estimator.pool = None
 
         end_time = datetime.datetime.now()
         self.sampling_time = end_time - self.start_time
