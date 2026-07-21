@@ -278,17 +278,76 @@ class LaplacePosteriorEstimator:
         logger.debug(f"Estimated Hessian:\n{precision}")
         return precision
 
+    # In unit-cube coordinates the prior is uniform on [0, 1], whose variance
+    # is 1/12.  A bounded posterior can never be broader than its prior, so
+    # 12 is the smallest physically-meaningful precision along any direction.
+    # Flooring the unit-cube precision eigenvalues here bounds the posterior
+    # covariance by the prior: directions the data does not constrain (or that
+    # are corrupted by finite-difference noise, giving spurious near-zero or
+    # negative curvature) gracefully fall back to prior width instead of
+    # blowing up.  Well-constrained directions have precision >> 12 and are
+    # untouched.
+    PRIOR_PRECISION_UNIT_CUBE = 12.0
+
     def _calculate_precision_unit_cube(self, sample):
         x_array = np.array([sample[key] for key in self.parameter_names])
         u_map = self._to_unit_cube(x_array)
 
-        kw = {"initial_step": 0.001, "step_factor": 2, "maxiter": 20, **self.hessian_kwargs}
+        kw = {"initial_step": 0.001, "step_factor": 2, "maxiter": 10, **self.hessian_kwargs}
         logger.info(f"Computing Hessian of log-posterior in unit cube (scipy.differentiate) with {kw}")
         res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
         logger.debug(f"Hessian computed: success={res.success}, status={res.status}, nfev={res.nfev}")
 
+        # scipy.differentiate reports per-element convergence.  On a noisy
+        # objective (e.g. a marginalised GW likelihood) most entries routinely
+        # fail its convergence test even when the estimate is perfectly usable,
+        # so this is logged at info level rather than warned: it is a diagnostic
+        # of estimate quality, not an error.  The prior floor below is what
+        # actually bounds the covariance if the estimate is poor.
+        success = np.asarray(res.success)
+        n_failed = int(success.size - np.count_nonzero(success))
+        if n_failed > 0:
+            logger.info(
+                f"scipy.differentiate.hessian reported non-convergence for "
+                f"{n_failed}/{success.size} entries (status codes: "
+                f"{np.unique(np.asarray(res.status)).tolist()}); curvature "
+                f"estimate may be noisy. The prior floor bounds the covariance."
+            )
+
         precision_u = -res.ddf
         logger.debug(f"Hessian (unit cube):\n{precision_u}")
+
+        # A too-large step can push evaluation points outside the unit cube (or
+        # otherwise fail), leaving non-finite Hessian entries.  Zero them so the
+        # affected directions collapse to near-zero curvature and are lifted to
+        # the prior precision by the floor below, rather than crashing the
+        # eigendecomposition.
+        n_nonfinite = int(np.sum(~np.isfinite(precision_u)))
+        if n_nonfinite > 0:
+            logger.warning(
+                f"Unit-cube Hessian has {n_nonfinite} non-finite entry(ies) "
+                f"(the step may be too large); zeroing them so those directions "
+                f"default to prior width."
+            )
+            precision_u = np.where(np.isfinite(precision_u), precision_u, 0.0)
+
+        # Floor the unit-cube precision at the prior precision (see
+        # PRIOR_PRECISION_UNIT_CUBE).  Symmetrise, then floor the eigenvalues:
+        # this simultaneously enforces positive-definiteness (removing spurious
+        # negative curvature) and bounds the covariance by the prior.
+        precision_u = 0.5 * (precision_u + precision_u.T)
+        eigvals, eigvecs = np.linalg.eigh(precision_u)
+        n_floored = int(np.sum(eigvals < self.PRIOR_PRECISION_UNIT_CUBE))
+        if n_floored > 0:
+            logger.info(
+                f"Flooring {n_floored} unit-cube precision eigenvalue(s) at the "
+                f"prior precision ({self.PRIOR_PRECISION_UNIT_CUBE:g}; "
+                f"min was {eigvals.min():.3g}). Those directions default to "
+                f"prior width."
+            )
+            eigvals = np.maximum(eigvals, self.PRIOR_PRECISION_UNIT_CUBE)
+            precision_u = (eigvecs * eigvals) @ eigvecs.T
+            precision_u = 0.5 * (precision_u + precision_u.T)
 
         J_inv = 1.0 / self._jacobian_diag(x_array)  # = p(θ_MAP)
 

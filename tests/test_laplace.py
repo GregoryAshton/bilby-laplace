@@ -5,12 +5,18 @@ Gaussian fixture provides analytic ground truth for the MAP, covariance, and
 evidence.
 """
 
+import types
+
 import bilby
 import numpy as np
 import pytest
 from conftest import MU, PRIOR_MAX, PRIOR_MIN, TRUE_COV
 
+import bilby_laplace.laplace as laplace_module
 from bilby_laplace.laplace import LaplacePosteriorEstimator, array_to_dict
+
+# Variance of the Uniform(-5, 5) prior used by the fixtures: width**2 / 12.
+PRIOR_VARIANCE = (PRIOR_MAX - PRIOR_MIN) ** 2 / 12.0
 
 
 def test_array_to_dict():
@@ -205,6 +211,93 @@ def test_log_evidence_is_exact_for_gaussian(estimator, map_sample):
     log_z = estimator.log_evidence_laplace(map_sample, cov)
     prior_area = (PRIOR_MAX - PRIOR_MIN) ** 2
     assert log_z == pytest.approx(-np.log(prior_area), abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# covariance is bounded by the prior (regression guards)
+#
+# A bounded posterior can never be broader than its prior.  The unit-cube
+# precision is therefore floored at the prior precision (variance 1/12 in
+# unit-cube coordinates) before inversion.  These tests pin that behaviour so
+# a pathological Hessian -- near-zero, indefinite, or non-finite curvature --
+# can never again produce a runaway, effectively-unconstrained covariance
+# (the bug where the Laplace posterior collapsed to the prior width x ~250).
+# ---------------------------------------------------------------------------
+def _fake_hessian_result(ddf):
+    """Mimic the scipy.differentiate.hessian return object."""
+    ddf = np.asarray(ddf, dtype=float)
+    ones = np.ones_like(ddf)
+    return types.SimpleNamespace(
+        ddf=ddf,
+        success=np.zeros_like(ddf, dtype=bool),
+        status=np.full(ddf.shape, -1, dtype=int),
+        nfev=ones,
+        error=ones,
+    )
+
+
+class _FlatLikelihood(bilby.core.likelihood.Likelihood):
+    """Zero log-likelihood everywhere: the posterior is exactly the prior."""
+
+    def __init__(self):
+        super().__init__(parameters=dict(x=None, y=None))
+
+    def log_likelihood(self, parameters=None):
+        return 0.0
+
+
+def test_flat_likelihood_covariance_equals_prior(gaussian_priors, map_sample):
+    """With no likelihood information, the covariance defaults to the prior."""
+    est = LaplacePosteriorEstimator(_FlatLikelihood(), gaussian_priors)
+    cov = est.calculate_posterior_covariance({"x": 0.0, "y": 0.0})
+    assert np.all(np.isfinite(cov))
+    # Uniform prior is uncorrelated with variance width**2 / 12 per parameter.
+    np.testing.assert_allclose(np.diag(cov), [PRIOR_VARIANCE, PRIOR_VARIANCE], rtol=1e-6)
+    np.testing.assert_allclose(cov[0, 1], 0.0, atol=1e-6)
+
+
+def test_indefinite_hessian_yields_bounded_pd_covariance(estimator, map_sample, monkeypatch):
+    """An indefinite Hessian (a negative-curvature direction) must not blow up.
+
+    The convex direction has negative precision; before the floor it produced a
+    huge (or negative) variance.  It should now fall back to the prior variance,
+    and the covariance must stay positive-definite.
+    """
+    # precision_u = -ddf = diag([2000, -5]); the second direction is indefinite.
+    monkeypatch.setattr(laplace_module.sd, "hessian", lambda *a, **k: _fake_hessian_result(np.diag([-2000.0, 5.0])))
+    cov = estimator.calculate_posterior_covariance(map_sample)
+    assert np.all(np.isfinite(cov))
+    assert np.all(np.linalg.eigvalsh(cov) > 0), "covariance must be positive-definite"
+    # No marginal variance may exceed the prior variance.
+    assert np.all(np.diag(cov) <= PRIOR_VARIANCE * (1 + 1e-6))
+    # The well-constrained direction stays tight; the indefinite one hits the floor.
+    assert np.diag(cov)[0] < 0.1
+    assert np.diag(cov)[1] == pytest.approx(PRIOR_VARIANCE, rel=1e-6)
+
+
+def test_nonfinite_hessian_degrades_to_prior(estimator, map_sample, monkeypatch):
+    """A non-finite Hessian (e.g. too-large step leaving the unit cube) must
+    not crash the eigendecomposition; those directions default to the prior."""
+    monkeypatch.setattr(laplace_module.sd, "hessian", lambda *a, **k: _fake_hessian_result(np.full((2, 2), np.nan)))
+    cov = estimator.calculate_posterior_covariance(map_sample)
+    assert np.all(np.isfinite(cov))
+    assert np.all(np.linalg.eigvalsh(cov) > 0)
+    np.testing.assert_allclose(np.diag(cov), [PRIOR_VARIANCE, PRIOR_VARIANCE], rtol=1e-6)
+
+
+@pytest.mark.parametrize("maxiter", [5, 10, 40])
+def test_covariance_robust_to_hessian_maxiter(gaussian_likelihood, gaussian_priors, map_sample, maxiter):
+    """Recovery must not depend on the Hessian refinement depth.
+
+    Over-refining the finite-difference step (large maxiter) once drove the step
+    into the numerical-noise floor and inflated the covariance ~250x.  The
+    result must now stay both bounded by the prior and close to the truth
+    regardless of maxiter.
+    """
+    est = LaplacePosteriorEstimator(gaussian_likelihood, gaussian_priors, hessian_kwargs={"maxiter": maxiter})
+    cov = est.calculate_posterior_covariance(map_sample)
+    assert np.all(np.diag(cov) <= PRIOR_VARIANCE * (1 + 1e-6))
+    np.testing.assert_allclose(cov, TRUE_COV, atol=5e-3)
 
 
 # ---------------------------------------------------------------------------
