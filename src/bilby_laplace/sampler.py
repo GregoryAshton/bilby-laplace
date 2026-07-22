@@ -236,10 +236,16 @@ class Laplace(Sampler):
         ``n_initial_samples`` : int
             Number of initial samples drawn from the Laplace proposal and
             passed to ``aspire.fit()`` (default 1000).
-        ``n_final_samples`` : int
-            Number of output samples requested from
-            ``aspire.sample_posterior()``.  Defaults to ``target_nsamples``
-            if not set.
+        ``n_samples`` : int
+            Number of SMC particles, passed as the first positional argument
+            to ``aspire.sample_posterior()``.  This is *not* merely a final
+            output size: the particles are carried through every tempering
+            iteration and mutation step, so this value drives the whole cost
+            of the run (roughly, likelihood evaluations scale linearly with
+            it).  The final posterior contains this many samples.  Defaults to
+            ``target_nsamples`` if not set.  (Note: aspire also exposes a
+            distinct ``n_final_samples`` argument for a post-hoc resample to a
+            different size; pass it through ``smc_kwargs`` if you need it.)
 
         Any other keys are forwarded directly to
         ``aspire.Aspire.sample_posterior()``, so all aspire parameters are
@@ -1063,7 +1069,15 @@ class Laplace(Sampler):
         if self.kwargs["plot_diagnostic"]:
             self.create_smc_diagnostic(samples, proposal_flow)
 
-        return samples, logl, samples, 100.0, smc_log_z, smc_log_z_err, nlikelihood
+        # Report efficiency on the same footing as the other resampling modes:
+        # final samples per likelihood evaluation.  Unlike rejection/importance,
+        # SMC always returns exactly the requested number of samples, so the
+        # ratio of output samples to proposal draws is meaningless (always 1);
+        # dividing by the *true* internal likelihood-evaluation count instead
+        # makes this an apples-to-apples cost metric.
+        efficiency = 100.0 * len(samples) / nlikelihood if nlikelihood else np.nan
+
+        return samples, logl, samples, efficiency, smc_log_z, smc_log_z_err, nlikelihood
 
     def _compute_ln_ratios(self, x, g_df, proposal, estimator):
         """Compute log[L(x)π(x)/g(x)] for a batch of proposal samples.
@@ -1445,7 +1459,11 @@ class Laplace(Sampler):
         smc_kw = dict(self.kwargs.get("smc_kwargs") or {})
         sampler_type = smc_kw.pop("sampler", "importance")
         n_initial = smc_kw.pop("n_initial_samples", 1000)
-        n_final = smc_kw.pop("n_final_samples", self.kwargs["target_nsamples"])
+        # ``n_samples`` is aspire's SMC *particle count*: it is carried through
+        # every tempering iteration and mutation step, so it drives the whole
+        # cost of the run (not merely the size of a final draw).  It maps to the
+        # first positional argument of ``sample_posterior``.
+        n_samples = smc_kw.pop("n_samples", self.kwargs["target_nsamples"])
 
         # Draw initial samples filtered to the prior support, consistent with
         # the inprior/rejection sampling paths.
@@ -1485,7 +1503,7 @@ class Laplace(Sampler):
 
         logger.info(f"Starting Aspire sampling (sampler: {sampler_type})")
         result, self._smc_history = aspire_sampler.sample_posterior(
-            n_final, sampler=sampler_type, return_history=True, **smc_kw
+            n_samples, sampler=sampler_type, return_history=True, **smc_kw
         )
 
         x_out = np.asarray(result.x)
