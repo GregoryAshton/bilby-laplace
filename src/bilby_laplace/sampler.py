@@ -163,8 +163,27 @@ class Laplace(Sampler):
         the legacy multi-start local optimizer.
     plot_diagnostic : bool
         If True, produce a corner diagnostic plot after resampling.
-    cov_scaling : float
-        Multiplicative scale applied to the Laplace covariance.
+    cov_scaling : float or dict
+        Multiplicative scale applied to the Laplace covariance. Each value
+        multiplies the corresponding parameter's *variance* (so a value of 4
+        widens that parameter's marginal sigma by 2x).
+
+        - A scalar (default 1) scales the whole covariance uniformly, i.e.
+          ``cov -> cov_scaling * cov``.
+        - A dict mapping parameter names to scales applies a per-parameter
+          variance scale, e.g. ``{'chirp_mass': 4.0, 'luminosity_distance': 9.0}``.
+          The reserved key ``'others'`` sets the scale for every parameter not
+          listed explicitly (default 1.0), e.g. ``{'chirp_mass': 4.0, 'others': 2.0}``
+          scales chirp_mass by 4 and all remaining parameters by 2. Unknown
+          names raise an error.
+
+        Off-diagonal entries scale by the geometric mean ``sqrt(v_i * v_j)`` so
+        correlations and positive-definiteness are preserved; a uniform dict
+        reproduces the scalar behaviour exactly.
+
+        Applied *after* the eigenvalue-based covariance validation, so the
+        requested scale is authoritative: validation repairs the estimated
+        covariance, then this scaling is the final word on the proposal width.
     sampling_cov : pd.DataFrame, tuple, or None
         Pre-computed covariance to use in place of the Laplace-estimated
         covariance. Must be one of:
@@ -607,6 +626,57 @@ class Laplace(Sampler):
 
         return C
 
+    #: Reserved dict key setting the scale for parameters not listed explicitly.
+    _COV_SCALING_OTHERS_KEY = "others"
+
+    def _resolve_cov_scaling(self, cov_scaling, parameter_names):
+        """Normalize ``cov_scaling`` to a per-parameter variance-scale vector.
+
+        Accepts either a scalar (applied to every parameter) or a dict mapping
+        parameter names to scales.  Returns an ``(N,)`` ndarray of variance
+        multipliers ordered by ``parameter_names``.
+
+        A dict may include the reserved key ``"others"`` to set the scale for
+        every parameter not listed explicitly (default ``1.0``); this is not
+        treated as a parameter name.
+
+        Each value multiplies the corresponding parameter's *variance*, matching
+        the historical scalar behaviour (which multiplied the covariance
+        matrix); see ``_apply_cov_scaling`` for how off-diagonal terms follow.
+        All values must be finite and strictly positive; unknown dict keys raise
+        ``ValueError`` so typos surface immediately.
+        """
+        n = len(parameter_names)
+        if isinstance(cov_scaling, dict):
+            others_key = self._COV_SCALING_OTHERS_KEY
+            default = float(cov_scaling.get(others_key, 1.0))
+            expected = set(parameter_names)
+            extra = sorted(set(cov_scaling) - expected - {others_key})
+            if extra:
+                raise ValueError(f"cov_scaling contains unknown parameter(s) not in the model: {extra}")
+            v = np.array([float(cov_scaling.get(name, default)) for name in parameter_names], dtype=float)
+            defaulted = [name for name in parameter_names if name not in cov_scaling]
+            if defaulted:
+                logger.info(f"cov_scaling applying {others_key}={default} to unspecified parameter(s): {defaulted}")
+        else:
+            v = np.full(n, float(cov_scaling), dtype=float)
+
+        if not np.all(np.isfinite(v)) or np.any(v <= 0):
+            raise ValueError(f"cov_scaling values must be finite and strictly positive; got {v.tolist()}.")
+        return v
+
+    @staticmethod
+    def _apply_cov_scaling(covariance, cov_scaling_vec):
+        """Apply a per-parameter variance scaling to a covariance matrix.
+
+        With ``D = diag(sqrt(v))`` this returns ``D @ C @ D``, so the diagonal
+        variances scale by ``v`` while off-diagonal entries scale by
+        ``sqrt(v_i * v_j)``.  This preserves the correlation structure and
+        positive-definiteness, and reduces to ``s * C`` when every ``v_i == s``.
+        """
+        s = np.sqrt(np.asarray(cov_scaling_vec, dtype=float))
+        return np.outer(s, s) * np.asarray(covariance, dtype=float)
+
     def _replace_with_prior_samples(self, samples, parameter_names):
         """Replace specified parameters with draws from the prior.
 
@@ -652,7 +722,6 @@ class Laplace(Sampler):
     @signal_wrapper
     def run_sampler(self):
         self.start_time = datetime.datetime.now()
-        cov_scaling = self.kwargs["cov_scaling"]
 
         # Checkpoint scaffolding.  resume_file is the on-disk location; the
         # in-memory _checkpoint_state holds whatever the signal handler / the
@@ -677,6 +746,7 @@ class Laplace(Sampler):
         # Validate any user-provided sampling covariance up-front (before the
         # MAP search) so naming/shape errors surface immediately.
         user_cov = self._resolve_sampling_cov(self.kwargs["sampling_cov"], estimator.parameter_names)
+        cov_scaling = self._resolve_cov_scaling(self.kwargs["cov_scaling"], estimator.parameter_names)
         if user_cov is not None and self.kwargs["n_modes"] > 1:
             raise SamplerError(
                 "sampling_cov cannot be combined with n_modes > 1; "
@@ -725,8 +795,13 @@ class Laplace(Sampler):
                 covariance = user_cov
             else:
                 covariance = estimator.calculate_posterior_covariance(map_sample_dict)
-            cov = cov_scaling * covariance
-            cov = self._validate_covariance(estimator, mean, cov)
+            # Validate (repair) the *estimated* covariance first, then apply the
+            # user's cov_scaling last so it is authoritative.  Validation
+            # re-derives widths from the likelihood curvature, so scaling before
+            # it lets validation silently override the requested scale for
+            # poorly-estimated parameters.
+            cov = self._validate_covariance(estimator, mean, covariance)
+            cov = self._apply_cov_scaling(cov, cov_scaling)
 
         msg = "Gaussian proposal (MAP +/- 1-sigma):\n " + "\n ".join(
             f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}" for (key, val), var in zip(map_sample_dict.items(), np.diag(cov))
@@ -1950,8 +2025,9 @@ class Laplace(Sampler):
 
         try:
             covariance = estimator.calculate_posterior_covariance(best_dict)
-            cov = cov_scaling * covariance
-            cov = self._validate_covariance(estimator, best_mean, cov)
+            # Validate first, then scale last (see run_sampler for rationale).
+            cov = self._validate_covariance(estimator, best_mean, covariance)
+            cov = self._apply_cov_scaling(cov, cov_scaling)
             std_scale = np.sqrt(np.diag(cov))
         except Exception as exc:
             raise SamplerError(f"Covariance estimation failed for primary mode: {exc}")
@@ -2007,8 +2083,9 @@ class Laplace(Sampler):
             try:
                 p_dict = dict(zip(parameter_names, p_mean))
                 p_covariance = estimator.calculate_posterior_covariance(p_dict)
-                p_cov = cov_scaling * p_covariance
-                p_cov = self._validate_covariance(estimator, p_mean, p_cov)
+                # Validate first, then scale last (see run_sampler for rationale).
+                p_cov = self._validate_covariance(estimator, p_mean, p_covariance)
+                p_cov = self._apply_cov_scaling(p_cov, cov_scaling)
                 found_modes.append((p_mean, p_cov, p_logp))
                 logger.info(f"Secondary mode {len(found_modes) - 1} " f"found: log-posterior = {p_logp:.2f}")
             except Exception as exc:

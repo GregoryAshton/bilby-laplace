@@ -115,7 +115,7 @@ bounded at prior width rather than left arbitrarily wide.
 
 | Option | Effect |
 |---|---|
-| `cov_scaling` | Multiplies the covariance. Increase (`>1`) to widen the proposal when acceptance is low or the posterior is wider than the Gaussian predicts. |
+| `cov_scaling` | Multiplies the covariance (each value scales a parameter's *variance*, so `4` widens its sigma by `2x`). Pass a scalar to scale everything uniformly, or a dict like `{'chirp_mass': 4.0}` for per-parameter scaling (unlisted parameters default to `1.0`, or use the reserved `'others'` key to set that default, e.g. `{'chirp_mass': 4.0, 'others': 2.0}`). Off-diagonal terms scale by `sqrt(v_i*v_j)`, preserving correlations. Increase to widen the proposal when acceptance is low or the posterior is wider than the Gaussian predicts. |
 | `sampling_cov` | Bypass estimation entirely and supply a precomputed covariance (see below). |
 | `jacobian_cap_scale` | (Hessian unit-cube path) Caps the Jacobian for prior-dominated parameters; values `<1` widen the proposal for those parameters. |
 | `prior_parameters` | Replace the proposal for listed parameters with independent prior draws — for parameters whose posterior is essentially the prior and which the Hessian constrains poorly. |
