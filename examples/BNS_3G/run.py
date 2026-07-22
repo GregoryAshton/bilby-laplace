@@ -294,7 +294,7 @@ def run_smc(_common_laplace, run_prefix):
         smc_kwargs=dict(
             sampler="minipcn_smc",
             n_initial_samples=1000,
-            n_final_samples=5000,
+            n_samples=5000,
             adaptive=True,
             sampler_kwargs=dict(
                 n_steps=10,

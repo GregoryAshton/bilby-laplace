@@ -40,7 +40,7 @@ result = bilby.run_sampler(
     smc_kwargs=dict(
         sampler="importance",      # aspire posterior sampler
         n_initial_samples=1000,    # drawn from the Laplace proposal, passed to fit()
-        n_final_samples=5000,      # output samples requested
+        n_samples=5000,            # SMC particle count (drives cost; = size of final posterior)
     ),
 )
 ```

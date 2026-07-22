@@ -59,13 +59,23 @@ def colours_for_results(results):
 def _prettify_method(method):
     """Turn a method token like ``"rejection_user"`` into ``"Rejection user"``.
 
-    ``"smc"`` is upper-cased as an acronym; other tokens are capitalised.
+    ``"smc"`` is upper-cased as an acronym; ``"inprior"`` becomes
+    ``"Laplace in-prior"`` (it is the Laplace approximation drawn within the
+    prior support); other tokens are capitalised.
     """
     text = method.replace("_", " ").strip()
     if not text:
         return method
-    words = [("SMC" if w.lower() == "smc" else w.capitalize()) for w in text.split()]
-    return " ".join(words)
+
+    def _word(w):
+        lw = w.lower()
+        if lw == "smc":
+            return "SMC"
+        if lw == "inprior":
+            return "Laplace in-prior"
+        return w.capitalize()
+
+    return " ".join(_word(w) for w in text.split())
 
 
 def _format_duration(secs):
@@ -75,6 +85,21 @@ def _format_duration(secs):
     if secs >= 60:
         return f" ({secs / 60:.1f} min)"
     return f" ({secs:.0f} s)"
+
+
+def _format_efficiency(eff):
+    """Format an efficiency percentage without collapsing small values to 0.
+
+    A fixed single decimal (``{:.1f}%``) rounds anything below 0.05% to
+    ``0.0%``, making a genuinely tiny-but-nonzero efficiency indistinguishable
+    from an exact zero.  Below 0.1% we switch to two significant figures (e.g.
+    ``0.0034%``) so the value stays visible; a true zero still prints ``0.0%``.
+    """
+    if eff <= 0:
+        return "0.0%"
+    if eff < 0.1:
+        return f"{eff:.2g}%"
+    return f"{eff:.1f}%"
 
 
 def sampler_labels(results):
@@ -199,10 +224,20 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
         secs = r.sampling_time.total_seconds()
         run_stats = r.meta_data.get("run_statistics", {})
         n_like = run_stats.get("nlikelihood", np.nan)
+        # The Laplace sampler records its own "efficiency" (final samples per
+        # likelihood evaluation).  Other samplers (e.g. dynesty) don't, but
+        # bilby stores nlikelihood and neffsamples, so we reconstruct the same
+        # quantity: effective independent samples per likelihood evaluation.
+        # For the Laplace family the draws are iid, so neff ~= n and the two
+        # definitions coincide.
         eff = run_stats.get("efficiency", np.nan)
+        if not np.isfinite(eff):
+            neff = run_stats.get("neffsamples", np.nan)
+            if np.isfinite(neff) and np.isfinite(n_like) and n_like:
+                eff = 100.0 * neff / n_like
         name = os.path.basename(r.label)
         n_like_str = f"{int(n_like):>8}" if np.isfinite(n_like) else f"{'—':>8}"
-        eff_str = f"{eff:>7.1f}%" if np.isfinite(eff) else f"{'—':>8}"
+        eff_str = f"{_format_efficiency(eff):>8}" if np.isfinite(eff) else f"{'—':>8}"
         print(f"{name:<20} {log_z:>10.2f} {log_z_err:>8.2f} {n_like_str} {eff_str} {secs:>9.1f}s")
     print("=" * W + "\n")
 

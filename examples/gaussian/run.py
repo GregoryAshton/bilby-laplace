@@ -61,8 +61,8 @@ def setup():
 
     priors = bilby.core.prior.PriorDict(
         dict(
-            x=bilby.core.prior.Uniform(-5, 5, "x"),
-            y=bilby.core.prior.Uniform(-5, 5, "y"),
+            x=bilby.core.prior.Uniform(-5, 5, "$x$"),
+            y=bilby.core.prior.Uniform(-5, 5, "$y$"),
         )
     )
 
@@ -128,7 +128,7 @@ def run_smc(_common_laplace):
         smc_kwargs=dict(
             sampler="minipcn_smc",
             n_initial_samples=10000,
-            n_final_samples=5000,
+            n_samples=5000,
             target_efficiency=[0.5, 0.8],
             adaptive=True,
             sampler_kwargs=dict(
