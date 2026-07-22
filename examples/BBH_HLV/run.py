@@ -158,10 +158,10 @@ def setup():
         plot_diagnostic=True,
         clean=True,
         sampler="laplace",
-        target_nsamples=1000,
+        target_nsamples=5000,
         use_unit_cube=True,
         fisher_method="waveform",
-        npool=8,
+        npool=1,
     )
 
     return _common, _common_laplace
@@ -233,8 +233,8 @@ def compare():
     """Load all result files in outdir, make comparison corner plots,
     and print a comparison table. Custom to HLV example for intrinsic/extrinsic plots."""
     pattern = f"{outdir}/{base_label}_*_result.*"
-    full_filename = f"{outdir}/{base_label}_comparison.png"
-    results, labels = compare_results(pattern, full_filename)
+    full_filename = f"{base_label}_comparison.png"
+    results, labels = compare_results(pattern, full_filename, sampler_only_labels=True)
     if len(results) < 2:
         return
 
@@ -260,7 +260,7 @@ def compare():
     inj = getattr(results[0], "injection_parameters", None)
 
     for suffix, parameters in plot_sets:
-        filename = f"{outdir}/{base_label}_{suffix}.png"
+        filename = f"{base_label}_{suffix}.png"
         try:
             fig = bilby.core.result.plot_multiple(
                 results,

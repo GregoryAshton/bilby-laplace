@@ -35,6 +35,11 @@ from bilby_laplace.comparison import overlay_injection_lines
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
 
+# Base name for comparison-plot filenames. Kept separate from the per-run label
+# prefix (the likelihood type, e.g. "rb-laplace") so the comparison plots have a
+# stable name regardless of which likelihood was run.
+base_label = "bns"
+
 
 def setup(likelihood_type="rb"):
     """Set up detectors, likelihood, priors, and sampler configuration.
@@ -47,7 +52,7 @@ def setup(likelihood_type="rb"):
         "mb" uses MBGravitationalWaveTransient (multi-banding).
     """
     outdir = "outdir_bns_example"
-    base_label = likelihood_type
+    run_prefix = likelihood_type
 
     # Injection parameters
     injection_parameters = dict(
@@ -250,7 +255,7 @@ def setup(likelihood_type="rb"):
         use_unit_cube=True,
     )
 
-    return _common, _common_laplace, outdir, base_label
+    return _common, _common_laplace, outdir, run_prefix
 
 
 # ---------------------------------------------------------------------------
@@ -258,20 +263,20 @@ def setup(likelihood_type="rb"):
 # ---------------------------------------------------------------------------
 
 
-def run_laplace(_common_laplace, base_label):
+def run_laplace(_common_laplace, run_prefix):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}-laplace",
+        label=f"{run_prefix}-laplace",
         resample="inprior",
         cov_scaling=1,
         jacobian_cap_scale=1,
     )
 
 
-def run_rejection(_common_laplace, base_label):
+def run_rejection(_common_laplace, run_prefix):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}-rejection",
+        label=f"{run_prefix}-rejection",
         resample="rejection",
         cov_scaling=1,
         jacobian_cap_scale=1,
@@ -281,10 +286,10 @@ def run_rejection(_common_laplace, base_label):
     )
 
 
-def run_smc(_common_laplace, base_label):
+def run_smc(_common_laplace, run_prefix):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}-smc",
+        label=f"{run_prefix}-smc",
         resample="smc",
         smc_kwargs=dict(
             sampler="minipcn_smc",
@@ -304,11 +309,11 @@ def run_smc(_common_laplace, base_label):
     )
 
 
-def run_dynesty(_common, base_label):
+def run_dynesty(_common, run_prefix):
     return bilby.run_sampler(
         **_common,
         sampler="dynesty",
-        label=f"{base_label}-dynesty",
+        label=f"{run_prefix}-dynesty",
         nlive=1000,
         dlogz=0.1,
         check_point_delta_t=1800,
@@ -319,11 +324,11 @@ def run_dynesty(_common, base_label):
     )
 
 
-def compare(outdir, base_label):
+def compare(outdir):
     """Load all result files, make comparison corner plots, and print comparison table."""
     pattern = f"{outdir}/*_result.*"
-    sampling_parameter_filename = "comparison_sampling_parameters.png"
-    results, labels = compare_results(pattern, sampling_parameter_filename)
+    full_filename = f"{base_label}_comparison.png"
+    results, labels = compare_results(pattern, full_filename, sampler_only_labels=True)
 
     # Custom plotting for this example
     import matplotlib.pyplot as plt
@@ -347,7 +352,7 @@ def compare(outdir, base_label):
     inj = getattr(results[0], "injection_parameters", None)
 
     for suffix, parameters in plot_sets:
-        filename = f"comparison_{suffix}.png"
+        filename = f"{base_label}_{suffix}.png"
         # Check if the parameters are sampled
         plot_parameters = []
         for p in parameters:
@@ -407,22 +412,21 @@ if __name__ == "__main__":
         parser.print_help()
     else:
         _outdir = "outdir_bns_example"
-        _base_label = "BNS_3G"
 
         if args.sampler:
             if args.likelihood is None:
                 parser.error("--likelihood is required when running samplers")
-            _common, _common_laplace, _outdir, _base_label = setup(args.likelihood)
+            _common, _common_laplace, _outdir, _run_prefix = setup(args.likelihood)
 
             _run_fns = {
-                "laplace": lambda: run_laplace(_common_laplace, _base_label),
-                "rejection": lambda: run_rejection(_common_laplace, _base_label),
-                "smc": lambda: run_smc(_common_laplace, _base_label),
-                "dynesty": lambda: run_dynesty(_common, _base_label),
+                "laplace": lambda: run_laplace(_common_laplace, _run_prefix),
+                "rejection": lambda: run_rejection(_common_laplace, _run_prefix),
+                "smc": lambda: run_smc(_common_laplace, _run_prefix),
+                "dynesty": lambda: run_dynesty(_common, _run_prefix),
             }
 
             for name in args.sampler:
                 _run_fns[name]()
 
         if args.compare:
-            compare(_outdir, _base_label)
+            compare(_outdir)
