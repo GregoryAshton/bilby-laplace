@@ -157,11 +157,12 @@ def setup():
         use_injection_for_map=True,
         plot_diagnostic=True,
         clean=True,
+        resume=False,
         sampler="laplace",
         target_nsamples=5000,
         use_unit_cube=True,
         fisher_method="waveform",
-        npool=1,
+        npool=8,
     )
 
     return _common, _common_laplace
@@ -187,10 +188,11 @@ def run_rejection(_common_laplace):
         **_common_laplace,
         label=f"{base_label}_rejection",
         resample="rejection",
-        cov_scaling=2,
+        cov_scaling=dict(others=1, chi_1=5, chi_2=5),
         jacobian_cap_scale=1,
-        max_iterations=1000000,
+        max_iterations=10000000,
         batch_nsamples=10000,
+        check_point_delta_t=120,
     )
 
 
@@ -201,7 +203,7 @@ def run_smc(_common_laplace):
         resample="smc",
         smc_kwargs=dict(
             sampler="minipcn_smc",
-            n_initial_samples=1000,
+            n_initial_samples=10000,
             n_samples=5000,
             adaptive=True,
             sampler_kwargs=dict(
@@ -212,6 +214,7 @@ def run_smc(_common_laplace):
         ),
         cov_scaling=1,
         jacobian_cap_scale=1,
+        prior_parameters=["chi_1", "chi_2"],
     )
 
 
@@ -223,7 +226,7 @@ def run_dynesty(_common):
         nlive=1000,
         check_point_delta_t=1800,
         check_point_plot=True,
-        npool=1,
+        npool=8,
         clean=False,
         resume=True,
     )

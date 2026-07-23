@@ -45,6 +45,9 @@ class TruncatedMVNProposal:
 
     def __init__(self, mean, cov, lower, upper):
         self.mean = mean
+        # Retained for diagnostics only; sampling uses the per-marginal
+        # ``_sigma`` below, not the full covariance.
+        self.cov = cov
         self._sigma = np.sqrt(np.diag(cov))
         self._ndim = len(mean)
         # Standardised bounds for truncnorm: a = (lo - μ)/σ, b = (hi - μ)/σ
@@ -374,6 +377,11 @@ class Laplace(Sampler):
             "fail_on_error",
             "smc_progress",
             "max_iterations",
+            # Operational parallelism kwargs.  bilby's `_setup_pool` stashes the
+            # live multiprocessing pool into `self.kwargs["pool"]`, which cannot
+            # be pickled; the worker count is likewise not part of the run identity.
+            "pool",
+            "npool",
         }
     )
 
@@ -424,6 +432,25 @@ class Laplace(Sampler):
         if now - self._last_save_t > delta_t:
             self.write_current_state()
             self._last_save_t = now
+
+    def _maybe_periodic_rejection_diagnostic(self, proposal, accepted, rejected, parameter_names):
+        """Re-render the live rejection progress plot every `check_point_delta_t` seconds.
+
+        Overlays the accepted samples (foreground) on the rejected proposal
+        draws (background) so the acceptance structure can be watched as the
+        run progresses.  Failures are logged but never interrupt sampling.
+        """
+        delta_t = float(self.kwargs.get("check_point_delta_t") or 0)
+        if delta_t <= 0:
+            return
+        now = time.time()
+        if now - self._last_diagnostic_t <= delta_t:
+            return
+        self._last_diagnostic_t = now
+        try:
+            self.create_rejection_progress_diagnostic(proposal.mean, proposal.cov, parameter_names, accepted, rejected)
+        except Exception as e:  # a diagnostic must never crash the run
+            logger.warning(f"Failed to create rejection progress diagnostic plot: {e}")
 
     def write_current_state(self):
         """Snapshot the current sampler state to the resume file.
@@ -729,6 +756,9 @@ class Laplace(Sampler):
         self.resume_file = f"{self.outdir}/{self.label}_resume.pickle"
         self._checkpoint_state = None
         self._last_save_t = time.time()
+        # Throttles the live rejection-sampling progress diagnostic, which is
+        # re-rendered on the same wall-clock cadence as the checkpoint.
+        self._last_diagnostic_t = time.time()
 
         estimator = LaplacePosteriorEstimator(
             likelihood=self.likelihood,
@@ -1259,6 +1289,11 @@ class Laplace(Sampler):
 
         pbar = tqdm.tqdm(total=target_nsamples, desc="Rejection sampling", file=sys.stdout)
 
+        # In-memory-only accumulator of rejected draws for the live progress
+        # diagnostic.  Deliberately not checkpointed (it would bloat the resume
+        # file); on resume it simply rebuilds from freshly-drawn batches.
+        all_rejected = []
+
         while n_accepted < target_nsamples:
             if self._check_iteration_limit("Rejection sampling", n_proposed, n_accepted):
                 pbar.close()
@@ -1295,6 +1330,8 @@ class Laplace(Sampler):
             all_logl.append(logl[accepted])
             all_g_samples.append(g_df)
             all_ln_r.append(ln_r)
+            if self.kwargs["plot_diagnostic"]:
+                all_rejected.append(g_df[~accepted].reset_index(drop=True))
 
             # Update the checkpoint payload after each batch, then optionally
             # save it (throttled by check_point_delta_t).  A signal handler can
@@ -1305,6 +1342,14 @@ class Laplace(Sampler):
                 n_bound_violations=n_bound_violations,
             )
             self._maybe_periodic_checkpoint()
+
+            if self.kwargs["plot_diagnostic"] and all_samples:
+                self._maybe_periodic_rejection_diagnostic(
+                    proposal,
+                    pd.concat(all_samples, ignore_index=True),
+                    pd.concat(all_rejected, ignore_index=True) if all_rejected else None,
+                    estimator.parameter_names,
+                )
 
         pbar.close()
 
@@ -2290,6 +2335,161 @@ class Laplace(Sampler):
         fig.suptitle("Gaussian proposal: initial samples, injection, and MAP")
 
         filename = f"{self.outdir}/{self.label}_diagnostic_proposal.png"
+        safe_save_figure(fig=fig, filename=filename, dpi=150)
+        plt.close(fig)
+        return fig
+
+    def create_rejection_progress_diagnostic(self, mean, cov, parameter_names, accepted, rejected=None):
+        """Live corner-style diagnostic for the rejection-sampling loop.
+
+        Rendered periodically while rejection sampling runs (see
+        ``_maybe_periodic_rejection_diagnostic``).  Rejected proposal draws are
+        shown as a faint background cloud, with the accepted samples drawn on
+        top (higher ``zorder`` and opacity) so their distribution stands out
+        clearly against the rejected draws.  The Gaussian proposal, MAP, and
+        injection (if available) are overlaid for reference.
+
+        Parameters
+        ----------
+        mean : array
+            MAP estimate (mean of the proposal).
+        cov : array
+            Covariance matrix of the proposal.
+        parameter_names : list
+            Names of the parameters.
+        accepted : pandas.DataFrame
+            Accepted samples accumulated so far.
+        rejected : pandas.DataFrame, optional
+            Rejected proposal draws accumulated so far.
+        """
+        import matplotlib.lines as mpllines
+        import matplotlib.pyplot as plt
+        from scipy.stats import norm
+
+        labels = [k.replace("_", " ") for k in parameter_names]
+        ndim = len(parameter_names)
+        sigmas = np.sqrt(np.diag(cov))
+        ranges = [(self.priors[k].minimum, self.priors[k].maximum) for k in parameter_names]
+
+        acc = accepted[list(parameter_names)].values
+        rej = rejected[list(parameter_names)].values if rejected is not None and len(rejected) else None
+
+        rej_color, acc_color, g_color, g_ls = "0.6", "C0", "k", "--"
+
+        panel_size = 2.5
+        fig, axes = plt.subplots(
+            ndim,
+            ndim,
+            figsize=(panel_size * ndim, panel_size * ndim),
+            squeeze=False,
+        )
+
+        injection_array = None
+        if self.injection_parameters:
+            injection_array = np.array([self.injection_parameters.get(k, np.nan) for k in parameter_names])
+
+        for row in range(ndim):
+            for col in range(ndim):
+                ax = axes[row, col]
+                if col > row:
+                    ax.set_visible(False)
+                    continue
+
+                if row == col:
+                    lo, hi = ranges[row]
+                    bins = np.linspace(lo, hi, 50)
+                    if rej is not None:
+                        ax.hist(rej[:, row], bins=bins, density=True, color=rej_color, alpha=0.4, zorder=1)
+                    ax.hist(acc[:, row], bins=bins, density=True, histtype="step", color=acc_color, lw=1.5, zorder=3)
+                    xs = np.linspace(lo, hi, 300)
+                    ys = norm.pdf(xs, loc=mean[row], scale=sigmas[row])
+                    ax.plot(xs, ys, color=g_color, lw=1.5, ls=g_ls, zorder=4)
+                    ax.axvline(mean[row], color="C1", lw=1.2, ls=":", zorder=5)
+                    if injection_array is not None and np.isfinite(injection_array[row]):
+                        ax.axvline(injection_array[row], color="C2", lw=1.2, ls=":", zorder=5)
+                    ax.set_xlim(lo, hi)
+                    ax.set_yticklabels([])
+                else:
+                    # Rejected draws first (background), accepted on top.
+                    if rej is not None:
+                        ax.scatter(
+                            rej[:, col],
+                            rej[:, row],
+                            s=2,
+                            alpha=0.05,
+                            color=rej_color,
+                            zorder=1,
+                            rasterized=True,
+                        )
+                    ax.scatter(
+                        acc[:, col],
+                        acc[:, row],
+                        s=3,
+                        alpha=0.5,
+                        color=acc_color,
+                        zorder=3,
+                        rasterized=True,
+                    )
+
+                    # Gaussian proposal 1-sigma / 2-sigma contours.
+                    x_lo, x_hi = ranges[col]
+                    y_lo, y_hi = ranges[row]
+                    X, Y = np.meshgrid(np.linspace(x_lo, x_hi, 60), np.linspace(y_lo, y_hi, 60))
+                    sub_mean = mean[[col, row]]
+                    sub_cov = cov[np.ix_([col, row], [col, row])]
+                    try:
+                        Z = multivariate_normal(mean=sub_mean, cov=sub_cov).pdf(np.dstack([X, Y]))
+                        if Z.max() > 0:
+                            ax.contour(
+                                X,
+                                Y,
+                                Z,
+                                levels=[Z.max() * np.exp(-2), Z.max() * np.exp(-0.5)],
+                                colors=g_color,
+                                linestyles=[g_ls],
+                                alpha=0.8,
+                                zorder=4,
+                            )
+                    except Exception:
+                        pass
+                    ax.scatter([mean[col]], [mean[row]], color="C1", marker="s", s=40, zorder=5)
+                    if injection_array is not None and np.isfinite(injection_array[[col, row]]).all():
+                        ax.scatter(
+                            [injection_array[col]],
+                            [injection_array[row]],
+                            color="C2",
+                            marker="x",
+                            s=60,
+                            lw=1.5,
+                            zorder=6,
+                        )
+                    ax.set_xlim(x_lo, x_hi)
+                    ax.set_ylim(y_lo, y_hi)
+
+                if row == ndim - 1:
+                    ax.set_xlabel(labels[col])
+                else:
+                    ax.set_xticklabels([])
+                if col == 0 and row != 0:
+                    ax.set_ylabel(labels[row])
+                elif col != 0:
+                    ax.set_yticklabels([])
+
+        legend_handles = [
+            mpllines.Line2D([0], [0], color=acc_color, lw=1.5),
+            mpllines.Line2D([0], [0], marker="o", color=rej_color, lw=0, markersize=6),
+            mpllines.Line2D([0], [0], color=g_color, ls=g_ls),
+            mpllines.Line2D([0], [0], color="C1", ls=":", marker="s", markersize=8, lw=1.2),
+        ]
+        legend_labels = ["Accepted", "Rejected", "Gaussian proposal", "MAP"]
+        if injection_array is not None:
+            legend_handles.append(mpllines.Line2D([0], [0], color="C2", ls=":", marker="x", markersize=8, lw=1.2))
+            legend_labels.append("Injection")
+        axes[0, 0].legend(legend_handles, legend_labels, fontsize="small")
+
+        fig.suptitle(f"Rejection sampling progress: {len(accepted)} accepted")
+
+        filename = f"{self.outdir}/{self.label}_diagnostic_rejection_progress.png"
         safe_save_figure(fig=fig, filename=filename, dpi=150)
         plt.close(fig)
         return fig
