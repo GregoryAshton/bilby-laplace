@@ -1746,6 +1746,22 @@ class Laplace(Sampler):
         )
         plt.close(fig_stats)
 
+    def _label_for(self, name):
+        """LaTeX axis label for a parameter, taken from the prior's
+        ``latex_label`` when one is available, otherwise the parameter name
+        with underscores replaced by spaces."""
+        prior = None
+        try:
+            prior = self.priors[name]
+        except (KeyError, TypeError):
+            prior = None
+        label = getattr(prior, "latex_label", None) if prior is not None else None
+        return label if label else name.replace("_", " ")
+
+    def _labels_for(self, names):
+        """LaTeX axis labels for a sequence of parameters (see ``_label_for``)."""
+        return [self._label_for(name) for name in names]
+
     def _save_smc_evolution_marginals_figure(self, history, live_samples):
         """Overwrite the SMC evolution figure with weighted-particle scatter
         evolution (left) and weighted current 1-D marginals (right) per
@@ -1763,9 +1779,14 @@ class Laplace(Sampler):
             2,
             figsize=(11, 2.2 * n_rows),
             gridspec_kw={"width_ratios": [3, 1.5]},
-            sharex="col",
             squeeze=False,
         )
+        # Share x only within the left (iteration) column. The right-column
+        # marginals each have their own parameter scale and must autoscale
+        # independently -- sharing them collapses every marginal onto the
+        # widest parameter's range (e.g. log prior), leaving the rest blank.
+        for r in range(1, n_rows):
+            axs[r, 0].sharex(axs[0, 0])
 
         # Pre-compute per-iteration data:
         #   - (subsampled, weight-resampled) particle cloud for the sina scatter
@@ -1909,7 +1930,7 @@ class Laplace(Sampler):
                 i,
                 vals_iter,
                 x_now[:, i],
-                name.replace("_", " "),
+                self._label_for(name),
                 is_last=False,
                 true_val=true_val,
             )
@@ -1948,7 +1969,9 @@ class Laplace(Sampler):
             _plot_row(row, vals_iter, now_arr, label, is_last=is_last)
 
         fig.suptitle("SMC parameter evolution and current marginals")
-        fig.tight_layout()
+        # Reserve headroom for the suptitle; tight_layout otherwise packs the
+        # top row up against it and the title overlaps the first axis.
+        fig.tight_layout(rect=[0, 0, 1, 0.99])
         safe_save_figure(
             fig=fig,
             filename=f"{self.outdir}/{self.label}_diagnostic_smc_evolution.png",
@@ -2177,7 +2200,7 @@ class Laplace(Sampler):
         import matplotlib.pyplot as plt
         from scipy.stats import norm
 
-        labels = [k.replace("_", " ") for k in parameter_names]
+        labels = self._labels_for(parameter_names)
         ndim = len(parameter_names)
 
         proposal_sigmas = np.sqrt(np.diag(cov))
@@ -2366,7 +2389,7 @@ class Laplace(Sampler):
         import matplotlib.pyplot as plt
         from scipy.stats import norm
 
-        labels = [k.replace("_", " ") for k in parameter_names]
+        labels = self._labels_for(parameter_names)
         ndim = len(parameter_names)
         sigmas = np.sqrt(np.diag(cov))
         ranges = [(self.priors[k].minimum, self.priors[k].maximum) for k in parameter_names]
@@ -2500,7 +2523,7 @@ class Laplace(Sampler):
         import matplotlib.lines as mpllines
         import matplotlib.pyplot as plt
 
-        labels = [k.replace("_", " ") for k in self.search_parameter_keys]
+        labels = self._labels_for(self.search_parameter_keys)
         labels.append("weights")
 
         corner_kwargs = dict(
@@ -2583,7 +2606,7 @@ class Laplace(Sampler):
         import matplotlib.lines as mpllines
         import matplotlib.pyplot as plt
 
-        labels = [k.replace("_", " ") for k in self.search_parameter_keys]
+        labels = self._labels_for(self.search_parameter_keys)
         corner_kwargs = dict(
             bins=50,
             smooth=0.7,

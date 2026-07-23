@@ -95,12 +95,14 @@ def setup():
     # Priors
     priors = BBHPriorDict(
         dictionary=dict(
-            chirp_mass=UniformInComponentsChirpMass(name="chirp_mass", minimum=25, maximum=35, unit=r"$M_{\odot}$"),
-            mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.125, maximum=1),
+            chirp_mass=UniformInComponentsChirpMass(
+                name="chirp_mass", minimum=25, maximum=35, unit=r"$M_{\odot}$", latex_label=r"$\mathcal{M}$"
+            ),
+            mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.125, maximum=1, latex_label=r"$q$"),
             mass_1=Constraint(name="mass_1", minimum=10, maximum=80),
             mass_2=Constraint(name="mass_2", minimum=10, maximum=80),
-            chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.99)),
-            chi_2=AlignedSpin(name="chi_2", a_prior=Uniform(minimum=0, maximum=0.99)),
+            chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.99), latex_label=r"$\chi_1$"),
+            chi_2=AlignedSpin(name="chi_2", a_prior=Uniform(minimum=0, maximum=0.99), latex_label=r"$\chi_2$"),
             luminosity_distance=bilby.core.prior.PowerLaw(
                 alpha=2,
                 name="luminosity_distance",
@@ -109,9 +111,9 @@ def setup():
                 unit="Mpc",
                 latex_label=r"$d_L$",
             ),
-            theta_jn=Sine(name="theta_jn"),
-            psi=Uniform(name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic"),
-            phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic"),
+            theta_jn=Sine(name="theta_jn", latex_label=r"$\theta_{JN}$"),
+            psi=Uniform(name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic", latex_label=r"$\psi$"),
+            phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic", latex_label=r"$\phi$"),
             geocent_time=Uniform(
                 minimum=injection_parameters["geocent_time"] - 0.05,
                 maximum=injection_parameters["geocent_time"] + 0.05,
@@ -119,12 +121,13 @@ def setup():
                 latex_label=r"$t_{\rm geo}$",
                 unit="$s$",
             ),
-            zenith=Sine(name="zenith"),
+            zenith=Sine(name="zenith", latex_label=r"$\kappa$"),
             azimuth=Uniform(
                 name="azimuth",
                 minimum=0,
                 maximum=2 * np.pi,
                 boundary="periodic",
+                latex_label=r"$\epsilon$",
             ),
         )
     )
@@ -192,7 +195,6 @@ def run_rejection(_common_laplace):
         jacobian_cap_scale=1,
         max_iterations=10000000,
         batch_nsamples=10000,
-        check_point_delta_t=120,
     )
 
 

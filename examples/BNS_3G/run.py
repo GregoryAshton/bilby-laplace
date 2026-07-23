@@ -111,9 +111,9 @@ def setup(likelihood_type="rb"):
     priors = BNSPriorDict(
         dictionary=dict(
             chirp_mass=UniformInComponentsChirpMass(
-                name="chirp_mass", minimum=1.399, maximum=1.401, unit=r"$M_{\odot}$"
+                name="chirp_mass", minimum=1.399, maximum=1.401, unit=r"$M_{\odot}$", latex_label=r"$\mathcal{M}$"
             ),
-            mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.2, maximum=1.0),
+            mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.2, maximum=1.0, latex_label=r"$q$"),
             mass_1=Constraint(name="mass_1", minimum=1.0, maximum=2.8),
             mass_2=Constraint(name="mass_2", minimum=1.0, maximum=2.8),
             luminosity_distance=bilby.gw.prior.UniformSourceFrame(
@@ -123,9 +123,9 @@ def setup(likelihood_type="rb"):
                 unit="Mpc",
                 latex_label=r"$d_L$",
             ),
-            theta_jn=Sine(name="theta_jn"),
-            psi=Uniform(name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic"),
-            phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic"),
+            theta_jn=Sine(name="theta_jn", latex_label=r"$\theta_{JN}$"),
+            psi=Uniform(name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic", latex_label=r"$\psi$"),
+            phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic", latex_label=r"$\phi$"),
             geocent_time=Uniform(
                 minimum=injection_parameters["geocent_time"] - 0.01,
                 maximum=injection_parameters["geocent_time"] + 0.01,
@@ -144,10 +144,10 @@ def setup(likelihood_type="rb"):
                 name="dec",
                 latex_label=r"$\delta$",
             ),
-            chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.05)),
-            chi_2=AlignedSpin(name="chi_2", a_prior=Uniform(minimum=0, maximum=0.05)),
-            lambda_1=Uniform(name="lambda_1", minimum=0, maximum=5000),
-            lambda_2=Uniform(name="lambda_2", minimum=0, maximum=5000),
+            chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.05), latex_label=r"$\chi_1$"),
+            chi_2=AlignedSpin(name="chi_2", a_prior=Uniform(minimum=0, maximum=0.05), latex_label=r"$\chi_2$"),
+            lambda_1=Uniform(name="lambda_1", minimum=0, maximum=5000, latex_label=r"$\Lambda_1$"),
+            lambda_2=Uniform(name="lambda_2", minimum=0, maximum=5000, latex_label=r"$\Lambda_2$"),
         )
     )
 
@@ -293,7 +293,7 @@ def run_smc(_common_laplace, run_prefix):
         resample="smc",
         smc_kwargs=dict(
             sampler="minipcn_smc",
-            n_initial_samples=1000,
+            n_initial_samples=10000,
             n_samples=5000,
             adaptive=True,
             sampler_kwargs=dict(

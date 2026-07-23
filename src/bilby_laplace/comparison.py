@@ -2,6 +2,7 @@
 
 import glob
 import os
+import re
 
 import bilby
 import numpy as np
@@ -36,11 +37,13 @@ def sampler_family(label):
     """Return the sampler-family key for a result label, or ``None``.
 
     The examples label results ``"{base}_{method}"`` (e.g. ``"hlv_rejection"``,
-    ``"rosenbrock_smc"``).  Configuration variants collapse to their base
-    family -- ``"..._rejection_user"`` maps to ``"rejection"`` -- so a method
-    keeps a single colour regardless of how it was configured.
+    ``"rosenbrock_smc"``) or ``"{base}-{method}"`` (e.g. ``"rb-smc"``).
+    Configuration variants collapse to their base family --
+    ``"..._rejection_user"`` maps to ``"rejection"`` -- so a method keeps a
+    single colour regardless of how it was configured, and either ``_`` or
+    ``-`` may separate the tokens.
     """
-    tokens = os.path.basename(str(label)).lower().split("_")
+    tokens = re.split(r"[^a-z0-9]+", os.path.basename(str(label)).lower())
     for token in tokens:
         if token in SAMPLER_COLOURS:
             return token
@@ -63,7 +66,7 @@ def _prettify_method(method):
     ``"Laplace in-prior"`` (it is the Laplace approximation drawn within the
     prior support); other tokens are capitalised.
     """
-    text = method.replace("_", " ").strip()
+    text = method.replace("_", " ").replace("-", " ").strip()
     if not text:
         return method
 
@@ -114,7 +117,9 @@ def sampler_labels(results):
     names = [os.path.basename(str(r.label)) for r in results]
     if len(names) > 1:
         prefix = os.path.commonprefix(names)
-        cut = prefix.rfind("_") + 1  # 0 when there is no shared prefix
+        # Cut at the last separator (``_`` or ``-``) of the shared prefix, so
+        # both ``gaussian_rejection`` and ``rb-rejection`` drop their prefix.
+        cut = max(prefix.rfind("_"), prefix.rfind("-")) + 1  # 0 when no shared prefix
         names = [n[cut:] if len(n) > cut else n for n in names]
     return [_prettify_method(n) for n in names]
 
