@@ -20,6 +20,7 @@ from bilby.core.utils import logger
 
 DEFAULT_EPS = 1e-6
 DEFAULT_EPS_MASS = 1e-8
+DEFAULT_EPS_TIME = 1e-5
 
 # Mass parameters: waveforms are extremely sensitive to these, so a much finer
 # finite-difference step is used (following GWFish).
@@ -32,6 +33,19 @@ MASS_PARAMETERS = {
     "mass_2_source",
     "total_mass",
 }
+
+# Time parameters carry a GPS epoch (~1e9 s), so a *relative* step would be
+# hundreds of seconds -- enough to completely alias the exp(-2*pi*i*f*dt)
+# detector response and make the time derivative meaningless. They need an
+# absolute step in seconds instead.
+TIME_PARAMETERS = {"geocent_time"}
+
+
+def _is_time_parameter(name):
+    """True for GPS-epoch time parameters (``geocent_time`` and per-detector
+    ``{ifo}_time`` reference times), which require an absolute step."""
+    return name in TIME_PARAMETERS or name.endswith("_time")
+
 
 # Reduced-order likelihoods evaluate a different (approximate) inner product
 # than the full-resolution one used here, so the waveform Fisher would be
@@ -74,10 +88,18 @@ def validate_waveform_likelihood(likelihood):
         )
 
 
-def _step(name, value, eps, eps_mass):
-    """Central-difference step: relative with an absolute floor; finer for masses."""
+def _step(name, value, eps, eps_mass, eps_time):
+    """Central-difference step.
+
+    Masses use a fine relative step (waveforms are extremely sensitive to them);
+    time parameters use an absolute step in seconds (a relative step off a GPS
+    epoch would be hundreds of seconds and alias the waveform); everything else
+    uses a relative step with an absolute floor.
+    """
     if name in MASS_PARAMETERS:
         return eps_mass * max(abs(value), 1.0)
+    if _is_time_parameter(name):
+        return eps_time
     return max(eps, eps * abs(value))
 
 
@@ -87,6 +109,7 @@ def waveform_fisher_matrix(
     base_parameters,
     eps=DEFAULT_EPS,
     eps_mass=DEFAULT_EPS_MASS,
+    eps_time=DEFAULT_EPS_TIME,
 ):
     """Fisher matrix ``F_ij = sum_det Re (d_i h | d_j h)`` via central differences.
 
@@ -101,6 +124,10 @@ def waveform_fisher_matrix(
         any fixed/derived parameters the waveform and projection require.
     eps, eps_mass : float
         Relative finite-difference steps (mass parameters use ``eps_mass``).
+    eps_time : float
+        Absolute finite-difference step, in seconds, for time parameters
+        (``geocent_time`` and per-detector ``{ifo}_time``). A relative step is
+        unusable here because the value is a GPS epoch (~1e9 s).
 
     Returns
     -------
@@ -134,7 +161,7 @@ def waveform_fisher_matrix(
     derivs = {ifo.name: [] for ifo in ifos}
     for name in names:
         value = float(base_parameters[name])
-        dp = _step(name, value, eps, eps_mass)
+        dp = _step(name, value, eps, eps_mass, eps_time)
         plus = dict(base_parameters)
         plus[name] = value + 0.5 * dp
         minus = dict(base_parameters)

@@ -137,9 +137,22 @@ def test_jacobian_diag_uniform(estimator):
 
 
 def test_jacobian_diag_boundary_nudges(estimator):
-    """On the prior boundary (p=0) the value is nudged inward, not raised."""
-    j = estimator._jacobian_diag(np.array([PRIOR_MAX, 0.0]))
+    """Just outside the prior (p=0) the value is nudged inward, not raised.
+
+    The input must be strictly outside the bound: ``Uniform(-5, 5).prob(5.0)``
+    is 0.1 (boundary inclusive), so ``PRIOR_MAX`` itself never triggers the
+    nudge branch.  A value a hair past the edge has ``p == 0`` initially, so a
+    finite Jacobian here is only possible if the nudge branch actually ran
+    (otherwise ``1/0`` -> inf)."""
+    j = estimator._jacobian_diag(np.array([PRIOR_MAX + 1e-9, 0.0]))
+    assert np.all(np.isfinite(j))
     np.testing.assert_allclose(j, [10.0, 10.0])
+
+
+def test_jacobian_diag_far_outside_raises(estimator):
+    """Far outside the prior, nudging cannot recover p>0, so it raises."""
+    with pytest.raises(ValueError, match="Prior probability is zero"):
+        estimator._jacobian_diag(np.array([PRIOR_MAX + 1.0, 0.0]))
 
 
 # ---------------------------------------------------------------------------

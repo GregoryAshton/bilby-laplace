@@ -741,6 +741,39 @@ class Laplace(Sampler):
 
         return samples
 
+    def _effective_log_proposal(self, proposal, x, parameter_names):
+        """Log proposal density ``log g(x)`` accounting for prior-substituted
+        dimensions.
+
+        For each parameter in ``prior_parameters`` the values are drawn from
+        the prior rather than the truncated-Gaussian marginal (see
+        ``_replace_with_prior_samples``), so the proposal density on that
+        dimension IS the prior density.  ``proposal.logpdf`` still returns the
+        truncated-normal marginal there, so we swap it for the prior density.
+
+        Without this correction every importance/rejection weight
+        ``ln_r = logl + logpi - log_g`` keeps an uncancelled
+        ``truncnorm_j / prior_j`` factor on the replaced dimensions, biasing
+        both the recovered posterior and the evidence (the factor is not
+        constant unless the Laplace sigma happens to equal the prior width).
+        With the correction the replaced dimension's ``logpi`` and ``log_g``
+        cancel exactly, giving it unit weight as intended.
+        """
+        log_g = proposal.logpdf(x)
+        prior_params = [p for p in (self.kwargs.get("prior_parameters") or []) if p in parameter_names]
+        if not prior_params:
+            return log_g
+        if not hasattr(proposal, "_dists"):
+            # Non-truncated-Gaussian proposal: cannot decompose per-marginal.
+            logger.warning("Cannot correct proposal density for prior_parameters on this proposal type.")
+            return log_g
+        parameter_names = list(parameter_names)
+        x2 = np.atleast_2d(x)
+        for p in prior_params:
+            j = parameter_names.index(p)
+            log_g = log_g - proposal._dists[j].logpdf(x2[:, j]) + np.asarray(self.priors[p].ln_prob(x2[:, j]))
+        return log_g
+
     @classmethod
     def get_expected_outputs(cls, outdir=None, label=None):
         """Return expected output files/dirs (used by bilby_pipe / HTCondor)."""
@@ -1077,6 +1110,16 @@ class Laplace(Sampler):
             logger.info(
                 f"Resumed in-prior sampling at {n_accepted}/{target_nsamples} " f"accepted ({total_drawn} drawn)"
             )
+            # Re-register the freshly-copied accumulator lists: the in-loop
+            # updates below only pass scalar counters, so without this the
+            # checkpoint would keep pointing at the loaded (pre-resume) lists
+            # and lose everything appended after the resume.
+            self._update_checkpoint_state(
+                samples_list=samples_list,
+                logl_list=logl_list,
+                total_drawn=total_drawn,
+                n_accepted=n_accepted,
+            )
         else:
             samples_list = []
             logl_list = []
@@ -1200,7 +1243,7 @@ class Laplace(Sampler):
             if self.kwargs["fail_on_error"]:
                 raise SamplerError(msg)
             logger.debug(msg)
-        log_g = proposal.logpdf(x)
+        log_g = self._effective_log_proposal(proposal, x, list(g_df.columns))
         ln_r = logl + logpi - log_g
         return ln_r, logl
 
@@ -1238,6 +1281,20 @@ class Laplace(Sampler):
                 f"Resumed rejection sampling at {n_accepted}/{target_nsamples} "
                 f"accepted ({n_proposed} proposed, ln_M = {ln_M:.2f})"
             )
+            # Re-register the freshly-copied accumulator lists: the in-loop
+            # updates below only pass scalar counters, so without this the
+            # checkpoint would keep pointing at the loaded (pre-resume) lists
+            # and lose everything appended after the resume.
+            self._update_checkpoint_state(
+                ln_M=ln_M,
+                all_samples=all_samples,
+                all_logl=all_logl,
+                all_g_samples=all_g_samples,
+                all_ln_r=all_ln_r,
+                n_accepted=n_accepted,
+                n_proposed=n_proposed,
+                n_bound_violations=n_bound_violations,
+            )
         else:
             # --- Establish the rejection bound ln_M ---
             # Start from the analytic value at the MAP.
@@ -1247,7 +1304,7 @@ class Laplace(Sampler):
                     np.log(max(self.priors[k].prob(float(map_sample_dict[k])), 1e-300))
                     for k in estimator.parameter_names
                 )
-                - float(proposal.logpdf(mean.reshape(1, -1))[0])
+                - float(self._effective_log_proposal(proposal, mean.reshape(1, -1), estimator.parameter_names)[0])
             )
 
             # Pre-scan: draw in-prior calibration samples to find the empirical
@@ -1411,6 +1468,18 @@ class Laplace(Sampler):
             logger.info(
                 f"Resumed importance sampling at {n_accepted}/{target_nsamples} " f"drawn ({n_proposed} proposed)"
             )
+            # Re-register the freshly-copied accumulator lists: the in-loop
+            # updates below only pass scalar counters, so without this the
+            # checkpoint would keep pointing at the loaded (pre-resume) lists
+            # and lose everything appended after the resume.
+            self._update_checkpoint_state(
+                all_samples=all_samples,
+                all_logl=all_logl,
+                all_g_samples=all_g_samples,
+                all_ln_r=all_ln_r,
+                n_accepted=n_accepted,
+                n_proposed=n_proposed,
+            )
         else:
             all_samples, all_logl, all_g_samples, all_ln_r = [], [], [], []
             n_accepted = n_proposed = 0
@@ -1449,7 +1518,7 @@ class Laplace(Sampler):
                     raise SamplerError(msg)
                 logger.debug(msg)
 
-            log_g = proposal.logpdf(x)
+            log_g = self._effective_log_proposal(proposal, x, estimator.parameter_names)
             ln_r = logl + logpi - log_g
 
             finite = np.isfinite(ln_r)
@@ -1738,7 +1807,9 @@ class Laplace(Sampler):
         fig_stats, _ = plt.subplots(6, 1, sharex=True, figsize=(8, 14))
         fig_stats = history.plot(fig=fig_stats)
         fig_stats.suptitle("SMC diagnostics")
-        fig_stats.tight_layout()
+        # Reserve headroom for the suptitle; a bare tight_layout packs the top
+        # panel against it and the title overlaps the first axis.
+        fig_stats.tight_layout(rect=[0, 0, 1, 0.99])
         safe_save_figure(
             fig=fig_stats,
             filename=f"{self.outdir}/{self.label}_diagnostic_smc_stats.png",

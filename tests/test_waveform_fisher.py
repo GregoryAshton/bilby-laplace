@@ -36,6 +36,25 @@ def _sampled_priors():
     return PriorDict(dict(x=Uniform(-5, 5, "x"), y=Uniform(-5, 5, "y")))
 
 
+def test_step_uses_absolute_step_for_time_parameters():
+    """Time parameters carry a GPS epoch (~1e9 s); a relative step would be
+    hundreds of seconds and alias the waveform. They must use the absolute
+    eps_time step regardless of the (huge) value."""
+    gps = 1.126259642e9
+    step = gw_fisher._step("geocent_time", gps, eps=1e-6, eps_mass=1e-8, eps_time=1e-5)
+    assert step == 1e-5
+    # Per-detector reference times ({ifo}_time) get the same treatment.
+    assert gw_fisher._step("H1_time", gps, eps=1e-6, eps_mass=1e-8, eps_time=1e-5) == 1e-5
+
+
+def test_step_relative_and_mass_steps_unchanged():
+    """Non-time parameters keep the relative step; masses use the fine step."""
+    assert gw_fisher._step("luminosity_distance", 1000.0, eps=1e-6, eps_mass=1e-8, eps_time=1e-5) == pytest.approx(1e-3)
+    assert gw_fisher._step("chirp_mass", 30.0, eps=1e-6, eps_mass=1e-8, eps_time=1e-5) == pytest.approx(3e-7)
+    # Relative step has an absolute floor of eps for small/zero values.
+    assert gw_fisher._step("theta_jn", 0.0, eps=1e-6, eps_mass=1e-8, eps_time=1e-5) == pytest.approx(1e-6)
+
+
 def test_waveform_allows_phase_time_distance_marginalization():
     """Marginalising phase/time/distance is now supported (no error)."""
     like = _FakeGWLikelihood(

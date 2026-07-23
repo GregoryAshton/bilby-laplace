@@ -2,10 +2,12 @@
 
 import numpy as np
 import pytest
+from bilby.core.prior import PriorDict, Uniform
 
 from bilby_laplace.sampler import (
     GaussianFlow,
     GaussianMixtureFlow,
+    Laplace,
     TruncatedMVNProposal,
     kish_log_effective_sample_size,
 )
@@ -56,6 +58,54 @@ def test_truncated_marginals_recover_mean_and_sigma():
     np.testing.assert_allclose(x.mean(axis=0), MEAN, atol=0.02)
     # Only the diagonal (marginal std) is used by this proposal.
     np.testing.assert_allclose(x.std(axis=0), np.sqrt(np.diag(COV)), rtol=0.05)
+
+
+# ---------------------------------------------------------------------------
+# _effective_log_proposal (prior_parameters density correction)
+# ---------------------------------------------------------------------------
+def _bare_laplace(prior_parameters):
+    """A Laplace instance with just the attributes _effective_log_proposal
+    needs, bypassing the heavy Sampler.__init__."""
+    obj = Laplace.__new__(Laplace)
+    obj.kwargs = {"prior_parameters": prior_parameters}
+    obj.priors = PriorDict(dict(x=Uniform(-5, 5, "x"), y=Uniform(-5, 5, "y")))
+    return obj
+
+
+def test_effective_log_proposal_no_prior_params_is_plain_logpdf(proposal):
+    """With no prior_parameters the effective density is the proposal logpdf."""
+    lap = _bare_laplace(prior_parameters=[])
+    x = proposal.sample(20)
+    np.testing.assert_allclose(
+        lap._effective_log_proposal(proposal, x, ["x", "y"]),
+        proposal.logpdf(x),
+    )
+
+
+def test_effective_log_proposal_cancels_replaced_dimension(proposal):
+    """For a prior-replaced dimension, logpi - log_g must cancel on that dim,
+    leaving only the non-replaced dims' importance weight.
+
+    The pre-fix bug used the truncated-normal marginal for the replaced dim,
+    leaving a spurious truncnorm_y/prior_y factor in the weight."""
+    import pandas as pd
+
+    lap = _bare_laplace(prior_parameters=["y"])
+    x = proposal.sample(20)
+
+    logpi = np.array(lap.priors.ln_prob(pd.DataFrame(x, columns=["x", "y"]), axis=0))
+    log_g_eff = lap._effective_log_proposal(proposal, x, ["x", "y"])
+    weight_term = logpi - log_g_eff  # what enters ln_r beyond logl
+
+    # y cancels: only the x (non-replaced) dim should remain.
+    prior_x = lap.priors["x"].ln_prob(x[:, 0])
+    truncnorm_x = proposal._dists[0].logpdf(x[:, 0])
+    np.testing.assert_allclose(weight_term, prior_x - truncnorm_x, atol=1e-9)
+
+    # And this genuinely differs from the buggy (uncorrected) version, which
+    # would carry a non-zero y contribution.
+    buggy_term = logpi - proposal.logpdf(x)
+    assert not np.allclose(weight_term, buggy_term)
 
 
 # ---------------------------------------------------------------------------

@@ -266,7 +266,10 @@ def setup(likelihood_type="rb"):
 def run_laplace(_common_laplace, run_prefix):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{run_prefix}-laplace",
+        # Label by the actual resample method ("inprior"), not the CLI target
+        # name, so this method gets the same colour/legend as the equivalent
+        # run in the other examples (see bilby_laplace.comparison).
+        label=f"{run_prefix}-inprior",
         resample="inprior",
         cov_scaling=1,
         jacobian_cap_scale=1,

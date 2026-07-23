@@ -179,7 +179,10 @@ def setup():
 def run_laplace(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{base_label}_laplace",
+        # Label by the actual resample method ("inprior"), not the CLI target
+        # name, so this method gets the same colour/legend as the equivalent
+        # run in the other examples (see bilby_laplace.comparison).
+        label=f"{base_label}_inprior",
         resample="inprior",
         cov_scaling=1,
         jacobian_cap_scale=1,

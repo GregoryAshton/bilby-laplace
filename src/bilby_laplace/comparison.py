@@ -42,12 +42,18 @@ def sampler_family(label):
     ``"..._rejection_user"`` maps to ``"rejection"`` -- so a method keeps a
     single colour regardless of how it was configured, and either ``_`` or
     ``-`` may separate the tokens.
+
+    The *last* matching token wins: the method follows the base in every label
+    (``"{base}_{method}"``), and config-variant suffixes (e.g. ``"user"``) are
+    not family keys, so this correctly resolves a base that happens to be named
+    after another family (``"laplace_smc"`` -> ``"smc"``, not ``"laplace"``).
     """
     tokens = re.split(r"[^a-z0-9]+", os.path.basename(str(label)).lower())
+    family = None
     for token in tokens:
         if token in SAMPLER_COLOURS:
-            return token
-    return None
+            family = token
+    return family
 
 
 def colours_for_results(results):
@@ -224,8 +230,12 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
     print(f"{'Method':<20} {'log Z':>10} {'± σ':>8} {'n_like':>8} {'effic.':>8} {'time':>10}")
     print("-" * W)
     for r, _lab in zip(results, labels):
-        log_z = getattr(r, "log_evidence", np.nan) or np.nan
-        log_z_err = getattr(r, "log_evidence_err", np.nan) or np.nan
+        # Coerce a missing/None evidence to NaN, but preserve a genuine 0.0 --
+        # `x or np.nan` would wrongly turn a real 0.0 evidence into NaN.
+        log_z = getattr(r, "log_evidence", None)
+        log_z = np.nan if log_z is None else log_z
+        log_z_err = getattr(r, "log_evidence_err", None)
+        log_z_err = np.nan if log_z_err is None else log_z_err
         secs = r.sampling_time.total_seconds()
         run_stats = r.meta_data.get("run_statistics", {})
         n_like = run_stats.get("nlikelihood", np.nan)

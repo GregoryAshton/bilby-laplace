@@ -113,7 +113,8 @@ class LaplacePosteriorEstimator:
             marginal variance exceeds the prior.
         fisher_kwargs: dict, optional
             Keyword arguments forwarded to the waveform-Fisher computation when
-            ``fisher_method='waveform'`` (e.g. ``eps``, ``eps_mass``).
+            ``fisher_method='waveform'`` (e.g. ``eps``, ``eps_mass``,
+            ``eps_time``).
         marginalized_reference: dict, optional
             Point values for analytically-marginalised parameters (phase, time,
             distance) at which to evaluate the waveform Fisher. Typically the
