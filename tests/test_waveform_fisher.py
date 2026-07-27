@@ -83,6 +83,83 @@ def test_waveform_refuses_calibration_marginalization():
         LaplacePosteriorEstimator(like, _sampled_priors(), fisher_method="waveform")
 
 
+class _FakeROQLikelihood(_FakeGWLikelihood):
+    """Class name carries an unsupported reduced-order marker."""
+
+
+_FakeROQLikelihood.__name__ = "ROQGravitationalWaveTransient"
+
+
+class _FakeMBLikelihood(_FakeGWLikelihood):
+    pass
+
+
+_FakeMBLikelihood.__name__ = "MBGravitationalWaveTransient"
+
+
+@pytest.mark.parametrize("cls", [_FakeROQLikelihood, _FakeMBLikelihood])
+def test_waveform_refuses_roq_and_multibanding(cls):
+    """ROQ and multi-banding evaluate a different inner product, so they remain
+    unsupported by the waveform Fisher."""
+    like = cls([], {})
+    with pytest.raises(ValueError, match="reduced-order"):
+        gw_fisher.validate_waveform_likelihood(like)
+
+
+def test_waveform_accepts_relative_binning():
+    """Relative binning is an approximation to the full-resolution likelihood, so
+    the full-resolution Fisher is valid for it: validation must not refuse it."""
+
+    class _FakeRBLikelihood(_FakeGWLikelihood):
+        pass
+
+    _FakeRBLikelihood.__name__ = "RelativeBinningGravitationalWaveTransient"
+    like = _FakeRBLikelihood([], {})
+    # Must not raise.
+    gw_fisher.validate_waveform_likelihood(like)
+
+
+def test_full_resolution_waveforms_toggles_and_restores_fiducial():
+    """The context manager flips a relative-binning generator to full-grid
+    ('fiducial=1') evaluation and restores the sampling state ('fiducial=0') on
+    exit -- including when the body raises."""
+
+    class _FakeRBLikelihood:
+        def __init__(self):
+            self.state = 0
+            self.seen = None
+
+        def _set_fiducial(self):
+            self.state = 1
+
+        def _unset_fiducial(self):
+            self.state = 0
+
+    like = _FakeRBLikelihood()
+    with gw_fisher._full_resolution_waveforms(like):
+        assert like.state == 1
+    assert like.state == 0
+
+    # Restored even if the body raises.
+    with pytest.raises(RuntimeError):
+        with gw_fisher._full_resolution_waveforms(like):
+            assert like.state == 1
+            raise RuntimeError("boom")
+    assert like.state == 0
+
+
+def test_full_resolution_waveforms_noop_without_fiducial_hooks():
+    """For a non-RB likelihood (no _set_fiducial), the context manager is a
+    transparent no-op."""
+
+    class _Plain:
+        pass
+
+    like = _Plain()
+    with gw_fisher._full_resolution_waveforms(like):
+        pass  # must not raise
+
+
 def test_marginalization_is_schur_complement_not_conditioning(monkeypatch):
     """The reduced precision must be the Schur complement of the marginalised
     block -- equivalently, its inverse is the sampled sub-block of the *full*

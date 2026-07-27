@@ -13,7 +13,17 @@ Fisher matrix: it is positive semi-definite by construction, it needs only
 differencing than a scalar second derivative), and it drops the noisy,
 realization-dependent residual-times-curvature term that makes the observed
 information indefinite.
+
+Relative-binning likelihoods are supported: they are an approximation to the
+full-resolution likelihood, so the full-resolution Fisher is exactly the correct
+proposal for them. Their waveform generator returns strain only at the coarse
+frequency bin edges during sampling, so ``_full_resolution_waveforms`` flips it
+to full-grid evaluation for the derivative computation. ROQ and multi-banded
+likelihoods remain unsupported (their inner product genuinely differs from the
+full-resolution one used here).
 """
+
+from contextlib import contextmanager
 
 import numpy as np
 from bilby.core.utils import logger
@@ -50,7 +60,40 @@ def _is_time_parameter(name):
 # Reduced-order likelihoods evaluate a different (approximate) inner product
 # than the full-resolution one used here, so the waveform Fisher would be
 # inconsistent with the likelihood the user is actually sampling.
-_REDUCED_ORDER_MARKERS = ("ROQ", "RelativeBinning", "MBGravitationalWaveTransient")
+#
+# Relative binning is deliberately *not* in this list: it is an approximation to
+# the full-resolution likelihood, so the full-resolution Fisher is exactly the
+# correct (and better-conditioned) proposal for it. Its waveform generator can
+# already produce full-grid strain -- ``_full_resolution_waveforms`` below flips
+# it into that mode for the duration of the derivative computation.
+_REDUCED_ORDER_MARKERS = ("ROQ", "MBGravitationalWaveTransient")
+
+
+@contextmanager
+def _full_resolution_waveforms(likelihood):
+    """Temporarily switch a relative-binning likelihood's waveform generator to
+    full-grid ("fiducial") evaluation.
+
+    A ``RelativeBinningGravitationalWaveTransient`` samples with its waveform
+    generator returning strain only at the ~100 frequency bin edges, which is
+    incompatible with the full-resolution inner product (PSD / frequency mask)
+    used by :func:`waveform_fisher_matrix`. bilby exposes ``_set_fiducial`` /
+    ``_unset_fiducial`` to flip the generator between full-grid (``fiducial=1``)
+    and bin-edge (``fiducial=0``) evaluation, invalidating the waveform cache in
+    both directions. We reuse those so the Fisher sees full-grid waveforms and
+    the likelihood is restored to its sampling state (``fiducial=0``) on exit,
+    even if an exception is raised. A no-op for non-RB likelihoods.
+    """
+    set_fiducial = getattr(likelihood, "_set_fiducial", None)
+    unset_fiducial = getattr(likelihood, "_unset_fiducial", None)
+    if not callable(set_fiducial) or not callable(unset_fiducial):
+        yield
+        return
+    set_fiducial()
+    try:
+        yield
+    finally:
+        unset_fiducial()
 
 
 def is_gw_waveform_likelihood(likelihood):
@@ -157,23 +200,27 @@ def waveform_fisher_matrix(
         converted.update(likelihood.get_sky_frame_parameters(params))
         return converted
 
-    # First derivatives of the projected detector strain, per detector.
+    # First derivatives of the projected detector strain, per detector. For a
+    # relative-binning likelihood, evaluate on the full frequency grid (see
+    # _full_resolution_waveforms) so the strain is compatible with the
+    # full-resolution inner product below; a no-op for other likelihoods.
     derivs = {ifo.name: [] for ifo in ifos}
-    for name in names:
-        value = float(base_parameters[name])
-        dp = _step(name, value, eps, eps_mass, eps_time)
-        plus = dict(base_parameters)
-        plus[name] = value + 0.5 * dp
-        minus = dict(base_parameters)
-        minus[name] = value - 0.5 * dp
-        pol_plus = wg.frequency_domain_strain(plus)
-        pol_minus = wg.frequency_domain_strain(minus)
-        plus_response = response_params(plus)
-        minus_response = response_params(minus)
-        for ifo in ifos:
-            h_plus = ifo.get_detector_response(pol_plus, plus_response)
-            h_minus = ifo.get_detector_response(pol_minus, minus_response)
-            derivs[ifo.name].append((h_plus - h_minus) / dp)
+    with _full_resolution_waveforms(likelihood):
+        for name in names:
+            value = float(base_parameters[name])
+            dp = _step(name, value, eps, eps_mass, eps_time)
+            plus = dict(base_parameters)
+            plus[name] = value + 0.5 * dp
+            minus = dict(base_parameters)
+            minus[name] = value - 0.5 * dp
+            pol_plus = wg.frequency_domain_strain(plus)
+            pol_minus = wg.frequency_domain_strain(minus)
+            plus_response = response_params(plus)
+            minus_response = response_params(minus)
+            for ifo in ifos:
+                h_plus = ifo.get_detector_response(pol_plus, plus_response)
+                h_minus = ifo.get_detector_response(pol_minus, minus_response)
+                derivs[ifo.name].append((h_plus - h_minus) / dp)
 
     fisher = np.zeros((n, n))
     for ifo in ifos:

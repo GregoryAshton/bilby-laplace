@@ -165,7 +165,7 @@ def setup():
         target_nsamples=5000,
         use_unit_cube=True,
         fisher_method="waveform",
-        npool=8,
+        npool=16,
     )
 
     return _common, _common_laplace
@@ -231,7 +231,7 @@ def run_dynesty(_common):
         nlive=1000,
         check_point_delta_t=1800,
         check_point_plot=True,
-        npool=8,
+        npool=16,
         clean=False,
         resume=True,
     )

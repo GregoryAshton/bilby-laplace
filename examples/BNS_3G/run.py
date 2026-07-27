@@ -245,14 +245,26 @@ def setup(likelihood_type="rb"):
         use_ratio=True,
     )
 
+    # The waveform Fisher gives a better-conditioned proposal than the scalar
+    # Hessian and is supported for the standard and relative-binning likelihoods
+    # (relative binning is an approximation to the full-resolution likelihood the
+    # Fisher is built on). Multi-banding is not supported, so it falls back to the
+    # Hessian. When using the waveform Fisher the estimator works directly in
+    # parameter space, so use_unit_cube is disabled.
+    use_waveform_fisher = likelihood_type in ("std", "rb")
+    fisher_method = "waveform" if use_waveform_fisher else "hessian"
+
     _common_laplace = dict(
         **_common,
         use_injection_for_map=True,
         plot_diagnostic=True,
         clean=True,
+        resume=False,
         sampler="laplace",
-        target_nsamples=1000,
-        use_unit_cube=True,
+        target_nsamples=5000,
+        use_unit_cube=not use_waveform_fisher,
+        fisher_method=fisher_method,
+        npool=16,
     )
 
     return _common, _common_laplace, outdir, run_prefix
@@ -300,15 +312,15 @@ def run_smc(_common_laplace, run_prefix):
             n_samples=5000,
             adaptive=True,
             sampler_kwargs=dict(
-                n_steps=10,
+                n_steps=500,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
             ),
         ),
-        cov_scaling=2,
+        cov_scaling=1,
         jacobian_cap_scale=1,
         hessian_kwargs={"initial_step": 0.001, "step_factor": 2, "maxiter": 10},
-        prior_parameters=["lambda_1", "lambda_2", "psi"],
+        prior_parameters=["lambda_1", "lambda_2", "psi", "ra", "theta_jn"],
     )
 
 

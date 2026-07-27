@@ -104,7 +104,10 @@ class LaplacePosteriorEstimator:
             derivatives (likelihood Fisher plus prior precision); it requires a
             ``GravitationalWaveTransient``-like likelihood and works directly in
             parameter space (``use_unit_cube`` and ``jacobian_cap_scale`` are
-            ignored). If the likelihood analytically marginalises over phase,
+            ignored). Relative-binning likelihoods are supported (the Fisher is
+            built on the full frequency grid, of which relative binning is an
+            approximation); ROQ and multi-banded likelihoods are not. If the
+            likelihood analytically marginalises over phase,
             time, and/or distance, the Fisher is built over the augmented set
             (sampled parameters plus the marginalised ones) and the marginalised
             block is removed via its Schur complement -- equivalent to
