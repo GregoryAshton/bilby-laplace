@@ -21,9 +21,9 @@ rb-%:
 mb-%:
 	$(PYTHON) run.py --likelihood mb --sampler $*
 
-std-all: std-laplace std-rejection std-smc std-dynesty std-compare
-rb-all: rb-laplace rb-rejection rb-smc rb-dynesty rb-compare
-mb-all: mb-laplace mb-rejection mb-smc mb-dynesty mb-compare
+std-all: std-laplace std-rejection std-smc std-smc-fast std-dynesty std-compare
+rb-all: rb-laplace rb-rejection rb-smc rb-smc-fast rb-dynesty rb-compare
+mb-all: mb-laplace mb-rejection mb-smc mb-smc-fast mb-dynesty mb-compare
 all: std-all rb-all mb-all compare
 
 .PHONY: all compare std-all rb-all mb-all std-compare rb-compare mb-compare

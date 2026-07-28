@@ -7,7 +7,7 @@ Supports three likelihood types: std (standard), rb (relative binning), mb (mult
 
 Usage
 -----
-    python run.py --likelihood rb --sampler laplace rejection smc dynesty
+    python run.py --likelihood rb --sampler laplace rejection smc smc-fast dynesty
     python run.py --likelihood rb --compare
     python run.py --compare
 """
@@ -39,6 +39,14 @@ bilby.core.utils.random.seed(1234)
 # prefix (the likelihood type, e.g. "rb-laplace") so the comparison plots have a
 # stable name regardless of which likelihood was run.
 base_label = "bns"
+
+# "smc-fast" is specific to this example, so it does not have a colour in the
+# shared palette (which is reserved for methods every example can run).  Set one
+# here instead: without it the fast run would inherit the SMC green and be
+# indistinguishable from the converged SMC run it is meant to be compared
+# against.  The violet is from the IBM colourblind-safe palette and stays
+# separable from both that green and the dynesty blue.
+COLOUR_OVERRIDES = {"smc-fast": "#785EF0"}
 
 
 def setup(likelihood_type="rb"):
@@ -301,10 +309,21 @@ def run_rejection(_common_laplace, run_prefix):
     )
 
 
-def run_smc(_common_laplace, run_prefix):
+def run_smc(_common_laplace, run_prefix, label="smc",
+             n_steps=500,
+             prior_parameters=["lambda_1", "lambda_2", "psi", "ra", "theta_jn"]
+             ):
+    """Run the SMC resampling stage.
+
+    ``n_steps`` is the number of MCMC steps taken per SMC temperature level. The
+    default (500) is enough to decorrelate the walkers; the "smc-fast" variant
+    lowers it to 10 to show how an under-converged SMC run degrades the
+    posterior (the samples stay close to the Gaussian proposal they started
+    from) for a fraction of the cost.
+    """
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{run_prefix}-smc",
+        label=f"{run_prefix}-{label}",
         resample="smc",
         smc_kwargs=dict(
             sampler="minipcn_smc",
@@ -312,7 +331,7 @@ def run_smc(_common_laplace, run_prefix):
             n_samples=5000,
             adaptive=True,
             sampler_kwargs=dict(
-                n_steps=500,
+                n_steps=n_steps,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
             ),
@@ -320,7 +339,7 @@ def run_smc(_common_laplace, run_prefix):
         cov_scaling=1,
         jacobian_cap_scale=1,
         hessian_kwargs={"initial_step": 0.001, "step_factor": 2, "maxiter": 10},
-        prior_parameters=["lambda_1", "lambda_2", "psi", "ra", "theta_jn"],
+        prior_parameters=prior_parameters,
     )
 
 
@@ -343,7 +362,12 @@ def compare(outdir):
     """Load all result files, make comparison corner plots, and print comparison table."""
     pattern = f"{outdir}/*_result.*"
     full_filename = f"{base_label}_comparison.png"
-    results, labels = compare_results(pattern, full_filename, sampler_only_labels=True)
+    results, labels = compare_results(
+        pattern,
+        full_filename,
+        sampler_only_labels=True,
+        colour_overrides=COLOUR_OVERRIDES,
+    )
 
     # Custom plotting for this example
     import matplotlib.pyplot as plt
@@ -384,7 +408,7 @@ def compare(outdir):
         fig = bilby.core.result.plot_multiple(
             results,
             labels=labels,
-            colours=colours_for_results(results),
+            colours=colours_for_results(results, overrides=COLOUR_OVERRIDES),
             parameters=plot_parameters,
             filename=filename,
             titles=False,
@@ -412,9 +436,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sampler",
         nargs="+",
-        choices=["laplace", "rejection", "smc", "dynesty"],
+        choices=["laplace", "rejection", "smc", "smc-fast", "dynesty"],
         metavar="SAMPLER",
-        help="One or more samplers to run: laplace, rejection, smc, dynesty",
+        help=(
+            "One or more samplers to run: laplace, rejection, smc, smc-fast"
+            " (SMC with only 10 MCMC steps per level), dynesty"
+        ),
     )
     parser.add_argument(
         "--compare",
@@ -437,6 +464,7 @@ if __name__ == "__main__":
                 "laplace": lambda: run_laplace(_common_laplace, _run_prefix),
                 "rejection": lambda: run_rejection(_common_laplace, _run_prefix),
                 "smc": lambda: run_smc(_common_laplace, _run_prefix),
+                "smc-fast": lambda: run_smc(_common_laplace, _run_prefix, label="smc-fast", n_steps=50, prior_parameters=["lambda_1", "lambda_2", "psi"]),
                 "dynesty": lambda: run_dynesty(_common, _run_prefix),
             }
 

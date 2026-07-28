@@ -33,6 +33,34 @@ DEFAULT_SAMPLER_COLOUR = "#999999"  # neutral grey
 TRUTH_COLOUR = "#000000"
 
 
+def _label_tokens(label):
+    """Lower-cased alphanumeric tokens of a label's basename.
+
+    ``"/tmp/out/RB-SMC-fast"`` -> ``["rb", "smc", "fast"]``.
+    """
+    return [t for t in re.split(r"[^a-z0-9]+", os.path.basename(str(label)).lower()) if t]
+
+
+def _override_colour(label, overrides):
+    """Colour from *overrides* whose key matches *label*, or ``None``.
+
+    A key matches when its tokens appear as a contiguous run in the label's
+    tokens, so ``"smc-fast"`` matches ``"rb-smc-fast"`` and ``"std-smc-fast"``
+    but not ``"rb-smc"``.  This keeps an override written in one example free of
+    that example's run prefix.  The longest matching key wins, so a specific
+    override beats a more general one.
+    """
+    tokens = _label_tokens(label)
+    best = None
+    for key, colour in overrides.items():
+        key_tokens = _label_tokens(key)
+        n = len(key_tokens)
+        if n and any(tokens[i : i + n] == key_tokens for i in range(len(tokens) - n + 1)):
+            if best is None or n > best[0]:
+                best = (n, colour)
+    return None if best is None else best[1]
+
+
 def sampler_family(label):
     """Return the sampler-family key for a result label, or ``None``.
 
@@ -48,21 +76,38 @@ def sampler_family(label):
     not family keys, so this correctly resolves a base that happens to be named
     after another family (``"laplace_smc"`` -> ``"smc"``, not ``"laplace"``).
     """
-    tokens = re.split(r"[^a-z0-9]+", os.path.basename(str(label)).lower())
     family = None
-    for token in tokens:
+    for token in _label_tokens(label):
         if token in SAMPLER_COLOURS:
             family = token
     return family
 
 
-def colours_for_results(results):
+def colours_for_results(results, overrides=None):
     """List of plot colours aligned to *results*, keyed by sampler family.
 
     Pass directly to ``bilby.core.result.plot_multiple(..., colours=...)``.
     Unrecognised samplers fall back to a neutral grey.
+
+    Parameters
+    ----------
+    results : list
+        Loaded bilby ``Result`` objects.
+    overrides : dict, optional
+        Maps a label fragment to a colour, taking precedence over the shared
+        palette -- e.g. ``{"smc-fast": "#785EF0"}`` colours ``"rb-smc-fast"``
+        without touching ``"rb-smc"``.  Use this for a run that is specific to
+        one example (a variant of a method, a one-off configuration) so it stays
+        distinguishable there without claiming a colour in the global palette,
+        which is reserved for methods every example can produce.
     """
-    return [SAMPLER_COLOURS.get(sampler_family(r.label), DEFAULT_SAMPLER_COLOUR) for r in results]
+    colours = []
+    for r in results:
+        colour = _override_colour(r.label, overrides) if overrides else None
+        if colour is None:
+            colour = SAMPLER_COLOURS.get(sampler_family(r.label), DEFAULT_SAMPLER_COLOUR)
+        colours.append(colour)
+    return colours
 
 
 def _prettify_method(method):
@@ -165,7 +210,7 @@ def overlay_injection_lines(fig, parameters, injection_parameters):
                     ax.axhline(truths[row], color=TRUTH_COLOUR, ls="--", lw=0.8, alpha=0.7)
 
 
-def compare(pattern, filename, injection_parameters=None, sampler_only_labels=False):
+def compare(pattern, filename, injection_parameters=None, sampler_only_labels=False, colour_overrides=None):
     """Load result files matching pattern, print comparison table, and create corner plot.
 
     Parameters
@@ -182,6 +227,8 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
         dropping the shared example prefix and the run time.  Useful when the
         default ``"{Base}_{method} (time)"`` labels are long enough to crowd the
         legend.  Default False.
+    colour_overrides : dict, optional
+        Per-example colour overrides, passed to :func:`colours_for_results`.
 
     Returns
     -------
@@ -261,7 +308,7 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
     fig = bilby.core.result.plot_multiple(
         results,
         labels=labels,
-        colours=colours_for_results(results),
+        colours=colours_for_results(results, overrides=colour_overrides),
         filename=filename,
         titles=False,
         save=False,

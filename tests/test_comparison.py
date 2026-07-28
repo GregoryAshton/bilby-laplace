@@ -22,6 +22,8 @@ class _FakeResult:
         ("hlv_rejection", "rejection"),
         ("hlv_rejection_user", "rejection"),  # config variant folds into base family
         ("rosenbrock_smc", "smc"),
+        ("rb-smc", "smc"),
+        ("rb-smc-fast", "smc"),  # example-local variants stay in the base family
         ("gaussian_dynesty", "dynesty"),
         ("bns_laplace", "laplace"),
         ("x_inprior", "inprior"),
@@ -47,6 +49,33 @@ def test_colours_for_results_aligns_and_defaults():
         SAMPLER_COLOURS["rejection"],
         SAMPLER_COLOURS["smc"],
         DEFAULT_SAMPLER_COLOUR,
+    ]
+
+
+def test_colour_overrides_beat_the_palette_without_touching_siblings():
+    # A single example can distinguish a variant of a family (here an
+    # under-converged "smc-fast" run) without that variant entering the shared
+    # palette.  The override key carries no run prefix, so it matches whichever
+    # likelihood the example was run with.
+    results = [_FakeResult("rb-smc"), _FakeResult("rb-smc-fast"), _FakeResult("mb-smc-fast")]
+    assert colours_for_results(results, overrides={"smc-fast": "#785EF0"}) == [
+        SAMPLER_COLOURS["smc"],
+        "#785EF0",
+        "#785EF0",
+    ]
+
+
+def test_colour_overrides_prefer_the_longest_match():
+    results = [_FakeResult("rb-smc-fast")]
+    overrides = {"smc": "#111111", "smc-fast": "#222222"}
+    assert colours_for_results(results, overrides=overrides) == ["#222222"]
+
+
+def test_colour_overrides_require_contiguous_tokens():
+    # "smc-fast" must not match a label that merely contains both tokens apart.
+    results = [_FakeResult("rb-smc-rejection-fast")]
+    assert colours_for_results(results, overrides={"smc-fast": "#785EF0"}) == [
+        SAMPLER_COLOURS["rejection"]
     ]
 
 
