@@ -1,5 +1,6 @@
 """Tests for the sampler-family colour mapping used by the examples."""
 
+import numpy as np
 import pytest
 
 from bilby_laplace.comparison import (
@@ -105,3 +106,35 @@ def test_sampler_labels_strip_shared_prefix_and_prettify():
 def test_sampler_labels_single_result_has_no_prefix_to_strip():
     # With one result there is no shared prefix; the full basename is kept.
     assert sampler_labels([_FakeResult("gaussian_smc")]) == ["Gaussian SMC"]
+
+
+# --------------------------------------------------------------------------
+# Likelihood-evaluation counts in the comparison table.  `run_statistics` is
+# written by this package's sampler and by bilby's dynesty, but not by
+# third-party plugins such as aspire's, which populate only bilby's standard
+# `num_likelihood_evaluations`.  Reading one field alone printed a dash for a
+# count the result was carrying.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (1330000, 1330000.0),
+        (1330000.0, 1330000.0),
+        ("1330000", 1330000.0),
+        (None, None),  # not recorded
+        (0, None),  # resumed run / untracked plugin -- never a real measurement
+        (-5, None),
+        ("nonsense", None),
+        (float("nan"), None),
+    ],
+)
+def test_as_count_rejects_unusable_values(value, expected):
+    from bilby_laplace.comparison import _as_count
+
+    result = _as_count(value)
+    if expected is None:
+        assert not np.isfinite(result)
+    else:
+        assert result == expected

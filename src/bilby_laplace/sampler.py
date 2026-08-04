@@ -993,15 +993,28 @@ class Laplace(Sampler):
         end_time = datetime.datetime.now()
         self.sampling_time = end_time - self.start_time
 
-        if self.use_ratio:
-            logl -= self.likelihood.noise_log_likelihood()
-
+        # Both quantities above are on the *full* likelihood's footing:
+        # ``LaplacePosteriorEstimator`` calls ``likelihood.log_likelihood()``
+        # regardless of ``use_ratio``, so every evidence here is a full log Z.
         logger.info(
-            f"Log-evidence summary: "
+            f"Log-evidence summary (full log Z, noise term included): "
             f"Laplace={log_evidence_laplace:.2f}, "
             f"final={log_evidence:.2f} "
             f"+/- {log_evidence_err:.2f}"
         )
+
+        # Hand bilby what its post-processing expects.  Under ``use_ratio`` it
+        # reads the returned evidence as a log Bayes factor and adds the noise
+        # evidence back on top (see ``bilby.core.sampler.run_sampler``), so the
+        # noise term has to come off here first.  The per-sample values take the
+        # identical shift -- subtracting it from ``logl`` alone, as this did,
+        # left one extra noise evidence in the reported log Z: ~13000 nats on a
+        # GW likelihood, enough to make log Z incomparable with any other
+        # sampler.  Shifting by a constant leaves ``log_evidence_err`` alone.
+        if self.use_ratio:
+            log_noise_evidence = self.likelihood.noise_log_likelihood()
+            logl -= log_noise_evidence
+            log_evidence -= log_noise_evidence
 
         if nlikelihood is None:
             nlikelihood = len(g_samples)
@@ -1086,6 +1099,38 @@ class Laplace(Sampler):
         df_out = pd.DataFrame(x_out, columns=parameter_names)
         df_out = self._replace_with_prior_samples(df_out, parameter_names)
         x_out = df_out.values
+        return x_out
+
+    def _draw_initial_smc_samples(self, proposals, n, parameter_names):
+        """Draw *n* in-prior samples spread evenly across *proposals*.
+
+        With one proposal this is exactly ``_draw_inprior_samples``.  With
+        several -- one per mode found by ``_find_multiple_maps`` -- the draw is
+        stratified so every mode contributes an equal share, which is what makes
+        the flow aspire fits to this cloud multimodal.  Returns an
+        ``(n, ndim)`` float array.
+        """
+        if len(proposals) == 1:
+            return self._draw_inprior_samples(proposals[0], n, parameter_names)
+
+        k = len(proposals)
+        # Spread the remainder over the leading modes so the total is exactly n.
+        counts = [n // k + (1 if i < n % k else 0) for i in range(k)]
+        chunks = []
+        for i, (mode_proposal, n_i) in enumerate(zip(proposals, counts)):
+            x_i = self._draw_inprior_samples(mode_proposal, n_i, parameter_names)
+            if len(x_i) < n_i:
+                logger.warning(f"Mode {i} contributed only {len(x_i)} of the {n_i} requested initial SMC samples")
+            chunks.append(x_i)
+
+        x_out = np.vstack(chunks)
+        # Shuffle so the cloud is not ordered by mode: aspire's flow training
+        # splits it into train/validation sets by position.
+        random.rng.shuffle(x_out)
+        logger.info(
+            f"Initial SMC cloud: {len(x_out)} samples over {k} modes "
+            f"({', '.join(str(len(c)) for c in chunks)})"
+        )
         return x_out
 
     def _check_iteration_limit(self, method_name, n_proposed, n_accepted):
@@ -1239,10 +1284,24 @@ class Laplace(Sampler):
                 [m for m, _ in map_estimates],
                 [c for _, c in map_estimates],
             )
+            # One truncated proposal per discovered mode.  Aspire has no way to
+            # take our mixture directly (``sample_posterior`` uses the flow that
+            # ``fit`` trains as its ``prior_flow``), so the modes must reach it
+            # through the initial cloud that flow is fit to.
+            init_proposals = [
+                TruncatedMVNProposal(
+                    mode_mean,
+                    mode_cov,
+                    lower=estimator.prior_bounds_min,
+                    upper=estimator.prior_bounds_max,
+                )
+                for mode_mean, mode_cov in map_estimates
+            ]
         else:
             proposal_flow = GaussianFlow(mean, cov)
+            init_proposals = [proposal]
 
-        samples, logl, smc_log_z, smc_log_z_err, nlikelihood = self._smc_sample(proposal_flow, proposal, estimator)
+        samples, logl, smc_log_z, smc_log_z_err, nlikelihood = self._smc_sample(init_proposals, estimator)
 
         if self.kwargs["plot_diagnostic"]:
             self.create_smc_diagnostic(samples, proposal_flow)
@@ -1668,13 +1727,17 @@ class Laplace(Sampler):
 
         return batched_log_likelihood
 
-    def _smc_sample(self, proposal_flow, proposal, estimator):
+    def _smc_sample(self, init_proposals, estimator):
         """Run posterior sampling via aspire, starting from the Laplace proposal.
 
-        Initial samples are drawn from *proposal* (a ``TruncatedMVNProposal``)
-        filtered to the prior support, matching the inprior/rejection sampling
-        approach.  ``aspire.sample_posterior()`` then refines these toward the
-        true posterior.
+        *init_proposals* is a list of ``TruncatedMVNProposal`` objects, one per
+        discovered posterior mode (a single entry unless ``n_modes > 1``).
+        Initial samples are drawn from them and filtered to the prior support,
+        matching the inprior/rejection sampling approach.  That cloud is what
+        ``aspire.fit()`` trains the flow on, and aspire passes that flow to the
+        sampler as its ``prior_flow`` -- so it, and nothing else, sets where the
+        annealing path starts.  ``aspire.sample_posterior()`` then refines the
+        particles toward the true posterior.
         """
         from aspire import Aspire
         from aspire.samples import Samples
@@ -1711,7 +1774,20 @@ class Laplace(Sampler):
 
         # Draw initial samples filtered to the prior support, consistent with
         # the inprior/rejection sampling paths.
-        initial_theta = self._draw_inprior_samples(proposal, n_initial, parameter_names)
+        initial_theta = self._draw_initial_smc_samples(init_proposals, n_initial, parameter_names)
+
+        if len(init_proposals) > 1 and self.kwargs["plot_diagnostic"]:
+            # Overwrite the proposal diagnostic now that the real initial cloud
+            # exists.  The copy written by ``run_sampler`` predates the mode
+            # search, so it shows only the primary mode and misrepresents where
+            # a multi-mode SMC run actually starts.
+            self.create_proposal_diagnostic(
+                init_proposals[0].mean,
+                init_proposals[0].cov,
+                parameter_names,
+                initial_theta,
+            )
+
         initial_samples = Samples(initial_theta, parameters=parameter_names)
         aspire_sampler.fit(initial_samples)
 

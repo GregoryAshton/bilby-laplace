@@ -1,11 +1,11 @@
 PYTHON ?= python
 
-laplace rejection smc dynesty:
+laplace rejection smc smc-direct dynesty:
 	$(PYTHON) run.py --sampler $@
 
 compare:
 	$(PYTHON) run.py --compare
 
-all: laplace rejection smc dynesty compare
+all: laplace rejection smc smc-direct dynesty compare
 
-.PHONY: all compare laplace rejection smc dynesty
+.PHONY: all compare laplace rejection smc smc-direct dynesty

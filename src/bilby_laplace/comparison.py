@@ -141,6 +141,21 @@ def _format_duration(secs):
     return f" ({secs:.0f} s)"
 
 
+def _as_count(value):
+    """Coerce a likelihood-evaluation count to a float, or NaN if unusable.
+
+    Missing, ``None``, non-numeric and non-positive values all mean "not
+    recorded".  No sampler genuinely performs zero likelihood evaluations, so a
+    zero is a resumed run or an untracked plugin; printing it as ``0`` would
+    read as a real measurement, and it would divide by zero downstream.
+    """
+    try:
+        count = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return count if count > 0 else np.nan
+
+
 def _format_efficiency(eff):
     """Format an efficiency percentage without collapsing small values to 0.
 
@@ -285,7 +300,13 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
         log_z_err = np.nan if log_z_err is None else log_z_err
         secs = r.sampling_time.total_seconds()
         run_stats = r.meta_data.get("run_statistics", {})
-        n_like = run_stats.get("nlikelihood", np.nan)
+        # ``run_statistics`` is written by this package's sampler and by bilby's
+        # own (dynesty).  Third-party plugins -- aspire's, for one -- populate
+        # only bilby's standard ``num_likelihood_evaluations``, so fall back to
+        # that rather than printing a dash for a count the result does carry.
+        n_like = _as_count(run_stats.get("nlikelihood"))
+        if not np.isfinite(n_like):
+            n_like = _as_count(getattr(r, "num_likelihood_evaluations", None))
         # The Laplace sampler records its own "efficiency" (final samples per
         # likelihood evaluation).  Other samplers (e.g. dynesty) don't, but
         # bilby stores nlikelihood and neffsamples, so we reconstruct the same
@@ -295,6 +316,12 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
         eff = run_stats.get("efficiency", np.nan)
         if not np.isfinite(eff):
             neff = run_stats.get("neffsamples", np.nan)
+            if not np.isfinite(_as_count(neff)):
+                # Last resort for a plugin that records neither: the posterior's
+                # own length.  Exact only when the sampler returns iid draws
+                # (aspire rejection-samples to iid before handing them back);
+                # a weighted posterior would make this an over-estimate.
+                neff = len(r.posterior) if getattr(r, "posterior", None) is not None else np.nan
             if np.isfinite(neff) and np.isfinite(n_like) and n_like:
                 eff = 100.0 * neff / n_like
         name = os.path.basename(r.label)

@@ -55,3 +55,10 @@ draws (Latin hypercube), distinct MAP estimates are deduplicated by a 3-sigma
 separation, and they are combined into an equal-weight Gaussian mixture used as the
 SMC starting distribution. `mode_search_nsamples` controls how many prior draws are
 evaluated when searching for secondary modes.
+
+The mixture reaches aspire through the initial particle cloud, which is drawn in
+equal shares from a truncated Gaussian per mode. Aspire has no argument for a
+proposal distribution: `sample_posterior()` uses whichever flow `fit()` trained as
+its `prior_flow`, and `fit()` is trained on that cloud. Seed the cloud from one
+mode and the annealing path starts unimodal regardless of how many modes were
+found, so the stratification is what makes `n_modes > 1` do anything at all.

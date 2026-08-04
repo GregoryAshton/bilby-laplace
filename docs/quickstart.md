@@ -28,6 +28,15 @@ print(result.meta_data["run_statistics"])
 - `result.meta_data["run_statistics"]` — efficiency, number of likelihood
   evaluations, sampling time, and the Laplace log-evidence.
 
+`result.log_evidence` is the full log Z, including the noise term, and
+`result.log_bayes_factor` is that less `result.log_noise_evidence` — the same
+convention every other bilby sampler uses, so the numbers are directly
+comparable with (say) dynesty. This holds under `use_ratio` either way: the
+estimator always evaluates the full likelihood, and the sampler converts to
+bilby's expected footing on the way out. A constant offset cannot move the MAP
+or the curvature, so `use_ratio` affects only the reported evidence, never the
+posterior.
+
 ## Common adjustments
 
 ```python

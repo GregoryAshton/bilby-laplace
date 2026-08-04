@@ -5,7 +5,7 @@ Laplace approximation on a simulated BBH signal in an HLV network.
 
 Usage
 -----
-    python run.py --sampler laplace rejection smc dynesty
+    python run.py --sampler laplace rejection smc smc-direct dynesty
     python run.py --compare
 """
 
@@ -29,6 +29,15 @@ logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
 outdir = "outdir_hlv_example"
 base_label = "hlv"
+
+# "smc-direct" is aspire driven straight from the prior, with no Laplace stage
+# at all.  It is a configuration of SMC specific to this example rather than a
+# method of its own, so it has no colour in the shared palette; without an
+# override it would inherit the SMC green and be indistinguishable from the
+# Laplace-seeded run it exists to be compared against.  The violet is from the
+# IBM colourblind-safe palette and stays separable from that green and the
+# dynesty blue.
+COLOUR_OVERRIDES = {"smc-direct": "#785EF0"}
 
 
 def setup():
@@ -209,17 +218,46 @@ def run_smc(_common_laplace):
         smc_kwargs=dict(
             sampler="minipcn_smc",
             n_initial_samples=10000,
-            n_samples=5000,
+            n_samples=10000,
             adaptive=True,
             sampler_kwargs=dict(
-                n_steps=5,
+                n_steps=10,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
             ),
         ),
-        cov_scaling=1,
+        cov_scaling=2,
         jacobian_cap_scale=1,
         prior_parameters=["chi_1", "chi_2"],
+        n_modes=3,
+    )
+
+
+def run_smc_direct(_common):
+    """Aspire's SMC on its own, with no Laplace stage.
+
+    The control for ``run_smc``: same SMC sampler and the same particle count,
+    but seeded from prior draws rather than from the Laplace proposal, and via
+    ``aspire_bilby``'s own plugin rather than ours.  What it isolates is what the
+    Laplace stage buys -- everything downstream of the initial cloud is held
+    fixed.
+    """
+    return bilby.run_sampler(
+        **_common,
+        sampler="aspire",
+        label=f"{base_label}_smc_direct",
+        n_samples=10000,
+        n_initial_samples=10000,
+        sample_kwargs=dict(
+            sampler="minipcn_smc",
+            adaptive=True,
+            sampler_kwargs=dict(
+                n_steps=10,
+                target_acceptance_rate=0.234,
+                step_fn="tpcn",
+            ),
+        ),
+        npool=16,
     )
 
 
@@ -242,7 +280,12 @@ def compare():
     and print a comparison table. Custom to HLV example for intrinsic/extrinsic plots."""
     pattern = f"{outdir}/{base_label}_*_result.*"
     full_filename = f"{base_label}_comparison.png"
-    results, labels = compare_results(pattern, full_filename, sampler_only_labels=True)
+    results, labels = compare_results(
+        pattern,
+        full_filename,
+        sampler_only_labels=True,
+        colour_overrides=COLOUR_OVERRIDES,
+    )
     if len(results) < 2:
         return
 
@@ -273,7 +316,7 @@ def compare():
             fig = bilby.core.result.plot_multiple(
                 results,
                 labels=labels,
-                colours=colours_for_results(results),
+                colours=colours_for_results(results, overrides=COLOUR_OVERRIDES),
                 parameters=parameters,
                 filename=filename,
                 titles=False,
@@ -296,9 +339,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sampler",
         nargs="+",
-        choices=["laplace", "rejection", "smc", "dynesty"],
+        choices=["laplace", "rejection", "smc", "smc-direct", "dynesty"],
         metavar="SAMPLER",
-        help="One or more samplers to run: laplace, rejection, smc, dynesty",
+        help="One or more samplers to run: laplace, rejection, smc, smc-direct, dynesty",
     )
     parser.add_argument(
         "--compare",
@@ -318,6 +361,7 @@ if __name__ == "__main__":
                 "laplace": lambda: run_laplace(_common_laplace),
                 "rejection": lambda: run_rejection(_common_laplace),
                 "smc": lambda: run_smc(_common_laplace),
+                "smc-direct": lambda: run_smc_direct(_common),
                 "dynesty": lambda: run_dynesty(_common),
             }
 
