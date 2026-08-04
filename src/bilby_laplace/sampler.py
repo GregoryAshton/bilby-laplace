@@ -146,13 +146,15 @@ class Laplace(Sampler):
         samples.
     npool : int
         Number of processes for parallel likelihood evaluation (bilby standard
-        argument, default 1). When ``> 1``, each batch of proposal samples in
-        the resampling loops (rejection / importance / inprior) is evaluated
-        across a ``multiprocessing.Pool``. Drawing and accept/reject decisions
-        stay in the main process, so a pooled run is numerically identical to a
-        serial one. Only worthwhile when a single likelihood evaluation is
-        expensive relative to inter-process overhead. Alternatively pass a
-        pre-built ``pool`` object.
+        argument, default 1; the aliases ``n_pool``, ``cores``, ``threads`` and
+        ``queue_size`` are accepted too). When ``> 1``, every batch of
+        likelihood evaluations is spread across a ``multiprocessing.Pool``: the
+        proposal batches in the rejection / importance / inprior loops, and the
+        per-iteration batches aspire requests under ``resample='smc'``. Drawing
+        and accept/reject decisions stay in the main process, so a pooled run is
+        numerically identical to a serial one. Only worthwhile when a single
+        likelihood evaluation is expensive relative to inter-process overhead.
+        Alternatively pass a pre-built ``pool`` object.
     target_nsamples : int
         Target number of posterior samples.
     batch_nsamples : int
@@ -337,6 +339,11 @@ class Laplace(Sampler):
         resume=True,
         checkpoint_signal=None,
         check_point_delta_t=600,
+        # Parallelism.  These have to appear here or bilby's
+        # `_verify_kwargs_against_default_kwargs` strips them from `self.kwargs`
+        # before `_setup_pool` (which reads both) ever sees them.
+        npool=None,
+        pool=None,
     )
 
     def __init__(
@@ -362,6 +369,29 @@ class Laplace(Sampler):
             exit_code=exit_code,
             **kwargs,
         )
+
+    def _translate_kwargs(self, kwargs):
+        """Fold bilby's ``npool`` aliases into a single ``npool`` kwarg.
+
+        ``Sampler.npool`` looks up ``self.kwargs`` before falling back to the
+        ``npool`` argument of ``run_sampler``, and ``npool`` now carries a
+        default of ``None``, so both the aliases (``n_pool``, ``cores``, ...)
+        and the explicit ``run_sampler(npool=...)`` argument have to be written
+        into the kwargs here or they would be shadowed by that default.
+        """
+        if "npool" not in kwargs:
+            for equiv in self.npool_equiv_kwargs:
+                if equiv in kwargs:
+                    kwargs["npool"] = kwargs.pop(equiv)
+                    break
+            else:
+                # `_npool` is set by `Sampler.__init__` before the kwargs setter
+                # runs, but tests (and any other caller) may build a bare
+                # instance without it.
+                npool = getattr(self, "_npool", None)
+                if npool is not None and npool > 1:
+                    kwargs["npool"] = npool
+        return super()._translate_kwargs(kwargs)
 
     # ------------------------------------------------------------------
     # Resume / checkpoint scaffolding
@@ -1603,6 +1633,41 @@ class Laplace(Sampler):
         logger.info(f"IS log-evidence: {log_z:.2f} +/- {log_z_err:.2f}")
         return log_z, log_z_err
 
+    @staticmethod
+    def _make_aspire_log_likelihood(estimator, counter):
+        """Return an aspire-compatible batched log-likelihood.
+
+        Aspire hands the likelihood a whole batch of samples at once, but
+        ``aspire_bilby``'s wrapper loops over that batch with a ``map_fn``
+        keyword defaulting to the builtin (serial) ``map``; unless something
+        binds a pool's ``map`` into it (as aspire_bilby's own plugin does via
+        ``PoolHandler``), every evaluation runs in a single process.  Rather
+        than bind it -- which would require aspire_bilby's module-level globals
+        to be populated in every worker, i.e. the pool to be created *after*
+        ``get_aspire_functions`` -- route the batch through the estimator.  It
+        applies the same fixed-parameter and prior-bounds handling as every
+        other resampling mode, and its pooled path pulls the likelihood from
+        bilby's per-worker global, so it is correct for any pool start method.
+
+        ``counter`` is a single-element mutable list into which the number of
+        likelihood evaluations is accumulated.  Only points with a finite
+        log-prior are evaluated (matching ``aspire_bilby``), so the count is
+        the work actually done rather than the output-sample count.
+        """
+
+        def batched_log_likelihood(samples):
+            if getattr(samples, "log_prior", None) is None:
+                raise SamplerError("aspire called the log-likelihood before the log-prior was evaluated")
+            mask = np.isfinite(np.asarray(samples.log_prior))
+            counter[0] += int(np.sum(mask))
+            logl = np.full(len(mask), -np.inf)
+            if mask.any():
+                x = np.asarray(samples.x, dtype=float)[mask, :]
+                logl[mask] = estimator.log_likelihood_from_array(x.T)
+            return logl
+
+        return batched_log_likelihood
+
     def _smc_sample(self, proposal_flow, proposal, estimator):
         """Run posterior sampling via aspire, starting from the Laplace proposal.
 
@@ -1619,25 +1684,15 @@ class Laplace(Sampler):
 
         prior_bounds = {key: (self.priors[key].minimum, self.priors[key].maximum) for key in parameter_names}
 
+        # Only the log-prior is taken from aspire_bilby; the likelihood is our
+        # own pool-aware wrapper (see ``_make_aspire_log_likelihood``).
         functions = get_aspire_functions(self.likelihood, self.priors, parameter_names)
 
-        # Wrap the likelihood so we can count the *true* number of likelihood
-        # evaluations aspire performs internally.  aspire only evaluates the
-        # likelihood at points whose log-prior is finite (see
-        # ``get_aspire_functions``); we count exactly those so the reported
-        # figure matches the work actually done, not the output-sample count.
         n_likelihood_evaluations = [0]
-        _raw_log_likelihood = functions.log_likelihood
-
-        def counting_log_likelihood(samples, *args, **kwargs):
-            if getattr(samples, "log_prior", None) is not None:
-                n_likelihood_evaluations[0] += int(np.sum(np.isfinite(samples.log_prior)))
-            else:
-                n_likelihood_evaluations[0] += int(len(samples.x))
-            return _raw_log_likelihood(samples, *args, **kwargs)
+        batched_log_likelihood = self._make_aspire_log_likelihood(estimator, n_likelihood_evaluations)
 
         aspire_sampler = Aspire(
-            log_likelihood=counting_log_likelihood,
+            log_likelihood=batched_log_likelihood,
             log_prior=functions.log_prior,
             dims=len(parameter_names),
             parameters=parameter_names,

@@ -24,6 +24,9 @@ outdir/
 # Examples
 *outdir*
 
+# Paper working directory (studies, runs, figures) - kept out of the package repo
+paper/
+
 # MkDocs build output
 site/
 
