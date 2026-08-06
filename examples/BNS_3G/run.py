@@ -244,9 +244,10 @@ def setup(likelihood_type="rb"):
         )
     )
 
-    # Fixed parameters to simplify the PE
-    for key in ["chi_1", "chi_2"]:
-        priors[key] = injection_parameters[key]
+    # chi_1 and chi_2 are sampled with the AlignedSpin priors above.  Note the
+    # injection sits at chi = 0, which is where the AlignedSpin density
+    # diverges logarithmically -- so the MAP is drawn onto that cusp and this
+    # exercises the prior-precision clamp in LaplacePosteriorEstimator directly.
 
     # Marginalisation, identical for both likelihoods.  Keeping them the same
     # is what makes ``std`` a usable reference for ``rb``: any difference
@@ -483,12 +484,24 @@ def run_smc_direct(_common, run_prefix):
 
 
 def run_dynesty(_common, run_prefix):
+    """Reference run, using the settings used for production GW parameter
+    estimation.
+
+    ``sample="acceptance-walk"`` with a fixed ``naccept`` draws a set number of
+    accepted MCMC steps per point rather than adapting the chain length, which
+    makes the cost per point predictable and parallelises far better than
+    ``act-walk``.  That matters here: with the aligned spins free, ``act-walk``
+    was taking >12000 likelihood calls per accepted point at 0.1% efficiency and
+    was hours from converging.
+    """
     return bilby.run_sampler(
         **_common,
         sampler="dynesty",
         label=f"{run_prefix}-dynesty",
         nlive=1000,
-        dlogz=0.1,
+        sample="acceptance-walk",
+        naccept=60,
+        maxmcmc=5000,
         check_point_delta_t=1800,
         check_point_plot=True,
         npool=32,
