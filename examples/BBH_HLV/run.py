@@ -39,6 +39,65 @@ base_label = "hlv"
 # dynesty blue.
 COLOUR_OVERRIDES = {"smc-direct": "#785EF0"}
 
+# Shared GW settings for the SMC stage.  Kept in step with
+# examples/BNS_3G/run.py: the goal is one configuration that holds across GW
+# problems rather than per-example tuning, so treat a change here as a change to
+# both -- with one deliberate exception, N_MUTATION_STEPS below.  Note what is
+# *absent*: no cov_scaling, no prior_parameters, no hessian_kwargs.  Those were
+# per-example compensations for a prior-precision term that collapsed proposal
+# widths at a prior cusp; that is fixed in LaplacePosteriorEstimator, so they
+# should no longer be needed.
+
+# MCMC steps per SMC temperature level.  This is the one setting that does *not*
+# transfer between problems, so it is named here rather than buried in the
+# shared block.  It sets how far a particle can travel per tempering iteration,
+# and the requirement scales with how hard the posterior is to traverse, not
+# with anything the shared settings control.
+#   BBH_HLV: 20  -- a sweep found 10 unstable (58-nat log Z spread), 20 stable
+#                   (0.99), and 40 no better at twice the cost.
+#   BNS_3G: 100  -- with two detectors the sky is a timing *ring*; at 20 the
+#                   cloud covers one arc of it (ra>4 occupancy 0.006 against
+#                   dynesty's 0.575), at 100 it spans the ring (0.447) and the
+#                   evidence deficit falls from 1.2 nats to 0.55.
+N_MUTATION_STEPS = 20
+GW_SMC_SETTINGS = dict(
+    smc_kwargs=dict(
+        sampler="minipcn_smc",
+        n_initial_samples=10000,
+        n_samples=5000,
+        adaptive=True,
+        target_efficiency=0.5,
+        sampler_kwargs=dict(
+            n_steps=N_MUTATION_STEPS,
+            target_acceptance_rate=0.234,
+            step_fn="tpcn",
+        ),
+    ),
+    smc_plot_every=0,
+    n_modes=3,
+    mode_weights="laplace",
+    mode_separation_sigma=1,
+    mode_search_nsamples=5000,
+    jacobian_cap_scale=1,
+)
+
+# Matching configuration for the no-Laplace control, expressed in the aspire
+# plugin's own kwarg layout (n_samples / n_initial_samples at the top level,
+# sample_kwargs forwarded to sample_posterior).
+GW_SMC_DIRECT_SETTINGS = dict(
+    n_samples=5000,
+    n_initial_samples=10000,
+    sample_kwargs=dict(
+        sampler="minipcn_smc",
+        adaptive=True,
+        sampler_kwargs=dict(
+            n_steps=N_MUTATION_STEPS,
+            target_acceptance_rate=0.234,
+            step_fn="tpcn",
+        ),
+    ),
+)
+
 
 def setup():
     """Set up detector, likelihood, priors, and sampler configuration."""
@@ -211,25 +270,19 @@ def run_rejection(_common_laplace):
 
 
 def run_smc(_common_laplace):
+    """Run the SMC resampling stage with the shared GW settings.
+
+    ``mode_search_subspace`` is set here rather than in ``GW_SMC_SETTINGS``
+    because it names this example's sky coordinates (``zenith``/``azimuth``,
+    where BNS_3G uses ``ra``/``dec``).  It identifies *which* coordinates a sky
+    degeneracy lives in, not a tuned value.
+    """
     return bilby.run_sampler(
         **_common_laplace,
+        **GW_SMC_SETTINGS,
         label=f"{base_label}_smc",
         resample="smc",
-        smc_kwargs=dict(
-            sampler="minipcn_smc",
-            n_initial_samples=10000,
-            n_samples=10000,
-            adaptive=True,
-            sampler_kwargs=dict(
-                n_steps=10,
-                target_acceptance_rate=0.234,
-                step_fn="tpcn",
-            ),
-        ),
-        cov_scaling=2,
-        jacobian_cap_scale=1,
-        prior_parameters=["chi_1", "chi_2"],
-        n_modes=3,
+        mode_search_subspace=["zenith", "azimuth"],
     )
 
 
@@ -244,19 +297,10 @@ def run_smc_direct(_common):
     """
     return bilby.run_sampler(
         **_common,
+        **GW_SMC_DIRECT_SETTINGS,
         sampler="aspire",
         label=f"{base_label}_smc_direct",
-        n_samples=10000,
-        n_initial_samples=10000,
-        sample_kwargs=dict(
-            sampler="minipcn_smc",
-            adaptive=True,
-            sampler_kwargs=dict(
-                n_steps=10,
-                target_acceptance_rate=0.234,
-                step_fn="tpcn",
-            ),
-        ),
+        enable_checkpointing=False,
         npool=16,
     )
 

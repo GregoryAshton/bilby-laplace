@@ -155,6 +155,10 @@ class LaplacePosteriorEstimator:
             raise ValueError(f"fisher_method must be 'hessian' or 'waveform', got {fisher_method!r}.")
         self.N = len(self.parameter_names)
         self.priors_dict = {key: priors[key] for key in self.parameter_names}
+        # Per-prior bound on the precision it may contribute; see
+        # ``_prior_precision_cap``.  Depends only on the prior, so it is cached
+        # across the repeated precision evaluations of a multi-mode search.
+        self._prior_precision_cap_cache = {}
 
         # Construct prior samples at initialisation so that the prior is not stored.
         # Skip when using differential_evolution, which doesn't need starting points.
@@ -493,8 +497,44 @@ class LaplacePosteriorEstimator:
                 lp_plus = np.log(prior.prob(x + h))
                 lp_minus = np.log(prior.prob(x - h))
             d2 = (lp_plus - 2.0 * lp + lp_minus) / h**2
-            precision[i] = -d2 if np.isfinite(d2) else 0.0
+            value = -d2 if np.isfinite(d2) else 0.0
+            # Bound the contribution.  Evaluated pointwise this curvature is
+            # unbounded in *both* directions and both bites in practice.  It
+            # diverges at a cusp in the prior density: an ``AlignedSpin`` prior
+            # diverges logarithmically at chi = 0, the MAP of a log-posterior is
+            # pulled onto that cusp, and differencing it there returns ~1.5e7 --
+            # collapsing that parameter's width by a factor of ~800 with the
+            # likelihood Fisher contributing nothing.  And it goes negative
+            # wherever log pi is locally convex (the flank of that same cusp
+            # gives ~-70), which subtracts information and pushes the precision
+            # matrix towards indefiniteness.  A one-dimensional prior can supply
+            # neither more information than its own inverse variance nor less
+            # than none, so clamp to that range.
+            precision[i] = float(np.clip(value, 0.0, self._prior_precision_cap(key, prior)))
         return precision
+
+    # Draws used to bound the prior precision.  Sampling rather than an analytic
+    # variance because bilby priors do not expose one uniformly; 20k keeps the
+    # bound's Monte-Carlo error well under a percent.
+    _PRIOR_PRECISION_CAP_NSAMPLES = 20000
+
+    def _prior_precision_cap(self, key, prior):
+        """Largest precision the 1-D prior on *key* may contribute.
+
+        ``1 / Var(prior)``: a prior cannot pin a parameter down more tightly
+        than its own spread.  A prior that cannot be sampled is left unbounded
+        rather than guessed at, which preserves the previous behaviour for it.
+        """
+        if key not in self._prior_precision_cap_cache:
+            try:
+                draws = np.asarray(prior.sample(self._PRIOR_PRECISION_CAP_NSAMPLES), dtype=float)
+                variance = float(np.var(draws[np.isfinite(draws)]))
+            except Exception as exc:  # pragma: no cover - prior-specific failure
+                logger.debug(f"Could not sample prior {key!r} to bound its precision: {exc}")
+                variance = np.nan
+            usable = np.isfinite(variance) and variance > 0
+            self._prior_precision_cap_cache[key] = 1.0 / variance if usable else np.inf
+        return self._prior_precision_cap_cache[key]
 
     def _calculate_precision_parameter_space(self, sample):
         logger.info("Computing Hessian of log-posterior (scipy.differentiate)")

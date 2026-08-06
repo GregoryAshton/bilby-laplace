@@ -89,25 +89,41 @@ class GaussianFlow:
 
 
 class GaussianMixtureFlow:
-    """Aspire-compatible Flow wrapping an equal-weight Gaussian mixture.
+    """Aspire-compatible Flow wrapping a Gaussian mixture.
 
     Used as ``prior_flow`` when multiple MAP estimates are available, so the
     SMC annealing path starts from a mixture that covers all discovered modes.
+    Components are equally weighted unless ``log_weights`` is given (see
+    ``Laplace._laplace_mode_log_weights``); the weights are normalised here, so
+    unnormalised log-evidences can be passed straight in.
     """
 
-    def __init__(self, means, covs):
+    def __init__(self, means, covs, log_weights=None):
         self._dists = [multivariate_normal(mean=m, cov=c) for m, c in zip(means, covs)]
         self._k = len(self._dists)
-        self._log_w = -np.log(self._k)  # equal weights in log space
+        if log_weights is None:
+            self._log_w = np.full(self._k, -np.log(self._k))
+        else:
+            log_w = np.asarray(log_weights, dtype=float)
+            if log_w.shape != (self._k,):
+                raise ValueError(f"log_weights must have one entry per component; got {log_w.shape} for k={self._k}")
+            self._log_w = log_w - logsumexp(log_w)
+        self._w = np.exp(self._log_w)
+
+    @property
+    def weights(self):
+        """Normalised component weights, ordered as the components were given."""
+        return self._w.copy()
 
     def log_prob(self, x):
         x = np.asarray(x)
         # log_probs: shape (K, N) or (K,) for a single point
         log_probs = np.array([d.logpdf(x) for d in self._dists])
-        return logsumexp(log_probs + self._log_w, axis=0)
+        log_w = self._log_w if log_probs.ndim == 1 else self._log_w[:, None]
+        return logsumexp(log_probs + log_w, axis=0)
 
     def sample_and_log_prob(self, n_samples):
-        idx = random.rng.integers(0, self._k, n_samples)
+        idx = random.rng.choice(self._k, size=n_samples, p=self._w)
         x = np.array([random.rng.multivariate_normal(self._dists[i].mean, self._dists[i].cov) for i in idx])
         return x, self.log_prob(x)
 
@@ -240,15 +256,45 @@ class Laplace(Sampler):
         Number of distinct posterior modes to search for when
         ``resample='smc'``.  When ``n_modes > 1`` the optimiser is restarted
         from multiple prior draws and distinct MAP estimates are combined into
-        an equal-weight Gaussian mixture proposal for the SMC.  Modes are
-        deduplicated by requiring a normalised separation of at least 3-sigma
-        in any parameter.  Default is 1 (single Gaussian, original behaviour).
+        a Gaussian mixture proposal for the SMC.  Modes are deduplicated by
+        requiring a normalised separation of at least ``mode_separation_sigma``
+        in some parameter.  Default is 1 (single Gaussian, original behaviour).
     mode_search_nsamples : int
         Number of prior draws used when searching for secondary modes
         (``n_modes > 1``).  Higher values make mode discovery more
         reliable in high-dimensional spaces, at the cost of more
         likelihood evaluations.  Uses Latin hypercube sampling for
         even coverage.  Default is 500.
+    mode_search_subspace : list of str or None
+        Restrict the search for secondary modes to these parameters, holding
+        the rest at the primary MAP (the polish step still runs in the full
+        space, so a candidate is free to move afterwards).  Use it when the
+        degeneracy lives in known coordinates: a narrow mode is undiscoverable
+        by a Latin hypercube over the full space -- a sky mode a few 0.01 rad
+        across is ~1e-4 of the sky -- but the same budget covers two or three
+        named dimensions densely.  For a GW sky reflection, for example,
+        ``["zenith", "azimuth"]``.  Default None (search all parameters).
+    mode_separation_sigma : float
+        How far apart two modes must be, in units of the primary mode's
+        per-parameter sigma, to count as distinct.  A candidate closer than this
+        to a known mode is skipped before polishing, and a polished candidate
+        closer than this is discarded as a duplicate.  Default 3.0.
+
+        Lower it when a real secondary mode sits close to the primary: on the
+        HLV example the second sky mode is 3.3 sigma away in azimuth and 2 sigma
+        in zenith, so at the default it is rejected as a duplicate and the
+        search keeps a distant sidelobe instead.  Raise it if one broad mode is
+        being split into several.  This is deliberately per-run rather than a
+        new default -- the right value depends on how well separated the
+        posterior's modes are, which is the thing being discovered.
+        How to weight the mixture components when ``n_modes > 1``.  ``'equal'``
+        (default) gives every mode the same weight.  ``'laplace'`` weights each
+        by its Laplace local evidence -- log-posterior at the mode plus half the
+        log-determinant of its covariance -- so a broad shallow mode can outweigh
+        a narrow tall one, which weighting by peak height alone would not
+        capture.  The weights set both the mixture proposal and the share of the
+        initial SMC cloud drawn from each mode; every mode keeps at least one
+        particle regardless.
     smc_kwargs : dict or None
         Configuration for SMC sampling (only used when ``resample='smc'``).
         Recognised keys:
@@ -276,13 +322,18 @@ class Laplace(Sampler):
         accessible this way.
     smc_progress : bool
         If True (default) and ``resample='smc'`` with an SMC-family sampler,
-        register a per-iteration callback that (a) logs a one-line progress
-        summary at INFO and (b) when ``plot_diagnostic=True`` overwrites the
-        SMC stats and evolution-and-marginals diagnostic figures so they
-        track the live state. Set to False to disable both. To throttle (e.g.
-        only every 5 iterations), pass ``smc_kwargs=dict(checkpoint_every=5)``;
-        to override the callback entirely, pass your own
-        ``smc_kwargs=dict(checkpoint_callback=...)``.
+        register a per-iteration callback that logs a one-line progress summary
+        at INFO (and, when ``smc_plot_every > 0``, re-renders the diagnostic
+        figures). Set to False to disable it. To override the callback
+        entirely, pass your own ``smc_kwargs=dict(checkpoint_callback=...)``.
+    smc_plot_every : int
+        How often to re-render the SMC stats and evolution-and-marginals
+        figures *during* sampling, in iterations. ``0`` (default) means never:
+        they are written once when sampling finishes. Set to ``n > 0`` to watch
+        a long run live, at a cost -- the evolution figure fits a
+        ``gaussian_kde`` per parameter per iteration, so re-rendering it every
+        iteration grows quadratically over a run. Ignored unless
+        ``plot_diagnostic=True``, which is also what gates the final render.
     prior_parameters : list or None
         List of parameter names for which initial proposal samples should be
         replaced with independent draws from the prior. Use this for parameters
@@ -332,8 +383,12 @@ class Laplace(Sampler):
         fisher_kwargs=None,
         n_modes=1,
         mode_search_nsamples=500,
+        mode_search_subspace=None,
+        mode_separation_sigma=3.0,
+        mode_weights="equal",
         smc_kwargs=None,
         smc_progress=True,
+        smc_plot_every=0,
         max_iterations=1e6,
         prior_parameters=None,
         resume=True,
@@ -1101,21 +1156,47 @@ class Laplace(Sampler):
         x_out = df_out.values
         return x_out
 
-    def _draw_initial_smc_samples(self, proposals, n, parameter_names):
-        """Draw *n* in-prior samples spread evenly across *proposals*.
+    @staticmethod
+    def _stratified_counts(n, weights):
+        """Split *n* draws across components in proportion to *weights*.
+
+        Largest-remainder apportionment, so the counts sum to exactly *n*.
+        Every component gets at least one draw: a mode the Laplace weighting
+        judges negligible may simply have a poorly estimated covariance, and
+        leaving it entirely unrepresented in the initial cloud is not something
+        SMC can recover from.
+        """
+        k = len(weights)
+        if n < k:
+            raise SamplerError(f"Cannot draw {n} initial samples across {k} modes; need at least one per mode.")
+        w = np.asarray(weights, dtype=float)
+        w = np.full(k, 1.0 / k) if not np.isfinite(w).all() or w.sum() <= 0 else w / w.sum()
+
+        exact = w * (n - k)  # reserve one per mode, apportion the rest
+        counts = np.floor(exact).astype(int)
+        for i in np.argsort(exact - counts)[::-1][: int((n - k) - counts.sum())]:
+            counts[i] += 1
+        return (counts + 1).tolist()
+
+    def _draw_initial_smc_samples(self, proposals, n, parameter_names, weights=None):
+        """Draw *n* in-prior samples spread across *proposals*.
 
         With one proposal this is exactly ``_draw_inprior_samples``.  With
         several -- one per mode found by ``_find_multiple_maps`` -- the draw is
-        stratified so every mode contributes an equal share, which is what makes
-        the flow aspire fits to this cloud multimodal.  Returns an
-        ``(n, ndim)`` float array.
+        stratified across modes, which is what makes the flow aspire fits to this
+        cloud multimodal.  The split follows *weights* when given (so the cloud
+        matches the mixture used as the proposal flow) and is even otherwise.
+        Returns an ``(n, ndim)`` float array.
         """
         if len(proposals) == 1:
             return self._draw_inprior_samples(proposals[0], n, parameter_names)
 
         k = len(proposals)
-        # Spread the remainder over the leading modes so the total is exactly n.
-        counts = [n // k + (1 if i < n % k else 0) for i in range(k)]
+        if weights is None:
+            # Spread the remainder over the leading modes so the total is exactly n.
+            counts = [n // k + (1 if i < n % k else 0) for i in range(k)]
+        else:
+            counts = self._stratified_counts(n, weights)
         chunks = []
         for i, (mode_proposal, n_i) in enumerate(zip(proposals, counts)):
             x_i = self._draw_inprior_samples(mode_proposal, n_i, parameter_names)
@@ -1279,11 +1360,22 @@ class Laplace(Sampler):
         """
         n_modes = self.kwargs["n_modes"]
         if n_modes > 1:
-            map_estimates = self._find_multiple_maps(estimator, n_modes, cov_scaling)
+            map_estimates = self._find_multiple_maps(estimator, n_modes, cov_scaling, mean, cov)
+            mode_weighting = self.kwargs["mode_weights"]
+            if mode_weighting == "laplace":
+                log_weights = self._laplace_mode_log_weights(map_estimates, len(estimator.parameter_names))
+                map_estimates, log_weights = self._drop_negligible_modes(map_estimates, log_weights)
+            elif mode_weighting == "equal":
+                log_weights = None
+            else:
+                raise SamplerError(f"mode_weights must be 'equal' or 'laplace', got {mode_weighting!r}.")
             proposal_flow = GaussianMixtureFlow(
-                [m for m, _ in map_estimates],
-                [c for _, c in map_estimates],
+                [m for m, _, _ in map_estimates],
+                [c for _, c, _ in map_estimates],
+                log_weights=log_weights,
             )
+            mode_weight_values = proposal_flow.weights
+            self._log_mode_summary(map_estimates, estimator.parameter_names, mode_weight_values)
             # One truncated proposal per discovered mode.  Aspire has no way to
             # take our mixture directly (``sample_posterior`` uses the flow that
             # ``fit`` trains as its ``prior_flow``), so the modes must reach it
@@ -1295,13 +1387,16 @@ class Laplace(Sampler):
                     lower=estimator.prior_bounds_min,
                     upper=estimator.prior_bounds_max,
                 )
-                for mode_mean, mode_cov in map_estimates
+                for mode_mean, mode_cov, _ in map_estimates
             ]
         else:
             proposal_flow = GaussianFlow(mean, cov)
             init_proposals = [proposal]
+            mode_weight_values = None
 
-        samples, logl, smc_log_z, smc_log_z_err, nlikelihood = self._smc_sample(init_proposals, estimator)
+        samples, logl, smc_log_z, smc_log_z_err, nlikelihood = self._smc_sample(
+            init_proposals, estimator, mode_weights=mode_weight_values
+        )
 
         if self.kwargs["plot_diagnostic"]:
             self.create_smc_diagnostic(samples, proposal_flow)
@@ -1727,7 +1822,7 @@ class Laplace(Sampler):
 
         return batched_log_likelihood
 
-    def _smc_sample(self, init_proposals, estimator):
+    def _smc_sample(self, init_proposals, estimator, mode_weights=None):
         """Run posterior sampling via aspire, starting from the Laplace proposal.
 
         *init_proposals* is a list of ``TruncatedMVNProposal`` objects, one per
@@ -1754,12 +1849,27 @@ class Laplace(Sampler):
         n_likelihood_evaluations = [0]
         batched_log_likelihood = self._make_aspire_log_likelihood(estimator, n_likelihood_evaluations)
 
+        # Aspire has to be told which coordinates wrap.  Without this a
+        # periodic parameter gets the bounded->logit preconditioning instead of
+        # angular treatment and the pCN kernel cannot step across the boundary
+        # -- on the HLV example that affects psi and azimuth, and psi was
+        # consistently the worst-recovered parameter.  Derived from the priors
+        # the same way ``aspire_bilby`` derives it (``boundary == "periodic"``),
+        # then restricted to sampled parameters: a marginalised periodic
+        # coordinate such as phase is not part of aspire's parameter vector.
+        periodic_parameters = [
+            key for key in parameter_names if getattr(self.priors[key], "boundary", None) == "periodic"
+        ]
+        if periodic_parameters:
+            logger.info(f"Declaring periodic parameter(s) to aspire: {periodic_parameters}")
+
         aspire_sampler = Aspire(
             log_likelihood=batched_log_likelihood,
             log_prior=functions.log_prior,
             dims=len(parameter_names),
             parameters=parameter_names,
             prior_bounds=prior_bounds,
+            periodic_parameters=periodic_parameters,
         )
 
         # Copy so we can pop without mutating the user's dict
@@ -1774,7 +1884,9 @@ class Laplace(Sampler):
 
         # Draw initial samples filtered to the prior support, consistent with
         # the inprior/rejection sampling paths.
-        initial_theta = self._draw_initial_smc_samples(init_proposals, n_initial, parameter_names)
+        initial_theta = self._draw_initial_smc_samples(
+            init_proposals, n_initial, parameter_names, weights=mode_weights
+        )
 
         if len(init_proposals) > 1 and self.kwargs["plot_diagnostic"]:
             # Overwrite the proposal diagnostic now that the real initial cloud
@@ -1826,6 +1938,8 @@ class Laplace(Sampler):
             n_samples, sampler=sampler_type, return_history=True, **smc_kw
         )
 
+        self._save_smc_figures(self._smc_history, result)
+
         x_out = np.asarray(result.x)
         samples = pd.DataFrame(x_out, columns=parameter_names)
         logl = estimator.log_likelihood_from_array(x_out.T)
@@ -1861,6 +1975,7 @@ class Laplace(Sampler):
         hand to keep both behaviours.
         """
         plot_diagnostic = bool(self.kwargs.get("plot_diagnostic", False))
+        plot_every = int(self.kwargs.get("smc_plot_every", 0) or 0)
         # Aspire force-calls the callback once more at the end with the same
         # iteration number; track the last-logged iteration so the per-iter log
         # line is not duplicated.  Plotting stays idempotent.
@@ -1898,7 +2013,11 @@ class Laplace(Sampler):
                 except Exception as exc:  # logging is best-effort
                     logger.debug(f"SMC per-iter logging failed: {exc}")
                 last_logged_iter[0] = iteration
-            if not plot_diagnostic:
+            # Re-rendering every iteration is expensive: the evolution figure
+            # fits a gaussian_kde per parameter per iteration, so the cost grows
+            # quadratically over a run.  Off by default -- the figures are
+            # written once at the end instead (see `_save_smc_figures`).
+            if not plot_diagnostic or plot_every <= 0 or iteration % plot_every:
                 return
             try:
                 self._save_smc_stats_figure(history)
@@ -1930,6 +2049,22 @@ class Laplace(Sampler):
         if getattr(history, "mcmc_autocorr", None):
             parts.append(f"autocorr={history.mcmc_autocorr[-1]:.1f}")
         logger.info(", ".join(parts))
+
+    def _save_smc_figures(self, history, live_samples):
+        """Write the SMC stats and evolution figures.
+
+        Called once after sampling so the figures exist even when the
+        per-iteration callback is not rendering them (the default).  Plotting is
+        best-effort: a failed figure must not lose a completed run.
+        """
+        if not self.kwargs.get("plot_diagnostic", False) or history is None:
+            return
+        try:
+            self._save_smc_stats_figure(history)
+            if live_samples is not None and getattr(history, "sample_history", None):
+                self._save_smc_evolution_marginals_figure(history, live_samples)
+        except Exception as exc:
+            logger.warning(f"SMC diagnostic plotting failed: {exc}")
 
     def _save_smc_stats_figure(self, history):
         """Overwrite the SMC stats figure with the current history."""
@@ -2271,49 +2406,80 @@ class Laplace(Sampler):
 
         return samples
 
-    def _find_multiple_maps(self, estimator, n_modes, cov_scaling):
-        """Find up to *n_modes* distinct MAP estimates and their
-        covariances.
+    def _find_multiple_maps(self, estimator, n_modes, cov_scaling, primary_mean, primary_cov):
+        """Find up to *n_modes* distinct MAP estimates and their covariances.
 
-        Uses differential evolution (DE) for the primary mode, then
-        multi-start local optimization from prior samples to discover
-        secondary modes.  Each candidate is polished, deduplicated
-        by 3-sigma separation, and has its covariance validated.
+        The primary mode is *given*: ``primary_mean`` and ``primary_cov`` are the
+        MAP and covariance ``run_sampler`` already computed, validated and
+        scaled.  Only the search for secondary modes happens here -- multi-start
+        local optimisation from prior draws, each candidate polished,
+        deduplicated by ``mode_separation_sigma``, and covariance-validated.
 
-        Returns a list of ``(mean_array, cov_array)`` pairs sorted by
+        Taking the primary rather than recomputing it is what makes
+        ``n_modes > 1`` a superset of ``n_modes = 1`` instead of a different
+        analysis.  This used to run its own differential evolution, ignoring
+        ``use_injection_for_map`` and skipping the polish that secondary
+        candidates get; on the HLV example that landed 59-200 nats below the
+        injection-seeded MAP and at the wrong sky position, which lengthened the
+        SMC schedule from ~7 tempering iterations to 15+ purely by degrading the
+        seed.  It also cost a redundant global optimisation and Hessian.
+
+        Returns a list of ``(mean, cov, log_posterior)`` triples sorted by
         descending log-posterior.
         """
         parameter_names = estimator.parameter_names
         logger.info(f"Searching for up to {n_modes} posterior " f"mode(s)")
 
-        # --- 1. Find primary mode with DE ---
-        result = estimator._maximize_posterior_differential_evolution()
-        best_mean = np.array(result.x)
-        best_logp = -result.fun
-        best_dict = dict(zip(parameter_names, best_mean))
-        logger.info(f"Primary mode found: " f"log-posterior = {best_logp:.2f}")
-
-        try:
-            covariance = estimator.calculate_posterior_covariance(best_dict)
-            # Validate first, then scale last (see run_sampler for rationale).
-            cov = self._validate_covariance(estimator, best_mean, covariance)
-            cov = self._apply_cov_scaling(cov, cov_scaling)
-            std_scale = np.sqrt(np.diag(cov))
-        except Exception as exc:
-            raise SamplerError(f"Covariance estimation failed for primary mode: {exc}")
+        # --- 1. Primary mode: the one run_sampler already found ---
+        best_mean = np.asarray(primary_mean, dtype=float)
+        cov = np.asarray(primary_cov, dtype=float)
+        best_logp = float(estimator.log_posterior_from_array(best_mean))
+        std_scale = np.sqrt(np.diag(cov))
+        logger.info(f"Primary mode taken from the MAP search: " f"log-posterior = {best_logp:.2f}")
 
         found_modes = [(best_mean, cov, best_logp)]
 
         if n_modes <= 1:
             self._log_mode_summary(found_modes, parameter_names)
-            return [(m, c) for m, c, _ in found_modes]
+            return found_modes
 
         # --- 2. Multi-start search for secondary modes ---
         n_starts = self.kwargs["mode_search_nsamples"]
-        logger.info(f"Evaluating {n_starts} prior samples " f"(Latin hypercube) to search for " f"secondary modes")
+        subspace = self.kwargs.get("mode_search_subspace")
+        separation = float(self.kwargs["mode_separation_sigma"])
+        if not np.isfinite(separation) or separation <= 0:
+            raise SamplerError(f"mode_separation_sigma must be finite and positive, got {separation!r}.")
 
         # Latin hypercube in [0,1]^D, then map to prior
         prior_x = self._latin_hypercube_prior(parameter_names, n_starts)
+
+        if subspace:
+            unknown = [name for name in subspace if name not in parameter_names]
+            if unknown:
+                raise SamplerError(
+                    f"mode_search_subspace names parameter(s) not being sampled: {unknown}. "
+                    f"Sampled parameters are {list(parameter_names)}."
+                )
+            # Vary only the named coordinates and pin the rest at the primary
+            # MAP.  Searching the full space is what makes a narrow secondary
+            # mode undiscoverable: a sky mode a few 0.01 rad across is ~1e-4 of
+            # the sky, and a Latin hypercube over all D dimensions will not land
+            # in it.  Restricted to the coordinates the degeneracy actually
+            # lives in, the same budget covers the subspace densely.  The polish
+            # below still runs in the full space, so the pinned coordinates are
+            # free to move once a candidate is found.
+            free = [parameter_names.index(name) for name in subspace]
+            pinned = np.tile(best_mean, (len(prior_x), 1))
+            pinned[:, free] = prior_x[:, free]
+            prior_x = pinned
+            logger.info(
+                f"Evaluating {n_starts} Latin hypercube samples over "
+                f"{list(subspace)} (other parameters pinned at the primary MAP) "
+                f"to search for secondary modes"
+            )
+        else:
+            logger.info(f"Evaluating {n_starts} prior samples " f"(Latin hypercube) to search for " f"secondary modes")
+
         prior_logp = np.array([float(estimator.log_posterior_from_array(x)) for x in prior_x])
 
         # Sort descending by posterior
@@ -2332,7 +2498,7 @@ class Laplace(Sampler):
             x = prior_x[idx]
 
             # Skip if near an existing mode
-            near_existing = any(np.max(np.abs(x - m) / std_scale) < 3.0 for m, _, _ in found_modes)
+            near_existing = any(np.max(np.abs(x - m) / std_scale) < separation for m, _, _ in found_modes)
             if near_existing:
                 continue
 
@@ -2345,7 +2511,7 @@ class Laplace(Sampler):
             logger.debug(f"Candidate {n_polished}: " f"log-posterior = {p_logp:.2f} " f"after local optimisation")
 
             # Re-check after polishing
-            is_dup = any(np.max(np.abs(p_mean - m) / std_scale) < 3.0 for m, _, _ in found_modes)
+            is_dup = any(np.max(np.abs(p_mean - m) / std_scale) < separation for m, _, _ in found_modes)
             if is_dup:
                 logger.debug(f"Candidate {n_polished} converged to " f"a known mode; skipping")
                 continue
@@ -2363,17 +2529,85 @@ class Laplace(Sampler):
 
         # --- 3. Sort and summarise ---
         found_modes.sort(key=lambda r: r[2], reverse=True)
-        self._log_mode_summary(found_modes, parameter_names)
-        return [(m, c) for m, c, _ in found_modes]
+        # The caller logs the summary once the mixture weights are known.
+        return found_modes
+
+    # Mixture components holding less than this share of the total Laplace mass
+    # are dropped rather than seeded.  Keeping them is worse than useless: such a
+    # mode contributes a particle or two to a 10k cloud -- enough to appear as a
+    # stray point in the diagnostics, far too few to be sampled -- and in
+    # practice it is a likelihood sidelobe the mode search turned up and the
+    # weighting correctly rejected (on the HLV example, one at exactly the
+    # primary azimuth plus pi).
+    _MIN_MODE_WEIGHT = 1e-3
+
+    def _drop_negligible_modes(self, found_modes, log_weights):
+        """Discard mixture components below ``_MIN_MODE_WEIGHT``.
+
+        Returns the surviving ``(mean, cov, logp)`` triples and their log
+        weights.  The highest-weight mode is always kept, so this can never
+        empty the mixture.
+        """
+        weights = np.exp(log_weights - logsumexp(log_weights))
+        keep = weights >= self._MIN_MODE_WEIGHT
+        keep[int(np.argmax(weights))] = True
+        if keep.all():
+            return found_modes, log_weights
+
+        dropped = [
+            f"{np.array2string(np.asarray(mean), precision=4)} (weight {weight:.2e})"
+            for (mean, _cov, _logp), weight, kept in zip(found_modes, weights, keep)
+            if not kept
+        ]
+        logger.info(
+            f"Dropping {len(dropped)} mixture component(s) below the "
+            f"{self._MIN_MODE_WEIGHT:g} weight threshold: " + "; ".join(dropped)
+        )
+        return [m for m, kept in zip(found_modes, keep) if kept], log_weights[keep]
 
     @staticmethod
-    def _log_mode_summary(found_modes, parameter_names):
+    def _laplace_mode_log_weights(found_modes, ndim):
+        """Unnormalised log Laplace evidence of each mode.
+
+        The mass a mode carries is not its peak height: a broad shallow mode can
+        hold more posterior mass than a narrow tall one.  The Laplace estimate of
+        a mode's local evidence is
+
+            log Z_i = log L_i + log pi_i + (d/2) log(2 pi) + (1/2) log det Sigma_i
+
+        i.e. the log-posterior at the mode plus the log-volume of its covariance.
+        Weighting by log-posterior alone would drop the volume term and
+        systematically over-weight the narrowest mode.  The ``(d/2) log(2 pi)``
+        term is common to every mode and cancels on normalisation; it is kept so
+        the values are readable as evidences.
+
+        A mode whose covariance is not positive definite falls back to its
+        log-posterior, which at worst reproduces the naive weighting for that
+        one component.
+        """
+        log_weights = []
+        for mean, cov, logp in found_modes:
+            sign, log_det = np.linalg.slogdet(np.asarray(cov, dtype=float))
+            if sign <= 0 or not np.isfinite(log_det):
+                logger.warning(
+                    "Mode at "
+                    + np.array2string(np.asarray(mean), precision=4)
+                    + " has a non-positive-definite covariance; weighting it by log-posterior alone."
+                )
+                log_weights.append(float(logp))
+            else:
+                log_weights.append(float(logp) + 0.5 * ndim * np.log(2.0 * np.pi) + 0.5 * float(log_det))
+        return np.asarray(log_weights, dtype=float)
+
+    @staticmethod
+    def _log_mode_summary(found_modes, parameter_names, weights=None):
         """Log a table summarising the discovered modes."""
-        header = f"{'Mode':<6} {'log-posterior':>14}  " + "  ".join(f"{p:>12}" for p in parameter_names)
+        header = f"{'Mode':<6} {'log-posterior':>14} {'weight':>8}  " + "  ".join(f"{p:>12}" for p in parameter_names)
         rows = []
         for i, (mean, _cov, logp) in enumerate(found_modes):
             vals = "  ".join(f"{v:>+12.4f}" for v in mean)
-            rows.append(f"  {i:<4d} {logp:>14.2f}  {vals}")
+            weight = f"{weights[i]:>8.4f}" if weights is not None else f"{'-':>8}"
+            rows.append(f"  {i:<4d} {logp:>14.2f} {weight}  {vals}")
         logger.info(f"Summary of {len(found_modes)} mode(s):\n" f"  {header}\n" + "\n".join(rows))
 
     def create_proposal_diagnostic(self, mean, cov, parameter_names, init_samples=None):
