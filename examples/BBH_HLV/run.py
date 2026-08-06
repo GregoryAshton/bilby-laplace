@@ -306,11 +306,22 @@ def run_smc_direct(_common):
 
 
 def run_dynesty(_common):
+    """Reference run, using the settings used for production GW parameter
+    estimation.  Kept in step with examples/BNS_3G/run.py.
+
+    ``sample="acceptance-walk"`` takes a fixed ``naccept`` accepted MCMC steps
+    per point rather than adapting the chain length from the autocorrelation,
+    so the cost per point is predictable and the worker pool stays busy instead
+    of waiting on stragglers.
+    """
     return bilby.run_sampler(
         **_common,
         sampler="dynesty",
         label=f"{base_label}_dynesty",
         nlive=1000,
+        sample="acceptance-walk",
+        naccept=60,
+        maxmcmc=5000,
         check_point_delta_t=1800,
         check_point_plot=True,
         npool=16,
