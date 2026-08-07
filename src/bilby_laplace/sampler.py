@@ -11,7 +11,7 @@ import tqdm
 from bilby.core.sampler.base_sampler import Sampler, signal_wrapper
 from bilby.core.utils import logger, random
 from scipy.special import logsumexp
-from scipy.stats import multivariate_normal, truncnorm
+from scipy.stats import multivariate_normal, norm, truncnorm
 
 from .laplace import LaplacePosteriorEstimator
 
@@ -29,43 +29,80 @@ except ImportError:
 
 
 class TruncatedMVNProposal:
-    """Per-marginal independent truncated Gaussian proposal.
+    """Per-marginal independent Gaussian proposal, bounded to the prior.
 
-    Each parameter is sampled independently from a truncated normal
-    distribution whose scale is the marginal standard deviation
-    ``sqrt(cov[i, i])`` and whose support is clipped to the prior bounds.
-    The log-pdf is the sum of the per-marginal truncated normal log-pdfs.
-
-    Sampling is always efficient regardless of how much wider the Gaussian
-    is than the prior: every draw lands within the prior support.  Off-
-    diagonal covariance elements are not used in sampling or the log-pdf;
+    Each parameter is sampled independently with scale ``sqrt(cov[i, i])``.
+    Off-diagonal covariance elements are not used in sampling or the log-pdf;
     inter-parameter correlations are recovered through the likelihood during
     the acceptance step.
+
+    Bounded parameters use a truncated normal, so every draw lands inside the
+    prior support however wide the Gaussian is.  *Periodic* parameters are
+    **wrapped** instead: truncation renormalises the density inside the range
+    and puts zero mass on the far side of the boundary, but for an angle the
+    mass below the lower edge belongs just under the upper edge.  On the
+    precessing BBH example the ``phi_jl`` MAP sits at 0.835 with a proposal
+    sigma near 1.4, so about a quarter of its Gaussian falls below zero;
+    truncating lost that tail entirely, leaving 1.6% of the posterior above
+    0.85*2pi where dynesty has 12%.
     """
 
-    def __init__(self, mean, cov, lower, upper):
-        self.mean = mean
+    # Wrapped-normal images summed either side of the principal range.  The
+    # proposal sigma never approaches the period in practice, so three is far
+    # more than enough for the sum to converge.
+    _N_WRAPS = 3
+
+    def __init__(self, mean, cov, lower, upper, periodic=None):
+        self.mean = np.asarray(mean, dtype=float)
         # Retained for diagnostics only; sampling uses the per-marginal
         # ``_sigma`` below, not the full covariance.
         self.cov = cov
         self._sigma = np.sqrt(np.diag(cov))
-        self._ndim = len(mean)
-        # Standardised bounds for truncnorm: a = (lo - μ)/σ, b = (hi - μ)/σ
-        self._a = (lower - mean) / self._sigma
-        self._b = (upper - mean) / self._sigma
+        self._ndim = len(self.mean)
+        self._lower = np.asarray(lower, dtype=float)
+        self._upper = np.asarray(upper, dtype=float)
+        self._period = self._upper - self._lower
+        if periodic is None:
+            self._periodic = np.zeros(self._ndim, dtype=bool)
+        else:
+            self._periodic = np.asarray(periodic, dtype=bool)
+            if self._periodic.shape != (self._ndim,):
+                raise ValueError(f"periodic must have one entry per parameter; got {self._periodic.shape}")
+        # Standardised bounds for truncnorm: a = (lo - mu)/sigma, b = (hi - mu)/sigma
+        self._a = (self._lower - self.mean) / self._sigma
+        self._b = (self._upper - self.mean) / self._sigma
         self._dists = [
-            truncnorm(a=self._a[i], b=self._b[i], loc=mean[i], scale=self._sigma[i]) for i in range(self._ndim)
+            truncnorm(a=self._a[i], b=self._b[i], loc=self.mean[i], scale=self._sigma[i])
+            for i in range(self._ndim)
         ]
 
+    def _wrap(self, x, i):
+        """Fold *x* into ``[lower_i, upper_i)``."""
+        return self._lower[i] + np.mod(x - self._lower[i], self._period[i])
+
+    def _wrapped_logpdf(self, x, i):
+        """Log density of the wrapped normal on parameter *i*."""
+        folded = self._wrap(np.asarray(x, dtype=float), i)
+        shifts = np.arange(-self._N_WRAPS, self._N_WRAPS + 1) * self._period[i]
+        images = folded[None, :] + shifts[:, None]
+        return logsumexp(norm.logpdf(images, loc=self.mean[i], scale=self._sigma[i]), axis=0)
+
     def sample(self, n):
-        return np.column_stack([d.rvs(n, random_state=random.rng) for d in self._dists])
+        columns = []
+        for i in range(self._ndim):
+            if self._periodic[i]:
+                columns.append(self._wrap(random.rng.normal(self.mean[i], self._sigma[i], n), i))
+            else:
+                columns.append(self._dists[i].rvs(n, random_state=random.rng))
+        return np.column_stack(columns)
 
     def logpdf(self, x):
         x = np.atleast_2d(x)
-        return np.sum(
-            [d.logpdf(x[:, i]) for i, d in enumerate(self._dists)],
-            axis=0,
-        )
+        terms = [
+            self._wrapped_logpdf(x[:, i], i) if self._periodic[i] else self._dists[i].logpdf(x[:, i])
+            for i in range(self._ndim)
+        ]
+        return np.sum(terms, axis=0)
 
 
 class GaussianFlow:
@@ -826,6 +863,18 @@ class Laplace(Sampler):
 
         return samples
 
+    def _periodic_mask(self, parameter_names):
+        """Boolean mask of which sampled parameters wrap.
+
+        Same rule ``aspire_bilby`` uses (``boundary == "periodic"``).  Needed by
+        the proposal so a periodic coordinate is wrapped rather than truncated,
+        and by ``_smc_sample`` so aspire treats it as an angle.
+        """
+        return np.array(
+            [getattr(self.priors[key], "boundary", None) == "periodic" for key in parameter_names],
+            dtype=bool,
+        )
+
     def _effective_log_proposal(self, proposal, x, parameter_names):
         """Log proposal density ``log g(x)`` accounting for prior-substituted
         dimensions.
@@ -967,6 +1016,7 @@ class Laplace(Sampler):
             cov,
             lower=estimator.prior_bounds_min,
             upper=estimator.prior_bounds_max,
+            periodic=self._periodic_mask(estimator.parameter_names),
         )
 
         if self.kwargs["plot_diagnostic"] and not resumed:
@@ -1386,6 +1436,7 @@ class Laplace(Sampler):
                     mode_cov,
                     lower=estimator.prior_bounds_min,
                     upper=estimator.prior_bounds_max,
+                    periodic=self._periodic_mask(estimator.parameter_names),
                 )
                 for mode_mean, mode_cov, _ in map_estimates
             ]
@@ -1857,9 +1908,8 @@ class Laplace(Sampler):
         # the same way ``aspire_bilby`` derives it (``boundary == "periodic"``),
         # then restricted to sampled parameters: a marginalised periodic
         # coordinate such as phase is not part of aspire's parameter vector.
-        periodic_parameters = [
-            key for key in parameter_names if getattr(self.priors[key], "boundary", None) == "periodic"
-        ]
+        mask = self._periodic_mask(parameter_names)
+        periodic_parameters = [key for key, is_periodic in zip(parameter_names, mask) if is_periodic]
         if periodic_parameters:
             logger.info(f"Declaring periodic parameter(s) to aspire: {periodic_parameters}")
 
