@@ -1913,6 +1913,14 @@ class Laplace(Sampler):
         if periodic_parameters:
             logger.info(f"Declaring periodic parameter(s) to aspire: {periodic_parameters}")
 
+        # Flow architecture goes to the Aspire *constructor* (it stores any
+        # extra kwargs as flow_kwargs), not to sample_posterior, which would
+        # forward them to sample() and raise.  ``n_final_samples`` by contrast
+        # is a sample() argument and rides through with the rest of smc_kw.
+        flow_kwargs = dict((self.kwargs.get("smc_kwargs") or {}).get("flow_kwargs") or {})
+        if flow_kwargs:
+            logger.info(f"Flow architecture: {flow_kwargs}")
+
         aspire_sampler = Aspire(
             log_likelihood=batched_log_likelihood,
             log_prior=functions.log_prior,
@@ -1920,6 +1928,7 @@ class Laplace(Sampler):
             parameters=parameter_names,
             prior_bounds=prior_bounds,
             periodic_parameters=periodic_parameters,
+            **flow_kwargs,
         )
 
         # Copy so we can pop without mutating the user's dict
@@ -1931,6 +1940,7 @@ class Laplace(Sampler):
         # cost of the run (not merely the size of a final draw).  It maps to the
         # first positional argument of ``sample_posterior``.
         n_samples = smc_kw.pop("n_samples", self.kwargs["target_nsamples"])
+        smc_kw.pop("flow_kwargs", None)  # consumed by the Aspire constructor above
 
         # Draw initial samples filtered to the prior support, consistent with
         # the inprior/rejection sampling paths.

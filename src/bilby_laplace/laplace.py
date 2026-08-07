@@ -159,6 +159,7 @@ class LaplacePosteriorEstimator:
         # ``_prior_precision_cap``.  Depends only on the prior, so it is cached
         # across the repeated precision evaluations of a multi-mode search.
         self._prior_precision_cap_cache = {}
+        self._prior_std_cache = None
 
         # Construct prior samples at initialisation so that the prior is not stored.
         # Skip when using differential_evolution, which doesn't need starting points.
@@ -394,6 +395,45 @@ class LaplacePosteriorEstimator:
         precision = p_rr - schur_term
         return self._floor_precision_at_prior(0.5 * (precision + precision.T))
 
+    # Quantiles used to evaluate each prior's standard deviation for the floor.
+    # Deterministic (a midpoint grid through the inverse CDF) rather than random
+    # draws: the proposal covariance must not jitter between runs, and this
+    # neither consumes the global RNG nor introduces Monte-Carlo error.
+    _PRIOR_STD_NQUANTILES = 4096
+
+    def _prior_standard_deviations(self):
+        """Per-parameter prior standard deviation, estimated from draws.
+
+        Cached: depends only on the priors, not on where the precision is
+        evaluated.  Evaluated rather than assumed, because the obvious closed form
+        -- ``width / sqrt(12)``, the std of a *uniform* prior -- is wrong for
+        every non-uniform prior, and this scale is exactly what sets the width
+        of a direction the data does not constrain.  A ``Sine`` prior is
+        overstated by 32% and an ``AlignedSpin`` by 73%.
+
+        Diagonal only: the estimator does not retain the full ``PriorDict``, so
+        correlations a constraint prior would induce are not captured.  Any
+        prior whose inverse CDF cannot be evaluated falls back to the uniform
+        form.
+        """
+        if getattr(self, "_prior_std_cache", None) is None:
+            quantiles = (np.arange(self._PRIOR_STD_NQUANTILES) + 0.5) / self._PRIOR_STD_NQUANTILES
+            stds = []
+            for key in self.parameter_names:
+                try:
+                    values = np.asarray(self.priors_dict[key].rescale(quantiles), dtype=float)
+                    stds.append(float(np.std(values[np.isfinite(values)])))
+                except Exception as exc:  # pragma: no cover - prior-specific
+                    logger.debug(f"Could not evaluate prior {key!r} for the precision floor: {exc}")
+                    stds.append(np.nan)
+            stds = np.asarray(stds, dtype=float)
+            fallback = np.array([self.prior_width_dict[k] for k in self.parameter_names]) / np.sqrt(12.0)
+            unusable = ~np.isfinite(stds) | (stds <= 0)
+            if unusable.any():
+                stds[unusable] = fallback[unusable]
+            self._prior_std_cache = stds
+        return self._prior_std_cache
+
     def _floor_precision_at_prior(self, precision):
         """Bound the parameter-space precision below by the prior precision.
 
@@ -401,14 +441,21 @@ class LaplacePosteriorEstimator:
         prior-bounded, so a direction the data leaves unconstrained -- e.g. the
         polarisation angle under phase marginalisation, whose Schur complement
         can be near-singular -- would otherwise invert to a runaway variance.
+        On the precessing BBH example the raw Fisher gives tilt_2 a marginal
+        sigma of 12 rad, larger than its entire prior range.
 
-        Rescaling by the prior standard deviation (``width / sqrt(12)``, the std
-        of a uniform prior over the support) maps the prior precision to the
-        identity; flooring the rescaled precision eigenvalues at 1 then enforces
+        Rescaling by the prior standard deviation maps the prior precision to
+        the identity; flooring the rescaled eigenvalues at 1 then enforces
         ``posterior precision >= prior precision`` in every direction, i.e. no
-        marginal variance exceeds the prior. Well-constrained directions
-        (precision >> prior) are untouched. Skipped if any prior width is
+        marginal variance exceeds the prior.  Well-constrained directions
+        (precision >> prior) are untouched.  Skipped if any prior width is
         non-finite (an unbounded prior cannot bound the posterior).
+
+        The scale comes from ``_prior_standard_deviations`` rather than the
+        uniform-prior ``width / sqrt(12)``: that form is exact for 9 of the 13
+        parameters of the precessing BBH example but overstates every ``Sine``
+        prior by 32%, which inflated tilt_2 to 1.33x dynesty's width where the
+        sampled scale gives 1.04x.
         """
         precision = 0.5 * (precision + precision.T)
         widths = np.array([self.prior_width_dict[k] for k in self.parameter_names])
@@ -418,7 +465,7 @@ class LaplacePosteriorEstimator:
             )
             return precision
 
-        prior_std = widths / np.sqrt(12.0)
+        prior_std = self._prior_standard_deviations()
         outer_std = np.outer(prior_std, prior_std)
         scaled = precision * outer_std  # D P D, with D = diag(prior_std)
         eigvals, eigvecs = np.linalg.eigh(scaled)
