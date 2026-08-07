@@ -36,3 +36,7 @@ site/
 coverage.xml
 htmlcov/
 .pytest_cache/
+
+# Claude Code guidance - local only, kept out of git history
+CLAUDE.md
+.claude/
