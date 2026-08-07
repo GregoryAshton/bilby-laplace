@@ -58,10 +58,10 @@ COLOUR_OVERRIDES = {"smc-direct": "#785EF0"}
 # examples/BBH_HLV/run.py: the goal is one configuration that holds across GW
 # problems rather than per-example tuning, so treat a change here as a change to
 # both -- with one deliberate exception, N_MUTATION_STEPS below.  Note what is
-# *absent*: no cov_scaling, no prior_parameters, no hessian_kwargs.  Those were
-# per-example compensations for a prior-precision term that collapsed proposal
-# widths at a prior cusp; that is fixed in LaplacePosteriorEstimator, so they
-# should no longer be needed.
+# *absent*: no cov_scaling, no jacobian_cap_scale, no prior_parameters, no
+# hessian_kwargs.  Those were per-example compensations for a prior-precision
+# term that collapsed proposal widths at a prior cusp; that is fixed in
+# LaplacePosteriorEstimator, so they should no longer be needed.
 
 # MCMC steps per SMC temperature level.  This is the one setting that does *not*
 # transfer between problems, so it is named here rather than buried in the
@@ -93,7 +93,6 @@ GW_SMC_SETTINGS = dict(
     mode_weights="laplace",
     mode_separation_sigma=1,
     mode_search_nsamples=5000,
-    jacobian_cap_scale=1,
 )
 
 # Matching configuration for the no-Laplace control, expressed in the aspire
@@ -425,8 +424,6 @@ def run_laplace(_common_laplace, run_prefix):
         # run in the other examples (see bilby_laplace.comparison).
         label=f"{run_prefix}-inprior",
         resample="inprior",
-        cov_scaling=1,
-        jacobian_cap_scale=1,
     )
 
 
@@ -435,8 +432,6 @@ def run_rejection(_common_laplace, run_prefix):
         **_common_laplace,
         label=f"{run_prefix}-rejection",
         resample="rejection",
-        cov_scaling=1,
-        jacobian_cap_scale=1,
         max_iterations=10000000,
         batch_nsamples=10000,
         prior_parameters=["lambda_1", "lambda_2", "psi"],
@@ -524,7 +519,16 @@ def compare(outdir):
     # Custom plotting for this example
     import matplotlib.pyplot as plt
 
-    intrinsic_params = ["mass_1", "mass_2", "chi_1", "chi_2", "lambda_1", "lambda_2"]
+    intrinsic_params = [
+        "chirp_mass",
+        "mass_ratio",
+        "mass_1",
+        "mass_2",
+        "chi_1",
+        "chi_2",
+        "lambda_1",
+        "lambda_2",
+    ]
     extrinsic_params = [
         "ra",
         "dec",
