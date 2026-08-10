@@ -15,7 +15,6 @@ import bilby
 import numpy as np
 from bilby.core.prior import Constraint, Sine, Uniform
 from bilby.gw.prior import (
-    AlignedSpin,
     BBHPriorDict,
     UniformInComponentsChirpMass,
     UniformInComponentsMassRatio,
@@ -30,24 +29,24 @@ bilby.core.utils.random.seed(1234)
 outdir = "outdir_hlv_example"
 base_label = "hlv"
 
-# "smc-direct" is aspire driven straight from the prior, with no Laplace stage
-# at all.  It is a configuration of SMC specific to this example rather than a
-# method of its own, so it has no colour in the shared palette; without an
-# override it would inherit the SMC green and be indistinguishable from the
-# Laplace-seeded run it exists to be compared against.  The violet is from the
-# IBM colourblind-safe palette and stays separable from that green and the
-# dynesty blue.
-COLOUR_OVERRIDES = {"smc-direct": "#785EF0"}
+N_STEPS = 100
+N_SAMPLES = 10000
+N_FINAL_SAMPLES = 10000
+TARGET_EFFICIENCY = (0.5, 0.8)
+TARGET_EFFICIENCY_RATE = 0.5
 
 
 def setup():
-    """Set up detector, likelihood, priors, and sampler configuration."""
-    # Injection parameters
+    """Build the detectors, likelihood, priors, and shared sampler kwargs."""
     injection_parameters = dict(
         chirp_mass=30.0,
         mass_ratio=0.8,
-        chi_1=0.05,
-        chi_2=-0.02,
+        a_1=0.4,
+        a_2=0.3,
+        tilt_1=0.5,
+        tilt_2=1.0,
+        phi_12=1.7,
+        phi_jl=0.3,
         luminosity_distance=1000.0,
         theta_jn=0.4,
         psi=0.659,
@@ -57,13 +56,12 @@ def setup():
         zenith=1.2108,
     )
 
-    # Detector setup
     duration = 4
     sampling_frequency = 2048
     minimum_frequency = 20
 
     waveform_arguments = dict(
-        waveform_approximant="IMRPhenomXAS",
+        waveform_approximant="IMRPhenomXP",
         reference_frequency=100,
         minimum_frequency=minimum_frequency,
     )
@@ -83,7 +81,6 @@ def setup():
         start_time=injection_parameters["geocent_time"] - duration + 2,
     )
 
-    # Convert from zen/az to ra/dec for injection
     injection_parameters_radec = injection_parameters.copy()
 
     ra, dec = bilby.gw.utils.zenith_azimuth_to_ra_dec(
@@ -101,7 +98,6 @@ def setup():
         waveform_generator=waveform_generator,
     )
 
-    # Priors
     priors = BBHPriorDict(
         dictionary=dict(
             chirp_mass=UniformInComponentsChirpMass(
@@ -110,8 +106,16 @@ def setup():
             mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.125, maximum=1, latex_label=r"$q$"),
             mass_1=Constraint(name="mass_1", minimum=10, maximum=80),
             mass_2=Constraint(name="mass_2", minimum=10, maximum=80),
-            chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.99), latex_label=r"$\chi_1$"),
-            chi_2=AlignedSpin(name="chi_2", a_prior=Uniform(minimum=0, maximum=0.99), latex_label=r"$\chi_2$"),
+            a_1=Uniform(name="a_1", minimum=0, maximum=0.99, latex_label=r"$a_1$"),
+            a_2=Uniform(name="a_2", minimum=0, maximum=0.99, latex_label=r"$a_2$"),
+            tilt_1=Sine(name="tilt_1", latex_label=r"$\theta_1$"),
+            tilt_2=Sine(name="tilt_2", latex_label=r"$\theta_2$"),
+            phi_12=Uniform(
+                name="phi_12", minimum=0, maximum=2 * np.pi, boundary="periodic", latex_label=r"$\Delta\phi$"
+            ),
+            phi_jl=Uniform(
+                name="phi_jl", minimum=0, maximum=2 * np.pi, boundary="periodic", latex_label=r"$\phi_{JL}$"
+            ),
             luminosity_distance=bilby.core.prior.PowerLaw(
                 alpha=2,
                 name="luminosity_distance",
@@ -141,19 +145,17 @@ def setup():
         )
     )
 
-    # Likelihood
     likelihood = bilby.gw.likelihood.GravitationalWaveTransient(
         ifo_list,
         waveform_generator,
         priors=priors,
         time_marginalization=True,
-        phase_marginalization=True,
+        phase_marginalization=False,
         distance_marginalization=True,
         jitter_time=False,
         reference_frame="H1L1",
     )
 
-    # Shared sampler kwargs
     _common = dict(
         likelihood=likelihood,
         priors=priors,
@@ -180,21 +182,11 @@ def setup():
     return _common, _common_laplace
 
 
-# ---------------------------------------------------------------------------
-# Samplers
-# ---------------------------------------------------------------------------
-
-
 def run_laplace(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
-        # Label by the actual resample method ("inprior"), not the CLI target
-        # name, so this method gets the same colour/legend as the equivalent
-        # run in the other examples (see bilby_laplace.comparison).
         label=f"{base_label}_inprior",
         resample="inprior",
-        cov_scaling=1,
-        jacobian_cap_scale=1,
     )
 
 
@@ -203,8 +195,6 @@ def run_rejection(_common_laplace):
         **_common_laplace,
         label=f"{base_label}_rejection",
         resample="rejection",
-        cov_scaling=dict(others=1, chi_1=5, chi_2=5),
-        jacobian_cap_scale=1,
         max_iterations=10000000,
         batch_nsamples=10000,
     )
@@ -218,45 +208,46 @@ def run_smc(_common_laplace):
         smc_kwargs=dict(
             sampler="minipcn_smc",
             n_initial_samples=10000,
-            n_samples=10000,
+            n_samples=N_SAMPLES,
+            n_final_samples=N_FINAL_SAMPLES,
             adaptive=True,
+            target_efficiency=TARGET_EFFICIENCY,
+            target_efficiency_rate=TARGET_EFFICIENCY_RATE,
             sampler_kwargs=dict(
-                n_steps=10,
+                n_steps=N_STEPS,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
             ),
         ),
-        cov_scaling=2,
-        jacobian_cap_scale=1,
-        prior_parameters=["chi_1", "chi_2"],
+        smc_plot_every=0,
         n_modes=3,
+        mode_weights="laplace",
+        mode_separation_sigma=1,
+        mode_search_nsamples=5000,
+        mode_search_subspace=["zenith", "azimuth", "phase"],
     )
 
 
 def run_smc_direct(_common):
-    """Aspire's SMC on its own, with no Laplace stage.
-
-    The control for ``run_smc``: same SMC sampler and the same particle count,
-    but seeded from prior draws rather than from the Laplace proposal, and via
-    ``aspire_bilby``'s own plugin rather than ours.  What it isolates is what the
-    Laplace stage buys -- everything downstream of the initial cloud is held
-    fixed.
-    """
     return bilby.run_sampler(
         **_common,
         sampler="aspire",
-        label=f"{base_label}_smc_direct",
-        n_samples=10000,
+        n_samples=N_SAMPLES,
         n_initial_samples=10000,
+        n_final_samples=N_FINAL_SAMPLES,
         sample_kwargs=dict(
             sampler="minipcn_smc",
             adaptive=True,
+            target_efficiency=TARGET_EFFICIENCY,
+            target_efficiency_rate=TARGET_EFFICIENCY_RATE,
             sampler_kwargs=dict(
-                n_steps=10,
+                n_steps=N_STEPS,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
             ),
         ),
+        label=f"{base_label}_smcdirect",
+        enable_checkpointing=False,
         npool=16,
     )
 
@@ -267,6 +258,9 @@ def run_dynesty(_common):
         sampler="dynesty",
         label=f"{base_label}_dynesty",
         nlive=1000,
+        sample="acceptance-walk",
+        naccept=60,
+        maxmcmc=5000,
         check_point_delta_t=1800,
         check_point_plot=True,
         npool=16,
@@ -276,22 +270,20 @@ def run_dynesty(_common):
 
 
 def compare():
-    """Load all result files in outdir, make comparison corner plots,
-    and print a comparison table. Custom to HLV example for intrinsic/extrinsic plots."""
+    """Comparison corner plots and evidence table for all results in outdir."""
     pattern = f"{outdir}/{base_label}_*_result.*"
     full_filename = f"{base_label}_comparison.png"
     results, labels = compare_results(
         pattern,
         full_filename,
         sampler_only_labels=True,
-        colour_overrides=COLOUR_OVERRIDES,
     )
     if len(results) < 2:
         return
 
     import matplotlib.pyplot as plt
 
-    intrinsic_params = ["mass_1", "mass_2", "chi_1", "chi_2"]
+    intrinsic_params = ["mass_1", "mass_2", "a_1", "a_2", "tilt_1", "tilt_2"]
     extrinsic_params = [
         "ra",
         "dec",
@@ -316,7 +308,7 @@ def compare():
             fig = bilby.core.result.plot_multiple(
                 results,
                 labels=labels,
-                colours=colours_for_results(results, overrides=COLOUR_OVERRIDES),
+                colours=colours_for_results(results),
                 parameters=parameters,
                 filename=filename,
                 titles=False,
@@ -353,7 +345,6 @@ if __name__ == "__main__":
     if not args.sampler and not args.compare:
         parser.print_help()
     else:
-        # Only set up likelihood/priors if running samplers
         if args.sampler:
             _common, _common_laplace = setup()
 
@@ -368,6 +359,5 @@ if __name__ == "__main__":
             for name in args.sampler:
                 _run_fns[name]()
 
-        # Compare only needs to read result files
         if args.compare:
             compare()

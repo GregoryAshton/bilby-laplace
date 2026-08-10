@@ -3,24 +3,22 @@
 """
 Laplace approximation on a simulated BNS signal using A1 and CE detectors.
 
-Supports three likelihood types: std (standard), rb (relative binning), mb (multi-banding).
+Supports two likelihood types: std (standard) and rb (relative binning).
 
 Usage
 -----
-    python run.py --likelihood rb --sampler laplace rejection smc smc-fast dynesty
+    python run.py --likelihood rb --sampler laplace rejection smc smc-direct dynesty
     python run.py --likelihood rb --compare
     python run.py --compare
 """
 
 import argparse
+import timeit
 
 import bilby
 import numpy as np
 from bilby.core.prior import Constraint, Cosine, Sine, Uniform
-from bilby.gw.likelihood import (
-    MBGravitationalWaveTransient,
-    RelativeBinningGravitationalWaveTransient,
-)
+from bilby.gw.likelihood import RelativeBinningGravitationalWaveTransient
 from bilby.gw.prior import (
     AlignedSpin,
     BNSPriorDict,
@@ -35,51 +33,42 @@ from bilby_laplace.comparison import overlay_injection_lines
 logger = bilby.core.utils.logger
 bilby.core.utils.random.seed(1234)
 
-# Base name for comparison-plot filenames. Kept separate from the per-run label
-# prefix (the likelihood type, e.g. "rb-laplace") so the comparison plots have a
-# stable name regardless of which likelihood was run.
 base_label = "bns"
 
-# "smc-fast" is specific to this example, so it does not have a colour in the
-# shared palette (which is reserved for methods every example can run).  Set one
-# here instead: without it the fast run would inherit the SMC green and be
-# indistinguishable from the converged SMC run it is meant to be compared
-# against.  The violet is from the IBM colourblind-safe palette and stays
-# separable from both that green and the dynesty blue.
-COLOUR_OVERRIDES = {"smc-fast": "#785EF0"}
+REFERENCE_FRAME = ["A1", "CE"]
+
+N_STEPS = 100
+N_SAMPLES = 5000
+N_FINAL_SAMPLES = 10000
+TARGET_EFFICIENCY = (0.5, 0.8)
+TARGET_EFFICIENCY_RATE = 0.5
 
 
 def setup(likelihood_type="rb"):
-    """Set up detectors, likelihood, priors, and sampler configuration.
+    """Build the detectors, likelihood, priors, and shared sampler kwargs.
 
-    Parameters
-    ----------
-    likelihood_type : {"std", "rb", "mb"}
-        "std" uses the standard GravitationalWaveTransient (full frequency grid).
-        "rb" uses RelativeBinningGravitationalWaveTransient (heterodyning).
-        "mb" uses MBGravitationalWaveTransient (multi-banding).
+    ``likelihood_type`` is "std" (full frequency grid) or "rb" (relative
+    binning).
     """
     outdir = "outdir_bns_example"
     run_prefix = likelihood_type
 
-    # Injection parameters
     injection_parameters = dict(
         chirp_mass=1.4,
         mass_ratio=1,
         chi_1=0.00,
         chi_2=0.00,
-        luminosity_distance=500.0,  # Mpc
+        luminosity_distance=200.0,
         theta_jn=0.5,
         psi=1.3,
         phase=2.1,
         geocent_time=0.0,
-        ra=1.2,
-        dec=1.17,
+        zenith=1.8963621973,
+        azimuth=2.9762214543,
         lambda_1=310.0,
         lambda_2=310.0,
     )
 
-    # Detector setup
     duration = 128
     sampling_frequency = 1024
     minimum_frequency = 40
@@ -89,7 +78,6 @@ def setup(likelihood_type="rb"):
         reference_frequency=100,
     )
 
-    # Waveform generator for injection (uses standard model)
     waveform_generator = bilby.gw.WaveformGenerator(
         duration=duration,
         sampling_frequency=sampling_frequency,
@@ -98,8 +86,7 @@ def setup(likelihood_type="rb"):
         waveform_arguments=waveform_arguments,
     )
 
-    # Einstein Telescope and Cosmic Explorer
-    ifo_list = bilby.gw.detector.InterferometerList(["A1", "CE"])
+    ifo_list = bilby.gw.detector.InterferometerList(["L1", "A1", "CE"])
 
     for ifo in ifo_list:
         ifo.minimum_frequency = minimum_frequency
@@ -110,12 +97,24 @@ def setup(likelihood_type="rb"):
         start_time=injection_parameters["geocent_time"] - duration + 2,
     )
 
+    injection_parameters_radec = injection_parameters.copy()
+    reference_ifos = bilby.gw.detector.InterferometerList(
+        [ifo for name in REFERENCE_FRAME for ifo in ifo_list if ifo.name == name]
+    )
+    ra, dec = bilby.gw.utils.zenith_azimuth_to_ra_dec(
+        injection_parameters["zenith"],
+        injection_parameters["azimuth"],
+        injection_parameters["geocent_time"],
+        reference_ifos,
+    )
+    injection_parameters_radec["ra"] = ra
+    injection_parameters_radec["dec"] = dec
+
     ifo_list.inject_signal(
-        parameters=injection_parameters,
+        parameters=injection_parameters_radec,
         waveform_generator=waveform_generator,
     )
 
-    # Priors for BNS
     priors = BNSPriorDict(
         dictionary=dict(
             chirp_mass=UniformInComponentsChirpMass(
@@ -126,13 +125,13 @@ def setup(likelihood_type="rb"):
             mass_2=Constraint(name="mass_2", minimum=1.0, maximum=2.8),
             luminosity_distance=bilby.gw.prior.UniformSourceFrame(
                 name="luminosity_distance",
-                minimum=100,
+                minimum=50,
                 maximum=10000,
                 unit="Mpc",
                 latex_label=r"$d_L$",
             ),
             theta_jn=Sine(name="theta_jn", latex_label=r"$\theta_{JN}$"),
-            psi=Uniform(name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic", latex_label=r"$\psi$"),
+            psi=Uniform(name="psi", minimum=0, maximum=np.pi, boundary="periodic", latex_label=r"$\psi$"),
             phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic", latex_label=r"$\phi$"),
             geocent_time=Uniform(
                 minimum=injection_parameters["geocent_time"] - 0.01,
@@ -141,16 +140,13 @@ def setup(likelihood_type="rb"):
                 latex_label=r"$t_{\rm geo}$",
                 unit="$s$",
             ),
-            ra=Uniform(
-                name="ra",
+            zenith=Sine(name="zenith", latex_label=r"$\kappa$"),
+            azimuth=Uniform(
+                name="azimuth",
                 minimum=0,
                 maximum=2 * np.pi,
                 boundary="periodic",
-                latex_label=r"$\alpha$",
-            ),
-            dec=Cosine(
-                name="dec",
-                latex_label=r"$\delta$",
+                latex_label=r"$\epsilon$",
             ),
             chi_1=AlignedSpin(name="chi_1", a_prior=Uniform(minimum=0, maximum=0.05), latex_label=r"$\chi_1$"),
             chi_2=AlignedSpin(name="chi_2", a_prior=Uniform(minimum=0, maximum=0.05), latex_label=r"$\chi_2$"),
@@ -159,9 +155,12 @@ def setup(likelihood_type="rb"):
         )
     )
 
-    # Fixed parameters to simplify the PE
-    for key in ["chi_1", "chi_2"]:
-        priors[key] = injection_parameters[key]
+    marg = dict(
+        time_marginalization=False,
+        phase_marginalization=True,
+        distance_marginalization=True,
+        jitter_time=False,
+    )
 
     if likelihood_type == "std":
         std_waveform_generator = bilby.gw.WaveformGenerator(
@@ -176,19 +175,12 @@ def setup(likelihood_type="rb"):
             interferometers=ifo_list,
             waveform_generator=std_waveform_generator,
             priors=priors,
-            time_marginalization=True,
-            phase_marginalization=True,
-            distance_marginalization=True,
-            jitter_time=False,
+            **marg,
+            reference_frame=REFERENCE_FRAME,
         )
 
     elif likelihood_type == "rb":
         rb_waveform_arguments = waveform_arguments.copy()
-        rb_waveform_arguments["frequency_bin_edges"] = np.logspace(
-            np.log10(minimum_frequency),
-            np.log10(sampling_frequency / 2),
-            100,
-        )
         rb_waveform_generator = bilby.gw.WaveformGenerator(
             duration=duration,
             sampling_frequency=sampling_frequency,
@@ -209,39 +201,14 @@ def setup(likelihood_type="rb"):
             rb_waveform_generator,
             priors=priors,
             fiducial_parameters=fiducial_parameters,
-            time_marginalization=False,
-            phase_marginalization=True,
-            distance_marginalization=True,
-            jitter_time=False,
+            **marg,
             epsilon=0.25,
-        )
-
-    elif likelihood_type == "mb":
-        mb_waveform_generator = bilby.gw.WaveformGenerator(
-            duration=duration,
-            sampling_frequency=sampling_frequency,
-            frequency_domain_source_model=bilby.gw.source.binary_neutron_star_frequency_sequence,
-            parameter_conversion=bilby.gw.conversion.convert_to_lal_binary_neutron_star_parameters,
-            waveform_arguments=waveform_arguments,
-        )
-
-        likelihood = MBGravitationalWaveTransient(
-            interferometers=ifo_list,
-            waveform_generator=mb_waveform_generator,
-            priors=priors,
-            reference_chirp_mass=injection_parameters["chirp_mass"],
-            time_marginalization=True,
-            phase_marginalization=True,
-            distance_marginalization=True,
-            accuracy_factor=0.1,
-            linear_interpolation=False,
-            jitter_time=False,
+            reference_frame=REFERENCE_FRAME,
         )
 
     else:
-        raise ValueError(f"Unknown likelihood_type {likelihood_type!r}; choose 'std', 'rb', or 'mb'")
+        raise ValueError(f"Unknown likelihood_type {likelihood_type!r}; choose 'std' or 'rb'")
 
-    # Shared sampler kwargs
     _common = dict(
         likelihood=likelihood,
         priors=priors,
@@ -253,12 +220,6 @@ def setup(likelihood_type="rb"):
         use_ratio=True,
     )
 
-    # The waveform Fisher gives a better-conditioned proposal than the scalar
-    # Hessian and is supported for the standard and relative-binning likelihoods
-    # (relative binning is an approximation to the full-resolution likelihood the
-    # Fisher is built on). Multi-banding is not supported, so it falls back to the
-    # Hessian. When using the waveform Fisher the estimator works directly in
-    # parameter space, so use_unit_cube is disabled.
     use_waveform_fisher = likelihood_type in ("std", "rb")
     fisher_method = "waveform" if use_waveform_fisher else "hessian"
 
@@ -278,21 +239,67 @@ def setup(likelihood_type="rb"):
     return _common, _common_laplace, outdir, run_prefix
 
 
-# ---------------------------------------------------------------------------
-# Samplers
-# ---------------------------------------------------------------------------
+def validate_likelihood(variation=0.001):
+    """Build both likelihoods on identical data and compare them.
+
+    Agreement means the fast likelihoods are faithful for this event;
+    disagreement is the root cause to chase before trusting any posterior built
+    on them.  Ported from ``3G_STM/analysis.py``.
+
+    The evaluation point is deliberately perturbed off the injection: relative
+    binning is *exact* at its fiducial parameters (the waveform ratio r(f) is
+    identically 1 there), so evaluating at the injection would report zero
+    binning error no matter how coarse the bins.  ``setup`` gives both
+    likelihoods the same marginalisation, so what this measures is the binning
+    approximation and nothing else.
+    """
+    results = {}
+    for name in ("std", "rb"):
+        bilby.core.utils.random.seed(1234)
+        _common, _, _, _ = setup(name)
+        likelihood = _common["likelihood"]
+        injection_parameters = _common["injection_parameters"]
+
+        eval_parameters = dict(injection_parameters)
+        eval_parameters["chirp_mass"] = injection_parameters["chirp_mass"] * (1.0 + variation)
+        likelihood.parameters.update(eval_parameters)
+
+        llr = likelihood.log_likelihood_ratio()
+        n_eval = timeit.Timer(likelihood.log_likelihood_ratio).autorange()[0]
+        eval_time = timeit.timeit(likelihood.log_likelihood_ratio, number=n_eval) / n_eval
+        results[name] = (llr, eval_time)
+
+    std_llr = results.get("std", (float("nan"),))[0]
+    w = 14
+    header = (
+        f"  {'Likelihood':<10}  {'log_L_ratio':>{w}}  {'delta from std':>{w}}  "
+        f"{'% from std':>{w}}  {'implied SNR':>{w}}  {'eval time (ms)':>{w}}"
+    )
+    sep = "  " + "-" * (len(header) - 2)
+    print()
+    print(f"  Likelihood validation at chirp_mass perturbed by {variation:+.2%}")
+    print(sep)
+    print(header)
+    print(sep)
+    for name, (llr, eval_time) in results.items():
+        delta = llr - std_llr
+        pct = 100.0 * delta / std_llr if std_llr else float("nan")
+        pct_str = f"{pct:+.4f}" if np.isfinite(pct) else "-"
+        snr = np.sqrt(max(0.0, 2.0 * llr))
+        print(
+            f"  {name:<10}  {llr:>{w}.4f}  {delta:>+{w}.4f}  "
+            f"{pct_str:>{w}}  {snr:>{w}.2f}  {eval_time * 1e3:>{w}.4f}"
+        )
+    print(sep)
+    print()
+    return results
 
 
 def run_laplace(_common_laplace, run_prefix):
     return bilby.run_sampler(
         **_common_laplace,
-        # Label by the actual resample method ("inprior"), not the CLI target
-        # name, so this method gets the same colour/legend as the equivalent
-        # run in the other examples (see bilby_laplace.comparison).
         label=f"{run_prefix}-inprior",
         resample="inprior",
-        cov_scaling=1,
-        jacobian_cap_scale=1,
     )
 
 
@@ -301,45 +308,61 @@ def run_rejection(_common_laplace, run_prefix):
         **_common_laplace,
         label=f"{run_prefix}-rejection",
         resample="rejection",
-        cov_scaling=1,
-        jacobian_cap_scale=1,
         max_iterations=10000000,
         batch_nsamples=10000,
         prior_parameters=["lambda_1", "lambda_2", "psi"],
     )
 
 
-def run_smc(_common_laplace, run_prefix, label="smc",
-             n_steps=500,
-             prior_parameters=["lambda_1", "lambda_2", "psi", "ra", "theta_jn"]
-             ):
-    """Run the SMC resampling stage.
-
-    ``n_steps`` is the number of MCMC steps taken per SMC temperature level. The
-    default (500) is enough to decorrelate the walkers; the "smc-fast" variant
-    lowers it to 10 to show how an under-converged SMC run degrades the
-    posterior (the samples stay close to the Gaussian proposal they started
-    from) for a fraction of the cost.
-    """
+def run_smc(_common_laplace, run_prefix):
     return bilby.run_sampler(
         **_common_laplace,
-        label=f"{run_prefix}-{label}",
-        resample="smc",
         smc_kwargs=dict(
             sampler="minipcn_smc",
             n_initial_samples=10000,
-            n_samples=5000,
+            n_samples=N_SAMPLES,
+            n_final_samples=N_FINAL_SAMPLES,
             adaptive=True,
+            target_efficiency=TARGET_EFFICIENCY,
+            target_efficiency_rate=TARGET_EFFICIENCY_RATE,
             sampler_kwargs=dict(
-                n_steps=n_steps,
+                n_steps=N_STEPS,
                 target_acceptance_rate=0.234,
                 step_fn="tpcn",
             ),
         ),
-        cov_scaling=1,
-        jacobian_cap_scale=1,
-        hessian_kwargs={"initial_step": 0.001, "step_factor": 2, "maxiter": 10},
-        prior_parameters=prior_parameters,
+        smc_plot_every=0,
+        n_modes=3,
+        mode_weights="laplace",
+        mode_separation_sigma=1,
+        mode_search_nsamples=5000,
+        label=f"{run_prefix}-smc",
+        resample="smc",
+        mode_search_subspace=["zenith", "azimuth"],
+    )
+
+
+def run_smc_direct(_common, run_prefix):
+    return bilby.run_sampler(
+        **_common,
+        n_samples=N_SAMPLES,
+        n_initial_samples=10000,
+        n_final_samples=N_FINAL_SAMPLES,
+        sample_kwargs=dict(
+            sampler="minipcn_smc",
+            adaptive=True,
+            target_efficiency=TARGET_EFFICIENCY,
+            target_efficiency_rate=TARGET_EFFICIENCY_RATE,
+            sampler_kwargs=dict(
+                n_steps=N_STEPS,
+                target_acceptance_rate=0.234,
+                step_fn="tpcn",
+            ),
+        ),
+        sampler="aspire",
+        label=f"{run_prefix}-smcdirect",
+        enable_checkpointing=False,
+        npool=16,
     )
 
 
@@ -349,7 +372,9 @@ def run_dynesty(_common, run_prefix):
         sampler="dynesty",
         label=f"{run_prefix}-dynesty",
         nlive=1000,
-        dlogz=0.1,
+        sample="acceptance-walk",
+        naccept=60,
+        maxmcmc=5000,
         check_point_delta_t=1800,
         check_point_plot=True,
         npool=32,
@@ -366,13 +391,20 @@ def compare(outdir):
         pattern,
         full_filename,
         sampler_only_labels=True,
-        colour_overrides=COLOUR_OVERRIDES,
     )
 
-    # Custom plotting for this example
     import matplotlib.pyplot as plt
 
-    intrinsic_params = ["mass_1", "mass_2", "chi_1", "chi_2", "lambda_1", "lambda_2"]
+    intrinsic_params = [
+        "chirp_mass",
+        "mass_ratio",
+        "mass_1",
+        "mass_2",
+        "chi_1",
+        "chi_2",
+        "lambda_1",
+        "lambda_2",
+    ]
     extrinsic_params = [
         "ra",
         "dec",
@@ -392,10 +424,8 @@ def compare(outdir):
 
     for suffix, parameters in plot_sets:
         filename = f"{base_label}_{suffix}.png"
-        # Check if the parameters are sampled
         plot_parameters = []
         for p in parameters:
-            # Check if the posterior set has a non-zero range
             samples = results[0].posterior.get(p)
             if samples is not None and np.ptp(samples) > 0:
                 plot_parameters.append(p)
@@ -408,7 +438,7 @@ def compare(outdir):
         fig = bilby.core.result.plot_multiple(
             results,
             labels=labels,
-            colours=colours_for_results(results, overrides=COLOUR_OVERRIDES),
+            colours=colours_for_results(results),
             parameters=plot_parameters,
             filename=filename,
             titles=False,
@@ -426,21 +456,29 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BNS injection with fast likelihood (ET + CE)")
     parser.add_argument(
         "--likelihood",
-        choices=["std", "rb", "mb"],
+        choices=["std", "rb"],
         default=None,
         help=(
-            "Likelihood: std (standard), rb (relative binning), or mb"
-            " (multi-banding). Required when running samplers."
+            "Likelihood: std (standard) or rb (relative binning)."
+            " Required when running samplers."
         ),
     )
     parser.add_argument(
         "--sampler",
         nargs="+",
-        choices=["laplace", "rejection", "smc", "smc-fast", "dynesty"],
+        choices=["laplace", "rejection", "smc", "smc-direct", "dynesty"],
         metavar="SAMPLER",
         help=(
-            "One or more samplers to run: laplace, rejection, smc, smc-fast"
-            " (SMC with only 10 MCMC steps per level), dynesty"
+            "One or more samplers to run: laplace, rejection, smc, smc-direct"
+            " (SMC straight from the prior, no Laplace stage), dynesty"
+        ),
+    )
+    parser.add_argument(
+        "--validate-likelihood",
+        action="store_true",
+        help=(
+            "Build the std and rb likelihoods on identical data and compare"
+            " them at a perturbed point; run before trusting rb results"
         ),
     )
     parser.add_argument(
@@ -450,10 +488,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if not args.sampler and not args.compare:
+    if not args.sampler and not args.compare and not args.validate_likelihood:
         parser.print_help()
     else:
         _outdir = "outdir_bns_example"
+
+        if args.validate_likelihood:
+            validate_likelihood()
 
         if args.sampler:
             if args.likelihood is None:
@@ -464,7 +505,7 @@ if __name__ == "__main__":
                 "laplace": lambda: run_laplace(_common_laplace, _run_prefix),
                 "rejection": lambda: run_rejection(_common_laplace, _run_prefix),
                 "smc": lambda: run_smc(_common_laplace, _run_prefix),
-                "smc-fast": lambda: run_smc(_common_laplace, _run_prefix, label="smc-fast", n_steps=50, prior_parameters=["lambda_1", "lambda_2", "psi"]),
+                "smc-direct": lambda: run_smc_direct(_common, _run_prefix),
                 "dynesty": lambda: run_dynesty(_common, _run_prefix),
             }
 

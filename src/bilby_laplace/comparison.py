@@ -17,11 +17,12 @@ import numpy as np
 # "C0"/"C1"... cycle so the mapping is stable regardless of the order in which
 # results happen to load.
 SAMPLER_COLOURS = {
-    "laplace": "#E69F00",  # orange          - raw Laplace/Gaussian approximation
+    "laplace": "#009E73",  # bluish green    - raw Laplace/Gaussian approximation
     "inprior": "#CC79A7",  # reddish purple
     "rejection": "#D55E00",  # vermillion
     "importance": "#56B4E9",  # sky blue
-    "smc": "#009E73",  # bluish green
+    "smc": "#E69F00",  # orange              - the headline method
+    "smcdirect": "#785EF0",  # violet        - SMC from the prior, no-Laplace control
     "dynesty": "#0072B2",  # blue            - reference nested sampler
 }
 
@@ -75,6 +76,10 @@ def sampler_family(label):
     (``"{base}_{method}"``), and config-variant suffixes (e.g. ``"user"``) are
     not family keys, so this correctly resolves a base that happens to be named
     after another family (``"laplace_smc"`` -> ``"smc"``, not ``"laplace"``).
+
+    Note that ``"smcdirect"`` is deliberately spelled without a separator: the
+    tokeniser splits on ``-`` and ``_``, so ``"smc-direct"`` would tokenise to
+    ``["smc", "direct"]`` and collide with the ``"smc"`` family.
     """
     family = None
     for token in _label_tokens(label):

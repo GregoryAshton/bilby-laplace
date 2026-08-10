@@ -6,9 +6,6 @@ std-compare:
 rb-compare:
 	$(PYTHON) run.py --likelihood rb --compare
 
-mb-compare:
-	$(PYTHON) run.py --likelihood mb --compare
-
 compare:
 	$(PYTHON) run.py --compare
 
@@ -18,12 +15,11 @@ std-%:
 rb-%:
 	$(PYTHON) run.py --likelihood rb --sampler $*
 
-mb-%:
-	$(PYTHON) run.py --likelihood mb --sampler $*
+std-all: std-laplace std-rejection std-smc std-smc-direct std-dynesty std-compare
+rb-all: rb-laplace rb-rejection rb-smc rb-smc-direct rb-dynesty rb-compare
+all: std-all rb-all compare
 
-std-all: std-laplace std-rejection std-smc std-smc-fast std-dynesty std-compare
-rb-all: rb-laplace rb-rejection rb-smc rb-smc-fast rb-dynesty rb-compare
-mb-all: mb-laplace mb-rejection mb-smc mb-smc-fast mb-dynesty mb-compare
-all: std-all rb-all mb-all compare
+.PHONY: all compare std-all rb-all std-compare rb-compare validate
 
-.PHONY: all compare std-all rb-all mb-all std-compare rb-compare mb-compare
+validate:
+	$(PYTHON) run.py --validate-likelihood
