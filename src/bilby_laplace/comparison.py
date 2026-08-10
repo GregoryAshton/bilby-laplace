@@ -230,7 +230,8 @@ def overlay_injection_lines(fig, parameters, injection_parameters):
                     ax.axhline(truths[row], color=TRUTH_COLOUR, ls="--", lw=0.8, alpha=0.7)
 
 
-def compare(pattern, filename, injection_parameters=None, sampler_only_labels=False, colour_overrides=None):
+def compare(pattern, filename, injection_parameters=None, sampler_only_labels=False,
+            colour_overrides=None, parameters=None):
     """Load result files matching pattern, print comparison table, and create corner plot.
 
     Parameters
@@ -239,6 +240,12 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
         Glob pattern for result files (e.g., ``/path/to/*_result.*``).
     filename : str
         Path for output corner plot.
+    parameters : list, optional
+        Parameters to plot. Defaults to the first result's sampled parameters.
+        Pass this to include parameters that were analytically marginalised
+        during sampling and reconstructed afterwards -- those are in the
+        posterior but not in ``search_parameter_keys``, so they would otherwise
+        be silently dropped from the figure.
     injection_parameters : dict, optional
         Dictionary of injection parameter values to overlay on the plot.
         If None, will be extracted from the first result object if available.
@@ -337,10 +344,13 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
 
     import matplotlib.pyplot as plt
 
+    plot_parameters = parameters or results[0].search_parameter_keys
+
     fig = bilby.core.result.plot_multiple(
         results,
         labels=labels,
         colours=colours_for_results(results, overrides=colour_overrides),
+        parameters=plot_parameters,
         filename=filename,
         titles=False,
         save=False,
@@ -348,7 +358,7 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
 
     # Overlay injection truth values if provided
     if injection_parameters:
-        overlay_injection_lines(fig, results[0].search_parameter_keys, injection_parameters)
+        overlay_injection_lines(fig, plot_parameters, injection_parameters)
 
     fig.savefig(filename, dpi=400)
     plt.close(fig)
