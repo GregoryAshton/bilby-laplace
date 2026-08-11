@@ -2543,14 +2543,37 @@ class Laplace(Sampler):
         than the Gaussian predicts, and that eigenvalue is inflated to match.
         Directions are never shrunk.
 
+        Two things keep that from running away, both learned from the 3G BNS,
+        where this step turned a sound proposal into the prior.
+
+        It works in *prior-scaled* coordinates, as the rest of the estimator
+        does -- the unit-cube path, ``_floor_precision_at_prior``, and the
+        preconditioned inversion in ``calculate_posterior_covariance`` all
+        non-dimensionalise before touching eigenvalues, and this was the one
+        step that did not. In those units a scaled eigenvalue of 1 is "as wide
+        as the prior".
+
+        And no direction is inflated past the prior. A posterior cannot be
+        wider than its prior, so a scaled eigenvalue above 1 is not a wide
+        posterior but a failed probe. That matters here because the BNS Fisher
+        is genuinely rank-deficient -- 5 of 13 scaled eigenvalues sit below 1,
+        the smallest at 2e-13 -- so those directions are already at prior width
+        by the time this runs. The probe then finds the likelihood flat along
+        them, which is true and not informative, and without the cap it widens
+        them further; chirp_mass reached 696x dynesty's width, i.e. the prior,
+        from a Fisher that gave 1.36x.
         """
-        eigvals, eigvecs = np.linalg.eigh(cov)
+        prior_sd = np.asarray(estimator._prior_standard_deviations(), dtype=float)
+        outer_sd = np.outer(prior_sd, prior_sd)
+        scaled = 0.5 * (cov / outer_sd + (cov / outer_sd).T)
+        eigvals, eigvecs = np.linalg.eigh(scaled)
         logl_peak = float(estimator.log_likelihood_from_array(mean))
 
         any_inflated = False
         for i in range(len(eigvals)):
             sigma_i = np.sqrt(max(eigvals[i], 1e-30))
-            direction = eigvecs[:, i]
+            # Unit vector in scaled space, expressed as a parameter-space step.
+            direction = prior_sd * eigvecs[:, i]
 
             # Evaluate at +/- 1 sigma
             logl_plus = float(estimator.log_likelihood_from_array(mean + sigma_i * direction))
@@ -2615,7 +2638,7 @@ class Laplace(Sampler):
                 )
             elif actual_drop < expected_drop * 0.5:
                 inflation = expected_drop / actual_drop
-                eigvals[i] *= inflation
+                eigvals[i] = min(eigvals[i] * inflation, 1.0)
                 any_inflated = True
                 logger.info(
                     f"Widening proposal along axis {i}: "
@@ -2624,18 +2647,29 @@ class Laplace(Sampler):
                 )
 
         if any_inflated:
-            cov = eigvecs @ np.diag(eigvals) @ eigvecs.T
-            cov = 0.5 * (cov + cov.T)
+            scaled = eigvecs @ np.diag(eigvals) @ eigvecs.T
+            cov = 0.5 * (scaled + scaled.T) * outer_sd
 
         # Guarantee strict positive definiteness for scipy's _PSD check.
         # scipy.stats.multivariate_normal (allow_singular=False) requires all
         # eigenvalues to exceed eps = 1e6 * machine_eps * max_eigval ≈ 2.22e-10 * max.
         # Use 1e-9 * max as the floor to stay comfortably above that threshold.
         #
-        eigvals_out = np.linalg.eigvalsh(cov)
+        # Applied in prior-scaled coordinates. A ridge proportional to the
+        # identity in *raw* units is set by the largest-scale parameter and
+        # swamps the smallest: on the BNS, lambda carries a variance ~1e4, so
+        # the floor came out at ~1e-5 and was added to chirp_mass, whose
+        # variance is ~5e-9. That alone widened chirp_mass by a factor of 45 --
+        # far more than anything the validation above was doing -- and it fired
+        # whether or not a single direction had been inflated. Scaling first
+        # gives each parameter a jitter proportional to its own prior width,
+        # which is the same convention the rest of the estimator uses.
+        scaled_out = 0.5 * (cov / outer_sd + (cov / outer_sd).T)
+        eigvals_out = np.linalg.eigvalsh(scaled_out)
         min_floor = max(1e-9 * eigvals_out.max(), 1e-30)
         if eigvals_out.min() < min_floor:
-            cov = cov + (min_floor - eigvals_out.min()) * np.eye(len(cov))
+            scaled_out = scaled_out + (min_floor - eigvals_out.min()) * np.eye(len(cov))
+            cov = scaled_out * outer_sd
 
         return cov
 
