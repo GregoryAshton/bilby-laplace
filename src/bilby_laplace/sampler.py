@@ -105,6 +105,33 @@ class TruncatedMVNProposal:
         return np.sum(terms, axis=0)
 
 
+class _StandardisedGaussian:
+    """A multivariate normal built in standardised coordinates.
+
+    Exposes the small part of the ``scipy.stats.multivariate_normal`` surface
+    this module uses while doing the arithmetic on a unit-diagonal matrix, so a
+    covariance spanning many orders of magnitude in parameter scale is not
+    refused by scipy's relative positive-definiteness check.
+    """
+
+    def __init__(self, mean, cov):
+        self.mean = np.asarray(mean, dtype=float)
+        self.cov = np.asarray(cov, dtype=float)
+        self._sd = np.sqrt(np.diag(self.cov))
+        self._dist = multivariate_normal(
+            mean=np.zeros_like(self.mean), cov=self.cov / np.outer(self._sd, self._sd)
+        )
+        self._log_jacobian = float(np.sum(np.log(self._sd)))
+
+    def logpdf(self, x):
+        z = (np.asarray(x, dtype=float) - self.mean) / self._sd
+        return self._dist.logpdf(z) - self._log_jacobian
+
+    def rvs(self):
+        z = np.asarray(self._dist.rvs(random_state=random.rng))
+        return self.mean + z * self._sd
+
+
 class GaussianFlow:
     """Minimal aspire-compatible Flow wrapping a multivariate Gaussian.
 
@@ -113,16 +140,28 @@ class GaussianFlow:
     """
 
     def __init__(self, mean, cov):
-        self._mean = mean
-        self._cov = cov
-        self._dist = multivariate_normal(mean=mean, cov=cov)
+        self._mean = np.asarray(mean, dtype=float)
+        self._cov = np.asarray(cov, dtype=float)
+        # Built in standardised coordinates, z = (x - mean) / sd. scipy's _PSD
+        # rejects a covariance whose condition number exceeds ~4.5e9 *in the
+        # units it is handed*, and a GW covariance spans ~10 orders of
+        # magnitude between chirp_mass and lambda on scale alone -- so a sound
+        # matrix is refused as "not positive definite". Dividing by the
+        # per-parameter sd leaves a unit-diagonal matrix whose conditioning
+        # reflects genuine correlation rather than units.
+        self._sd = np.sqrt(np.diag(self._cov))
+        outer = np.outer(self._sd, self._sd)
+        self._dist = multivariate_normal(mean=np.zeros_like(self._mean), cov=self._cov / outer)
+        self._log_jacobian = float(np.sum(np.log(self._sd)))
 
     def log_prob(self, x):
-        return self._dist.logpdf(np.asarray(x))
+        z = (np.asarray(x, dtype=float) - self._mean) / self._sd
+        return self._dist.logpdf(z) - self._log_jacobian
 
     def sample_and_log_prob(self, n_samples):
-        x = random.rng.multivariate_normal(self._mean, self._cov, n_samples)
-        return x, self._dist.logpdf(x)
+        z = np.atleast_2d(self._dist.rvs(size=n_samples, random_state=random.rng))
+        x = self._mean + z * self._sd
+        return x, self._dist.logpdf(z) - self._log_jacobian
 
     def sample(self, n_samples):
         return self.sample_and_log_prob(n_samples)[0]
@@ -147,7 +186,8 @@ class GaussianMixtureFlow:
     """
 
     def __init__(self, means, covs, log_weights=None):
-        self._dists = [multivariate_normal(mean=m, cov=c) for m, c in zip(means, covs)]
+        # Each component standardised; see GaussianFlow for why.
+        self._dists = [_StandardisedGaussian(m, c) for m, c in zip(means, covs)]
         self._k = len(self._dists)
         if log_weights is None:
             self._log_w = np.full(self._k, -np.log(self._k))
@@ -172,7 +212,7 @@ class GaussianMixtureFlow:
 
     def sample_and_log_prob(self, n_samples):
         idx = random.rng.choice(self._k, size=n_samples, p=self._w)
-        x = np.array([random.rng.multivariate_normal(self._dists[i].mean, self._dists[i].cov) for i in idx])
+        x = np.array([self._dists[i].rvs() for i in idx])
         return x, self.log_prob(x)
 
     def sample(self, n_samples):
