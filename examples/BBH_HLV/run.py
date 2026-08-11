@@ -64,6 +64,15 @@ def setup():
         azimuth=1.375,
         zenith=1.2108,
     )
+    # The injected value in the sampled coordinate, inverting the conversion
+    # above. Needed for the truth overlays and because `use_injection_for_map`
+    # seeds the optimiser from this dict, which must cover every sampled
+    # parameter. The signal itself is still injected with `phase`.
+    injection_parameters["delta_phase"] = np.mod(
+        injection_parameters["phase"]
+        + np.sign(np.cos(injection_parameters["theta_jn"])) * injection_parameters["psi"],
+        2 * np.pi,
+    )
 
     duration = 4
     sampling_frequency = 2048
@@ -117,6 +126,15 @@ def setup():
             mass_2=Constraint(name="mass_2", minimum=10, maximum=80),
             a_1=Uniform(name="a_1", minimum=0, maximum=0.99, latex_label=r"$a_1$"),
             a_2=Uniform(name="a_2", minimum=0, maximum=0.99, latex_label=r"$a_2$"),
+            # cos_tilt_1/cos_tilt_2 were tried here and do not work on this
+            # example. The reparameterisation is prior-preserving as a
+            # *distribution*, but a density mode is not invariant under a change
+            # of coordinates: the Sine prior suppresses tilt -> 0, while a flat
+            # prior in the cosine does not, and the MAP duly moves to
+            # cos_tilt_1 = +1.000000 exactly (aligned spin). The waveform Fisher
+            # then steps outside [-1, 1], arccos returns NaN and the waveform
+            # call fails. Even with a boundary-safe derivative, centring a
+            # Gaussian proposal on a prior edge is the wrong place to be.
             tilt_1=Sine(name="tilt_1", latex_label=r"$\theta_1$"),
             tilt_2=Sine(name="tilt_2", latex_label=r"$\theta_2$"),
             phi_12=Uniform(
@@ -135,7 +153,25 @@ def setup():
             ),
             theta_jn=Sine(name="theta_jn", latex_label=r"$\theta_{JN}$"),
             psi=Uniform(name="psi", minimum=0, maximum=np.pi / 2, boundary="periodic", latex_label=r"$\psi$"),
-            phase=Uniform(name="phase", minimum=0, maximum=2 * np.pi, boundary="periodic", latex_label=r"$\phi$"),
+            # Sampled in place of `phase`. `convert_to_lal_binary_black_hole_parameters`
+            # -- already this example's `parameter_conversion` -- recovers
+            # phase = mod(delta_phase - sign(cos(theta_jn)) * psi, 2*pi), so the
+            # likelihood is unchanged and `phase` reappears in the posterior via
+            # the conversion function.
+            #
+            # For fixed psi and theta_jn this is a shear on the phase circle:
+            # a bijection with unit Jacobian, so a Uniform(0, 2pi) on delta_phase
+            # induces exactly the Uniform(0, 2pi) on phase it replaces. The prior
+            # and the target are therefore identical -- only the coordinates the
+            # sampler moves in change, which keeps the dynesty run a valid
+            # reference in either coordinate.
+            delta_phase=Uniform(
+                name="delta_phase",
+                minimum=0,
+                maximum=2 * np.pi,
+                boundary="periodic",
+                latex_label=r"$\delta\phi$",
+            ),
             geocent_time=Uniform(
                 minimum=injection_parameters["geocent_time"] - 0.05,
                 maximum=injection_parameters["geocent_time"] + 0.05,
@@ -234,7 +270,19 @@ def run_smc(_common_laplace):
         mode_weights="laplace",
         mode_separation_sigma=1,
         mode_search_nsamples=5000,
-        mode_search_subspace=["zenith", "azimuth", "phase"],
+        mode_search_subspace=["zenith", "azimuth", "delta_phase"],
+        # The log-posterior is exactly pi-periodic in delta_phase -- the two
+        # lobes are degenerate to machine precision -- so the mirror is written
+        # down rather than left to the random multi-start search, which on this
+        # problem returned three candidates all in the same lobe and sampled
+        # half the posterior.
+        mode_symmetries=[("delta_phase", np.pi)],
+        # `smc_prior_flow="laplace"` was tried here and is much worse (mean JSD
+        # 86 against 8.8): GaussianMixtureFlow is an *unbounded, non-periodic*
+        # Gaussian mixture, so the log q it supplies is wrong at the prior
+        # edges and across the five periodic coordinates this example declares.
+        # The trained flow gets those right via aspire's bounded/angular
+        # preconditioning. See the note on the kwarg in sampler.py.
     )
 
 
