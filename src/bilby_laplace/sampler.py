@@ -124,6 +124,17 @@ class GaussianFlow:
         x = random.rng.multivariate_normal(self._mean, self._cov, n_samples)
         return x, self._dist.logpdf(x)
 
+    def sample(self, n_samples):
+        return self.sample_and_log_prob(n_samples)[0]
+
+    # See GaussianMixtureFlow for why these exist.
+    xp = np
+
+    def fit(self, samples, **kwargs):
+        """No-op: this Gaussian is constructed from the Hessian, not learned."""
+        logger.info("Using the analytic Laplace Gaussian as aspire's prior flow; no training.")
+        return None
+
 
 class GaussianMixtureFlow:
     """Aspire-compatible Flow wrapping a Gaussian mixture.
@@ -163,6 +174,22 @@ class GaussianMixtureFlow:
         idx = random.rng.choice(self._k, size=n_samples, p=self._w)
         x = np.array([random.rng.multivariate_normal(self._dists[i].mean, self._dists[i].cov) for i in idx])
         return x, self.log_prob(x)
+
+    def sample(self, n_samples):
+        return self.sample_and_log_prob(n_samples)[0]
+
+    # Aspire calls ``prior_flow.xp.isfinite`` when screening its initial draw.
+    xp = np
+
+    def fit(self, samples, **kwargs):
+        """No-op: this mixture is constructed, not learned.
+
+        ``Aspire.fit`` calls this unconditionally, so it has to exist; there is
+        nothing to train. The samples it is handed were themselves drawn from
+        this mixture.
+        """
+        logger.info(f"Using the analytic Laplace mixture as aspire's prior flow ({self._k} component(s)); no training.")
+        return None
 
 
 def kish_log_effective_sample_size(ln_weights):
@@ -311,6 +338,36 @@ class Laplace(Sampler):
         across is ~1e-4 of the sky -- but the same budget covers two or three
         named dimensions densely.  For a GW sky reflection, for example,
         ``["zenith", "azimuth"]``.  Default None (search all parameters).
+    smc_prior_flow : str
+        Which distribution aspire anneals *from*. Aspire's tempered target is
+        ``(1 - beta) * log q + beta * (log L + log prior)``, so this is not just
+        a starting point: ``log q`` is in the MCMC's target at every
+        temperature, vanishing only at ``beta = 1``.
+
+        ``"learned"`` (default) is aspire's own behaviour -- train a normalising
+        flow on samples drawn from the Laplace proposal and use that.
+        ``"laplace"`` hands aspire the Laplace mixture itself, so ``log q`` is
+        analytic and exactly the proposal we constructed, mode weights
+        included, and flow training stops being a source of run-to-run scatter.
+
+        **Measured much worse on the precessing BBH** -- mean JS divergence
+        from dynesty 86 mbits against 8.8 for the trained flow, with widths
+        collapsing to ~0.55 of the reference across the spin block, and the
+        schedule stretching from 10 tempering iterations to 12. The reason is
+        not that the mixture is Gaussian: it is that
+        :class:`GaussianMixtureFlow` is built on plain ``multivariate_normal``
+        and so is *unbounded and non-periodic*, while the trained flow inherits
+        aspire's logit transform on bounded coordinates and angular treatment
+        of periodic ones. On an example declaring five periodic parameters and
+        a mode sitting on the ``phi_12`` boundary, that makes ``log q`` wrong
+        exactly where ``(1 - beta) log q`` dominates.
+
+        A useful analytic prior flow would need a correlated mixture that is
+        also truncated and wrapped. Neither existing class is that:
+        :class:`GaussianMixtureFlow` keeps correlations but ignores the
+        boundaries, and :class:`TruncatedMVNProposal` respects them but is
+        diagonal, which discards the correlation structure a degenerate
+        posterior lives in. Use ``"learned"`` until one exists.
     mode_symmetries : list of (str, float) or None
         Exact symmetries of the posterior, as ``(parameter, shift)`` pairs, used
         to seed the modes they imply instead of relying on the random
@@ -439,6 +496,7 @@ class Laplace(Sampler):
         mode_search_subspace=None,
         mode_separation_sigma=3.0,
         mode_symmetries=None,
+        smc_prior_flow="learned",
         mode_weights="equal",
         smc_kwargs=None,
         smc_progress=True,
@@ -1443,10 +1501,10 @@ class Laplace(Sampler):
             )
             mode_weight_values = proposal_flow.weights
             self._log_mode_summary(map_estimates, estimator.parameter_names, mode_weight_values)
-            # One truncated proposal per discovered mode.  Aspire has no way to
-            # take our mixture directly (``sample_posterior`` uses the flow that
-            # ``fit`` trains as its ``prior_flow``), so the modes must reach it
-            # through the initial cloud that flow is fit to.
+            # One truncated proposal per discovered mode.  Under the default
+            # ``smc_prior_flow="learned"`` the modes reach aspire only through
+            # the initial cloud its flow is trained on; under ``"laplace"`` the
+            # mixture is handed to aspire directly as the prior flow.
             init_proposals = [
                 TruncatedMVNProposal(
                     mode_mean,
@@ -1463,7 +1521,7 @@ class Laplace(Sampler):
             mode_weight_values = None
 
         samples, logl, smc_log_z, smc_log_z_err, nlikelihood = self._smc_sample(
-            init_proposals, estimator, mode_weights=mode_weight_values
+            init_proposals, estimator, mode_weights=mode_weight_values, proposal_flow=proposal_flow
         )
 
         if self.kwargs["plot_diagnostic"]:
@@ -1890,7 +1948,7 @@ class Laplace(Sampler):
 
         return batched_log_likelihood
 
-    def _smc_sample(self, init_proposals, estimator, mode_weights=None):
+    def _smc_sample(self, init_proposals, estimator, mode_weights=None, proposal_flow=None):
         """Run posterior sampling via aspire, starting from the Laplace proposal.
 
         *init_proposals* is a list of ``TruncatedMVNProposal`` objects, one per
@@ -1938,9 +1996,22 @@ class Laplace(Sampler):
         if flow_kwargs:
             logger.info(f"Flow architecture: {flow_kwargs}")
 
+        # ``smc_prior_flow="laplace"`` hands aspire our analytic mixture as the
+        # flow.  ``Aspire.fit`` skips ``init_flow()`` when one is already set
+        # and then calls ``flow.fit(...)``, which is a no-op on ours -- so
+        # nothing is trained and ``log q`` in the tempered target is the
+        # Laplace mixture in closed form.
+        prior_flow_mode = self.kwargs.get("smc_prior_flow", "learned")
+        if prior_flow_mode not in ("learned", "laplace"):
+            raise SamplerError(f"smc_prior_flow must be 'learned' or 'laplace', got {prior_flow_mode!r}.")
+        supplied_flow = proposal_flow if prior_flow_mode == "laplace" else None
+        if prior_flow_mode == "laplace" and proposal_flow is None:
+            raise SamplerError("smc_prior_flow='laplace' requires a proposal flow, which run_sampler did not build.")
+
         aspire_sampler = Aspire(
             log_likelihood=batched_log_likelihood,
             log_prior=functions.log_prior,
+            flow=supplied_flow,
             dims=len(parameter_names),
             parameters=parameter_names,
             prior_bounds=prior_bounds,
