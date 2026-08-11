@@ -311,6 +311,15 @@ class Laplace(Sampler):
         across is ~1e-4 of the sky -- but the same budget covers two or three
         named dimensions densely.  For a GW sky reflection, for example,
         ``["zenith", "azimuth"]``.  Default None (search all parameters).
+    mode_symmetries : list of (str, float) or None
+        Exact symmetries of the posterior, as ``(parameter, shift)`` pairs, used
+        to seed the modes they imply instead of relying on the random
+        multi-start search to rediscover them. For a posterior that is exactly
+        pi-periodic in ``delta_phase``, pass ``[("delta_phase", np.pi)]``. Each
+        implied mode is verified -- its log-posterior must match the one it
+        mirrors -- and skipped if the symmetry does not hold, so declaring a
+        wrong one is safe. Requires ``n_modes > 1``, which is what builds a
+        mixture at all. Default None.
     mode_separation_sigma : float
         How far apart two modes must be, in units of the primary mode's
         per-parameter sigma, to count as distinct.  A candidate closer than this
@@ -429,6 +438,7 @@ class Laplace(Sampler):
         mode_search_nsamples=500,
         mode_search_subspace=None,
         mode_separation_sigma=3.0,
+        mode_symmetries=None,
         mode_weights="equal",
         smc_kwargs=None,
         smc_progress=True,
@@ -2615,10 +2625,77 @@ class Laplace(Sampler):
             except Exception as exc:
                 logger.warning(f"Could not compute covariance for " f"candidate {n_polished}: {exc}")
 
+        # --- 2b. Modes implied by an exact symmetry ---
+        found_modes = self._add_symmetric_modes(estimator, found_modes, std_scale, separation)
+
         # --- 3. Sort and summarise ---
         found_modes.sort(key=lambda r: r[2], reverse=True)
         # The caller logs the summary once the mixture weights are known.
         return found_modes
+
+    # A symmetry-implied mode is seeded only when its log-posterior matches the
+    # one it mirrors to within this many nats.  An exact symmetry reproduces it
+    # to ~1e-9, so the tolerance is not there to be generous: it is what catches
+    # a symmetry declared for a problem that does not actually have it, which is
+    # then skipped rather than seeding the mixture with a fictitious component.
+    _SYMMETRY_LOGP_TOL = 0.5
+
+    def _add_symmetric_modes(self, estimator, found_modes, std_scale, separation):
+        """Seed the modes implied by an exact symmetry, rather than hunting them.
+
+        Some posteriors are exactly periodic in one coordinate: on the
+        precessing BBH sampled in ``delta_phase`` the log-posterior satisfies
+        ``lnP(x + pi) = lnP(x)`` to machine precision, giving two lobes of
+        identical mass.  Leaving those to the random multi-start search is a bad
+        bet.  The narrower the coordinate, the smaller the target -- and the
+        search competes for a fixed ``n_modes`` budget against near-duplicates
+        of the mode it already has, which are rejected only when *every*
+        coordinate falls inside ``mode_separation_sigma``.  On that example the
+        search returned three candidates all at the same ``delta_phase``, the
+        mirror was never proposed, and the SMC sampled one lobe of two -- worth
+        ~ln(2) in the evidence and a phase posterior at a quarter of its width.
+
+        A declared symmetry is written down instead.  The shift is a pure
+        translation in one coordinate, so the local curvature is carried over
+        unchanged and the mirrored mode reuses the covariance rather than
+        paying for another Hessian.
+
+        The log-posterior is still evaluated at the mirrored point and compared
+        with its source: the symmetry is verified, never assumed.
+        """
+        symmetries = self.kwargs.get("mode_symmetries") or []
+        if not symmetries:
+            return found_modes
+
+        names = list(estimator.parameter_names)
+        lows = np.asarray(estimator.prior_bounds_min, dtype=float)
+        highs = np.asarray(estimator.prior_bounds_max, dtype=float)
+        out = list(found_modes)
+        for param, shift in symmetries:
+            if param not in names:
+                logger.warning(f"mode_symmetries names {param!r}, which is not a sampled parameter; ignoring it.")
+                continue
+            index = names.index(param)
+            low, period = lows[index], highs[index] - lows[index]
+            for mean, cov, logp in list(out):
+                mirrored = np.array(mean, dtype=float)
+                mirrored[index] = low + np.mod(mirrored[index] + float(shift) - low, period)
+                mirrored_logp = float(estimator.log_posterior_from_array(mirrored))
+                offset = abs(mirrored_logp - logp)
+                if not np.isfinite(mirrored_logp) or offset > self._SYMMETRY_LOGP_TOL:
+                    logger.info(
+                        f"Symmetry {param} + {float(shift):.4f} does not hold at "
+                        f"{mean[index]:.4f} (log-posterior differs by {offset:.2f}); not seeding it."
+                    )
+                    continue
+                if any(np.max(np.abs(mirrored - m) / std_scale) < separation for m, _, _ in out):
+                    continue
+                out.append((mirrored, cov, mirrored_logp))
+                logger.info(
+                    f"Symmetry mode seeded: {param} {mean[index]:.4f} -> {mirrored[index]:.4f}, "
+                    f"log-posterior = {mirrored_logp:.2f} (matches its mirror to {offset:.2e})"
+                )
+        return out
 
     # Mixture components holding less than this share of the total Laplace mass
     # are dropped rather than seeded.  Keeping them is worse than useless: such a
