@@ -16,7 +16,16 @@ import pandas as pd
 from bilby_laplace.comparison import compare
 
 logger = bilby.core.utils.logger
-bilby.core.utils.random.seed(1234)
+# The strain/noise realisation. Reseeded here so every sampler in this example
+# analyses identical data.
+DATA_SEED = 1234
+# The sampler's own random stream. Passed to run_sampler as `sampling_seed`,
+# which bilby routes to each sampler's own seed argument -- for dynesty that
+# builds its `rstate`, which is otherwise drawn from OS entropy and leaves the
+# run unreproducible. Note the aspire plugin silently discards it, so the
+# smc-direct control is not yet covered.
+SAMPLING_SEED = 20260810
+bilby.core.utils.random.seed(DATA_SEED)
 outdir = "outdir_gaussian_example"
 base_label = "gaussian"
 
@@ -70,6 +79,7 @@ def setup():
 
     # Shared sampler kwargs
     _common = dict(
+        sampling_seed=SAMPLING_SEED,
         likelihood=likelihood,
         priors=priors,
         injection_parameters=injection_parameters,

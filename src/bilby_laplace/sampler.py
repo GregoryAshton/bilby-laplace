@@ -403,6 +403,13 @@ class Laplace(Sampler):
     sampler_name = "laplace"
     sampling_seed_key = "seed"
     default_kwargs = dict(
+        # The sampling seed. `sampling_seed_key = "seed"` tells bilby to route
+        # `sampling_seed`/`random_seed` here and reseed its own generator with
+        # it, but the key has to exist in the defaults or
+        # `_verify_kwargs_against_default_kwargs` strips it back out before
+        # `run_sampler` ever sees it -- which silently left the SMC stage
+        # unseeded. `None` means "draw from OS entropy", matching dynesty.
+        seed=None,
         resample="rejection",
         target_nsamples=10000,
         batch_nsamples=1000,
@@ -1941,6 +1948,27 @@ class Laplace(Sampler):
         # first positional argument of ``sample_posterior``.
         n_samples = smc_kw.pop("n_samples", self.kwargs["target_nsamples"])
         smc_kw.pop("flow_kwargs", None)  # consumed by the Aspire constructor above
+
+        # Seed aspire's own generator from the sampler seed.
+        #
+        # ``sampling_seed_key = "seed"`` makes bilby reseed *its* global
+        # generator, which covers the Laplace stage, but aspire builds a
+        # separate RNG of its own and defaults it to OS entropy.  Without this
+        # the SMC stage stays unreproducible even when a seed is given -- and
+        # since the Laplace stage is deterministic, aspire's flow training and
+        # MCMC are where all the run-to-run scatter lives.
+        #
+        # Only ``numpy`` is assumed: it is the backend these examples run on. A
+        # torch/jax run should pass its own ``rng`` through ``smc_kwargs``,
+        # which takes precedence.
+        seed = self.kwargs.get("seed")
+        if seed is not None and smc_kw.get("rng") is None:
+            try:
+                from orng import RandomGenerator as _AspireRNG  # aspire >= 0.1.0a21
+            except ImportError:
+                from orng import ArrayRNG as _AspireRNG
+            smc_kw["rng"] = _AspireRNG("numpy", seed=int(seed))
+            logger.info(f"Seeding aspire RNG with {int(seed)}")
 
         # Draw initial samples filtered to the prior support, consistent with
         # the inprior/rejection sampling paths.

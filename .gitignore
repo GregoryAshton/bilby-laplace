@@ -40,3 +40,6 @@ htmlcov/
 # Claude Code guidance - local only, kept out of git history
 CLAUDE.md
 .claude/
+
+# Run logs from `make <sampler> > x.log`
+examples/**/*.log
