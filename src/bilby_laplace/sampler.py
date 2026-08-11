@@ -2485,15 +2485,24 @@ class Laplace(Sampler):
         )
         plt.close(fig)
 
-    def _validate_covariance(self, estimator, mean, cov):
-        """Validate the covariance by checking likelihood along
-        each principal axis.
+    # Smallest log-likelihood drop at 1 sigma that _validate_covariance will
+    # treat as measured rather than as numerical noise. Also caps that method's
+    # inflation at 0.5 / 0.01 = 50 in variance, ~7x in sigma.
+    _MIN_VALIDATION_DROP = 0.01
 
-        At 1-sigma from the MAP along each eigenvector, the
-        log-likelihood should drop by 0.5 for a Gaussian.  If the
-        actual drop is significantly less (posterior wider than
-        the Gaussian predicts), that eigenvalue is inflated to
-        match.  Directions are never shrunk.
+    # Bounded widening applied to a direction whose probe could not resolve a
+    # drop -- 4x in variance, 2x in sigma. Used for a flat likelihood and for a
+    # sub-threshold drop alike, because the two are indistinguishable.
+    _UNRESOLVED_INFLATION = 4.0
+
+    def _validate_covariance(self, estimator, mean, cov):
+        """Validate the covariance by checking likelihood along each principal axis.
+
+        At 1-sigma from the MAP along each eigenvector the log-likelihood should
+        drop by 0.5 for a Gaussian. A smaller drop means the posterior is wider
+        than the Gaussian predicts, and that eigenvalue is inflated to match.
+        Directions are never shrunk.
+
         """
         eigvals, eigvecs = np.linalg.eigh(cov)
         logl_peak = float(estimator.log_likelihood_from_array(mean))
@@ -2520,8 +2529,51 @@ class Laplace(Sampler):
             actual_drop = min(drops)
             expected_drop = 0.5
 
-            # Only inflate when posterior is notably wider
-            if 0 < actual_drop < expected_drop * 0.5:
+            # A drop too small to resolve is not evidence of a wide posterior.
+            # ``expected / actual`` diverges as the measured drop goes to zero,
+            # and the drop goes to zero for two very different reasons: the
+            # posterior really is much wider than the Gaussian, or the 1-sigma
+            # step is far below the scale on which the likelihood varies
+            # smoothly, so the probe is reading its numerical noise floor.
+            #
+            # The second is what happens on a sharply-measured parameter. On
+            # the 3G BNS the chirp_mass eigendirection has sigma = 3.2e-6
+            # against a log-likelihood of ~1.8e5; the measured drop came out at
+            # 4e-9 and the direction was widened by a factor of 11391 in sigma,
+            # with geocent_time close behind at 2792. Four directions were
+            # driven to the same 3.6e-2, which is the signature of a floor
+            # being hit rather than of anything measured. Truncation to the
+            # prior then hid it, leaving a "Laplace proposal" that was the
+            # prior in those coordinates.
+            #
+            # Below the threshold the direction is treated as unresolved and
+            # given the same bounded widening as a flat one, rather than an
+            # unbounded correction inferred from noise. Genuinely unconstrained
+            # directions are not lost by this: they are already bounded at the
+            # prior by ``_floor_precision_at_prior``. The threshold also caps
+            # the resolved branch, since expected/actual <= 0.5/0.01 = 50 in
+            # variance, i.e. ~7x in sigma.
+            if actual_drop < self._MIN_VALIDATION_DROP:
+                # No evidence, so no change. A drop this small -- often
+                # negative, i.e. the likelihood rising into numerical noise --
+                # says the probe could not resolve the direction, not that the
+                # posterior is wide along it. Widening anyway, even by a
+                # "safe" bounded factor, is what wrecked this: a near-null
+                # direction sits close to prior width already, so 4x takes it
+                # to the prior, and any parameter with a component along it
+                # inherits that. On the BNS it moved chirp_mass from 1.36x
+                # dynesty to 84x while the measured drops were ~1e-6.
+                #
+                # Directions the data genuinely does not constrain are not
+                # lost: they already carry large variance from the Fisher, and
+                # `_floor_precision_at_prior` bounds them at the prior.
+                logger.debug(
+                    f"Leaving axis {i} unchanged: log-likelihood drop at 1 "
+                    f"sigma ({actual_drop:.2e}) is below the "
+                    f"{self._MIN_VALIDATION_DROP:g} needed to distinguish a "
+                    f"wide posterior from an unresolved probe."
+                )
+            elif actual_drop < expected_drop * 0.5:
                 inflation = expected_drop / actual_drop
                 eigvals[i] *= inflation
                 any_inflated = True
@@ -2530,11 +2582,6 @@ class Laplace(Sampler):
                     f"posterior is {inflation:.1f}x wider "
                     f"than Gaussian approximation"
                 )
-            elif actual_drop <= 0:
-                # Likelihood flat or rising — inflate
-                eigvals[i] *= 4.0
-                any_inflated = True
-                logger.info(f"Widening proposal along axis {i}: " f"likelihood is flat at 1-sigma, " f"expanding by 4x")
 
         if any_inflated:
             cov = eigvecs @ np.diag(eigvals) @ eigvecs.T
@@ -2544,6 +2591,7 @@ class Laplace(Sampler):
         # scipy.stats.multivariate_normal (allow_singular=False) requires all
         # eigenvalues to exceed eps = 1e6 * machine_eps * max_eigval ≈ 2.22e-10 * max.
         # Use 1e-9 * max as the floor to stay comfortably above that threshold.
+        #
         eigvals_out = np.linalg.eigvalsh(cov)
         min_floor = max(1e-9 * eigvals_out.max(), 1e-30)
         if eigvals_out.min() < min_floor:
