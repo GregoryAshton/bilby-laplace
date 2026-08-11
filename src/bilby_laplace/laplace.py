@@ -434,6 +434,10 @@ class LaplacePosteriorEstimator:
             self._prior_std_cache = stds
         return self._prior_std_cache
 
+    # Rescaled-eigenvalue guard for the marginal cap; see
+    # _floor_precision_at_prior. Numerical only, never binding on the result.
+    _EIGENVALUE_GUARD = 1e-8
+
     def _floor_precision_at_prior(self, precision):
         """Bound the parameter-space precision below by the prior precision.
 
@@ -445,11 +449,30 @@ class LaplacePosteriorEstimator:
         sigma of 12 rad, larger than its entire prior range.
 
         Rescaling by the prior standard deviation maps the prior precision to
-        the identity; flooring the rescaled eigenvalues at 1 then enforces
-        ``posterior precision >= prior precision`` in every direction, i.e. no
-        marginal variance exceeds the prior.  Well-constrained directions
-        (precision >> prior) are untouched.  Skipped if any prior width is
-        non-finite (an unbounded prior cannot bound the posterior).
+        the identity, so in those units "no wider than the prior" is
+        ``marginal variance <= 1``.  That bound is applied to the *marginals*
+        directly: any coordinate whose rescaled marginal variance exceeds 1 is
+        shrunk to exactly 1 by a congruence ``C -> S C S`` with
+        ``S = diag(min(1, 1/sqrt(diag(C))))``.  Coordinates already inside the
+        prior get ``s = 1`` and are left untouched; correlations are unchanged
+        because a diagonal congruence rescales rows and columns together, and
+        positive-definiteness is preserved for the same reason.  Skipped if any
+        prior width is non-finite (an unbounded prior cannot bound the
+        posterior).
+
+        This replaces flooring the rescaled *eigenvalues* at 1.  That version
+        only ever added precision, and adding precision anywhere can only
+        decrease every marginal variance, so it was a one-way narrowing
+        operation: its docstring's claim that no marginal variance exceeds the
+        prior described a bound on conditional variance along eigendirections,
+        not on the marginals it actually moved.  It rescued parameters that
+        started too wide but narrowed ones that did not -- ``phi_jl`` sat at
+        1.01x dynesty in the raw Fisher and the floor took it to 0.53x -- and
+        on the delta_phase BBH it left ``tilt_1``'s proposal at 0.69x, which
+        the SMC then had to spend its mixing budget undoing.  Capping the
+        marginals leaves already-narrow directions alone by construction while
+        still killing the runaway the bound exists for (``tilt_2`` at
+        sigma = 12 rad on the raw Fisher).
 
         The scale comes from ``_prior_standard_deviations`` rather than the
         uniform-prior ``width / sqrt(12)``: that form is exact for 9 of the 13
@@ -468,16 +491,35 @@ class LaplacePosteriorEstimator:
         prior_std = self._prior_standard_deviations()
         outer_std = np.outer(prior_std, prior_std)
         scaled = precision * outer_std  # D P D, with D = diag(prior_std)
+        scaled = 0.5 * (scaled + scaled.T)
+
+        # Numerical guard only. A non-positive eigenvalue inverts to a negative
+        # or infinite variance and would make the marginal cap below undefined.
+        # 1e-8 in rescaled units is a variance 1e8 times the prior -- far wider
+        # than the cap allows -- so unlike flooring at 1 this never binds on
+        # the returned precision.
         eigvals, eigvecs = np.linalg.eigh(scaled)
-        n_floored = int(np.sum(eigvals < 1.0))
-        if n_floored > 0:
-            logger.info(
-                f"Flooring {n_floored} waveform precision eigenvalue(s) at the "
-                f"prior (min rescaled eigenvalue {eigvals.min():.3g}); those "
-                f"directions default to prior width."
+        n_guarded = int(np.sum(eigvals < self._EIGENVALUE_GUARD))
+        if n_guarded:
+            logger.debug(
+                f"Guarding {n_guarded} non-positive rescaled eigenvalue(s) "
+                f"(min {eigvals.min():.3g}) before the marginal cap."
             )
-            eigvals = np.maximum(eigvals, 1.0)
-            scaled = (eigvecs * eigvals) @ eigvecs.T
+        eigvals = np.maximum(eigvals, self._EIGENVALUE_GUARD)
+        scaled_cov = (eigvecs / eigvals) @ eigvecs.T
+
+        marginal = np.diag(scaled_cov).copy()
+        over = marginal > 1.0
+        if np.any(over):
+            names = [n for n, flag in zip(self.parameter_names, over) if flag]
+            logger.info(
+                f"Capping {int(over.sum())} marginal variance(s) at the prior: "
+                + ", ".join(f"{n} ({marginal[i]:.3g}x prior var)" for i, n in zip(np.flatnonzero(over), names))
+            )
+            shrink = np.where(over, 1.0 / np.sqrt(np.maximum(marginal, self._EIGENVALUE_GUARD)), 1.0)
+            scaled_cov = scaled_cov * np.outer(shrink, shrink)
+
+        scaled = np.linalg.inv(0.5 * (scaled_cov + scaled_cov.T))
         precision = scaled / outer_std
         return 0.5 * (precision + precision.T)
 

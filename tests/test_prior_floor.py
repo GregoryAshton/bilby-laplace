@@ -57,16 +57,50 @@ def test_well_constrained_directions_are_untouched(sine_estimator):
     np.testing.assert_allclose(floored, tight, rtol=1e-6)
 
 
-def test_floor_never_widens_beyond_the_prior(sine_estimator):
-    """The bound is one-sided: variance <= prior variance in every direction."""
+def test_no_marginal_variance_exceeds_the_prior(sine_estimator):
+    """The bound is on the marginals: diag(cov) <= diag(prior_cov)."""
     rng = np.random.default_rng(0)
-    prior_cov = np.diag(sine_estimator._prior_standard_deviations() ** 2)
+    prior_var = sine_estimator._prior_standard_deviations() ** 2
     for _ in range(20):
         a = rng.normal(size=(2, 2))
         p = a @ a.T + 1e-9 * np.eye(2)
         cov = np.linalg.inv(sine_estimator._floor_precision_at_prior(p))
-        # cov <= prior_cov in the Loewner order <=> eig(prior_cov - cov) >= 0
-        assert np.linalg.eigvalsh(prior_cov - cov).min() > -1e-6
+
+        assert np.all(np.diag(cov) <= prior_var * (1 + 1e-6))
+
+
+def test_the_bound_never_narrows_a_marginal_already_inside_the_prior(sine_estimator):
+    """The property the eigenvalue floor did not have, and the reason it changed.
+
+    Flooring rescaled *eigenvalues* at 1 only ever adds precision, so it could
+    only shrink marginals -- including ones already narrower than the prior. On
+    the precessing BBH that left tilt_1's proposal at 0.69x dynesty. Capping
+    the marginals instead must leave those untouched.
+    """
+    rng = np.random.default_rng(1)
+    prior_var = sine_estimator._prior_standard_deviations() ** 2
+    for _ in range(20):
+        a = rng.normal(size=(2, 2))
+        p = a @ a.T + 1e-9 * np.eye(2)
+        before = np.diag(np.linalg.inv(p))
+        after = np.diag(np.linalg.inv(sine_estimator._floor_precision_at_prior(p)))
+
+        inside = before <= prior_var
+        np.testing.assert_allclose(after[inside], before[inside], rtol=1e-6)
+
+
+def test_correlations_survive_the_cap(sine_estimator):
+    """The cap is a diagonal congruence, so it rescales rows and columns
+    together and cannot change the correlation matrix."""
+    p = np.linalg.inv(np.array([[400.0, 18.0], [18.0, 4.0]]))  # both marginals over prior
+    before = np.linalg.inv(p)
+    after = np.linalg.inv(sine_estimator._floor_precision_at_prior(p))
+
+    def corr(c):
+        d = np.sqrt(np.diag(c))
+        return c / np.outer(d, d)
+
+    np.testing.assert_allclose(corr(after), corr(before), rtol=1e-6)
 
 
 def test_result_is_symmetric(sine_estimator):
