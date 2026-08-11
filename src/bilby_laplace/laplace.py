@@ -760,9 +760,27 @@ class LaplacePosteriorEstimator:
         return log_z
 
     # Eigenvalues of the preconditioned precision below this fraction of the
-    # largest are floored before inversion.  This caps the condition number of
-    # the inverted matrix at 1 / COVARIANCE_REL_FLOOR.
-    COVARIANCE_REL_FLOOR = 1e-10
+    # largest are floored before inversion, capping the condition number of the
+    # inverted matrix at 1 / COVARIANCE_REL_FLOOR.
+    #
+    # This is a numerical guard, not a statistical bound. The statistical bound
+    # -- no direction wider than the prior -- is `_floor_precision_at_prior`,
+    # and at the previous 1e-10 this floor was tighter than that on both GW
+    # examples and silently overrode it: preconditioned condition numbers are
+    # 8.6e12 on the BNS and 5.4e11 on the BBH, so a cap at 1e10 bit by factors
+    # of 860 and 54. The cost was borne by exactly the parameters the data does
+    # not constrain, which the prior bound had correctly set to prior width:
+    # lambda_1 was squeezed from 6.1x dynesty's width to 0.21x, and on the BBH
+    # a_2 from 1.1x to 0.55x. That is what `prior_parameters` used to work
+    # around by drawing lambda_1, lambda_2 and psi from the prior directly.
+    #
+    # At 1e-14 the guard is inert on both examples and fires only on genuinely
+    # zero or negative eigenvalues. The price is real: inverting at a condition
+    # number of ~1e13 leaves roughly three of the sixteen digits double
+    # precision carries. That is acceptable only because the preconditioning
+    # above has already removed the units spread (4.1e17 -> 8.6e12 on the BNS)
+    # and because the prior bound constrains the result.
+    COVARIANCE_REL_FLOOR = 1e-14
 
     def calculate_posterior_covariance(self, sample):
         precision = self.calculate_posterior_precision(sample)
