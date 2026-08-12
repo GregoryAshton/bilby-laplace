@@ -1,6 +1,6 @@
 # gaussian — sampler comparison
 
-Posteriors from 5 samplers (`dynesty`, `laplace`, `rejection`, `rejection_user`, `smc`) on the gaussian example, each compared against the `dynesty` reference.
+Posteriors from 6 samplers (`aspire`, `dynesty`, `laplace`, `rejection`, `rejection_user`, `smc`) on the gaussian example, each compared against the `dynesty` reference.
 
 ## Running it
 
@@ -9,7 +9,7 @@ make all       # every sampler in turn, then this comparison
 make compare   # rebuild this table and the corner plot from existing results
 ```
 
-Individual samplers: `make laplace`, `make rejection`, `make rejection-user`, `make smc`, `make dynesty`.
+Individual samplers: `make laplace`, `make rejection`, `make rejection-user`, `make smc`, `make aspire`, `make dynesty`.
 
 ## Comparison
 
@@ -19,9 +19,10 @@ Individual samplers: `make laplace`, `make rejection`, `make rejection-user`, `m
 
 | method | log Z | ± | n_like | efficiency | time | JSD (mbits) | worst parameter |
 |---|---|---|---|---|---|---|---|
-| `dynesty` | -4.61 | 0.08 | 114317 | 3.4% | 9.8s | — | — |
-| `laplace` | -4.61 | nan | 5000 | 100.0% | 0.7s | 1.21 | x (1.41) |
-| `rejection` | -4.61 | 0.01 | 27000 | 18.8% | 1.1s | 3.32 | y (3.78) |
-| `rejection_user` | -4.61 | 0.01 | 27000 | 18.8% | 1.1s | 2.42 | x (2.75) |
-| `smc` | -4.61 | 0.01 | 45000 | 11.1% | 10.3s | 1.12 | y (1.40) |
+| `aspire` | -4.62 | 0.03 | 180000 | 2.8% | 9.2s | 2.07 | y (2.34) |
+| `dynesty` | -4.61 | 0.08 | 114317 | 3.4% | 7.8s | — | — |
+| `laplace` | -4.61 | nan | 5000 | 100.0% | 1.0s | 0.92 | x (1.07) |
+| `rejection` | -4.61 | 0.01 | 27000 | 18.8% | 1.3s | 2.63 | x (3.16) |
+| `rejection_user` | -4.61 | 0.01 | 27000 | 18.8% | 1.1s | 2.47 | y (2.50) |
+| `smc` | -4.61 | 0.01 | 45000 | 11.1% | 11.2s | 0.68 | y (0.71) |
 

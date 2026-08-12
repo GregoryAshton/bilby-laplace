@@ -5,7 +5,7 @@ Laplace approximation on a simulated anti-glitch in Gaussian noise.
 
 Usage
 -----
-    python run.py --sampler laplace rejection smc dynesty
+    python run.py --sampler laplace rejection smc smc-direct dynesty
     python run.py --compare
 """
 
@@ -369,6 +369,29 @@ def run_smc(_common_laplace):
     )
 
 
+def run_smc_direct(_common):
+    return bilby.run_sampler(
+        **_common,
+        sampler="aspire",
+        n_samples=N_SAMPLES,
+        n_initial_samples=10000,
+        sample_kwargs=dict(
+            sampler="minipcn_smc",
+            adaptive=True,
+            target_efficiency=(0.5, 0.8),
+            target_efficiency_rate=0.5,
+            sampler_kwargs=dict(
+                n_steps=N_STEPS,
+                target_acceptance_rate=0.234,
+                step_fn="tpcn",
+            ),
+        ),
+        label=f"{base_label}_aspire",
+        enable_checkpointing=False,
+        npool=1,
+    )
+
+
 def run_dynesty(_common):
     return bilby.run_sampler(
         **_common,
@@ -429,9 +452,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sampler",
         nargs="+",
-        choices=["laplace", "rejection", "smc", "dynesty"],
+        choices=["laplace", "rejection", "smc", "smc-direct", "dynesty"],
         metavar="SAMPLER",
-        help="One or more samplers to run: laplace, rejection, smc, dynesty",
+        help="One or more samplers to run: laplace, rejection, smc, smc-direct, dynesty",
     )
     parser.add_argument(
         "--compare",
@@ -450,6 +473,7 @@ if __name__ == "__main__":
                 "laplace": lambda: run_laplace(_common_laplace),
                 "rejection": lambda: run_rejection(_common_laplace),
                 "smc": lambda: run_smc(_common_laplace),
+                "smc-direct": lambda: run_smc_direct(_common),
                 "dynesty": lambda: run_dynesty(_common),
             }
 

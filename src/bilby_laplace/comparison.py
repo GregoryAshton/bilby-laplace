@@ -37,23 +37,13 @@ JSD_N = 2000
 # Fixed, so re-running the comparison on unchanged results reproduces the table.
 _JSD_RNG_SEED = 20260810
 
-# ---------------------------------------------------------------------------
-# Fixed, colourblind-safe colours per sampler family
-# ---------------------------------------------------------------------------
-# Giving each sampler a fixed colour lets a reader recognise the same method at
-# a glance across every example plot.  The palette is Okabe-Ito, designed to
-# stay distinguishable under all common forms of colour-vision deficiency; its
-# low-contrast yellow is deliberately omitted.  We avoid matplotlib's default
-# "C0"/"C1"... cycle so the mapping is stable regardless of the order in which
-# results happen to load.
 SAMPLER_COLOURS = {
-    "laplace": "#009E73",  # bluish green    - raw Laplace/Gaussian approximation
-    "inprior": "#CC79A7",  # reddish purple
-    "rejection": "#D55E00",  # vermillion
-    "importance": "#56B4E9",  # sky blue
-    "smc": "#E69F00",  # orange              - the headline method
-    "smcdirect": "#785EF0",  # violet        - SMC from the prior, no-Laplace control
-    "dynesty": "#0072B2",  # blue            - reference nested sampler
+    "laplace": "C1",
+    "inprior": "C1",
+    "rejection": "C2",
+    "smc": "C3",
+    "aspire": "C4",
+    "dynesty": "C0",
 }
 
 # Colour for any result whose sampler family is not recognised.
@@ -106,10 +96,6 @@ def sampler_family(label):
     (``"{base}_{method}"``), and config-variant suffixes (e.g. ``"user"``) are
     not family keys, so this correctly resolves a base that happens to be named
     after another family (``"laplace_smc"`` -> ``"smc"``, not ``"laplace"``).
-
-    Note that ``"smcdirect"`` is deliberately spelled without a separator: the
-    tokeniser splits on ``-`` and ``_``, so ``"smc-direct"`` would tokenise to
-    ``["smc", "direct"]`` and collide with the ``"smc"`` family.
     """
     family = None
     for token in _label_tokens(label):
@@ -146,34 +132,36 @@ def colours_for_results(results, overrides=None):
 
 
 def _prettify_method(method):
-    """Turn a method token like ``"rejection_user"`` into ``"Rejection user"``.
+    """Turn a method token like ``"rejection_user"`` into ``"Laplace: Rejection (user)"``.
 
-    ``"smc"`` is upper-cased as an acronym; ``"inprior"`` becomes
-    ``"Laplace in-prior"`` (it is the Laplace approximation drawn within the
-    prior support); other tokens are capitalised.
+    The three Laplace-seeded resampling methods (``"inprior"``, ``"rejection"``,
+    ``"smc"``, and ``"importance"`` for completeness) are named
+    ``"Laplace: <Method>"`` so every Laplace variant reads as one family in a
+    legend. ``"aspire"`` -- the no-Laplace SMC control, run directly through
+    aspire -- is not a Laplace method, so it keeps its own name and falls
+    through to plain capitalisation. A config-variant suffix (e.g. the
+    ``"user"`` in ``"rejection_user"``) is kept, parenthesised rather than
+    folded into the method name.
     """
     text = method.replace("_", " ").replace("-", " ").strip()
     if not text:
         return method
 
-    def _word(w):
-        lw = w.lower()
-        if lw == "smc":
-            return "SMC"
-        if lw == "inprior":
-            return "Laplace in-prior"
-        return w.capitalize()
+    words = text.split()
+    head, tail = words[0].lower(), words[1:]
 
-    return " ".join(_word(w) for w in text.split())
+    laplace_methods = {
+        "smc": "SMC",
+        "inprior": "In-prior",
+        "rejection": "Rejection",
+        "importance": "Importance",
+    }
+    if head in laplace_methods:
+        base = f"Laplace: {laplace_methods[head]}"
+    else:
+        base = words[0].capitalize()
 
-
-def _format_duration(secs):
-    """Human-readable run time as a bracketed suffix, e.g. ``" (1.2 min)"``."""
-    if secs >= 3600:
-        return f" ({secs / 3600:.1f} hr)"
-    if secs >= 60:
-        return f" ({secs / 60:.1f} min)"
-    return f" ({secs:.0f} s)"
+    return f"{base} ({' '.join(tail)})" if tail else base
 
 
 def _as_count(value):
@@ -558,20 +546,18 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
         try:
             r = bilby.core.result.read_in_result(filename=f)
             results.append(r)
-            label = os.path.basename(r.label).capitalize() + _format_duration(r.sampling_time.total_seconds())
+            label = os.path.basename(r.label).capitalize()
             labels.append(label)
             logger.info(f"Loaded {f} ({label})")
         except Exception as exc:
             logger.warning(f"Could not load {f}: {exc}")
 
     # Optionally shorten the legend to just the sampler name, dropping the shared
-    # example prefix but keeping the run time (computed after loading so the
-    # shared prefix can be detected across all results).
+    # example prefix (computed after loading so the shared prefix can be
+    # detected across all results). Run time is in the README table, not the
+    # legend.
     if sampler_only_labels and results:
-        labels = [
-            name + _format_duration(r.sampling_time.total_seconds())
-            for name, r in zip(sampler_labels(results), results)
-        ]
+        labels = sampler_labels(results)
 
     # Extract injection parameters from first result if not provided
     if injection_parameters is None and results:
@@ -659,15 +645,20 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
 
     plot_parameters = parameters or results[0].search_parameter_keys
 
-    fig = bilby.core.result.plot_multiple(
-        results,
-        labels=labels,
-        colours=colours_for_results(results, overrides=colour_overrides),
-        parameters=plot_parameters,
-        filename=filename,
-        titles=False,
-        save=False,
-    )
+    # Half the default handle length, so the legend's line samples take up
+    # less of its width -- plot_multiple's legend is a bare ax.legend() with
+    # no kwargs of its own, so this is the only lever available without
+    # reaching into bilby's plotting internals.
+    with plt.rc_context({"legend.handlelength": plt.rcParams["legend.handlelength"] / 2}):
+        fig = bilby.core.result.plot_multiple(
+            results,
+            labels=labels,
+            colours=colours_for_results(results, overrides=colour_overrides),
+            parameters=plot_parameters,
+            filename=filename,
+            titles=False,
+            save=False,
+        )
 
     # Overlay injection truth values if provided
     if injection_parameters:

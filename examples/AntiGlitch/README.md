@@ -1,6 +1,6 @@
 # AntiGlitch — sampler comparison
 
-Posteriors from 4 samplers (`antiglitch_dynesty`, `antiglitch_inprior`, `antiglitch_rejection`, `antiglitch_smc`) on the AntiGlitch example, each compared against the `antiglitch_dynesty` reference.
+Posteriors from 5 samplers (`antiglitch_aspire`, `antiglitch_dynesty`, `antiglitch_inprior`, `antiglitch_rejection`, `antiglitch_smc`) on the AntiGlitch example, each compared against the `antiglitch_dynesty` reference.
 
 ## Running it
 
@@ -9,7 +9,7 @@ make all       # every sampler in turn, then this comparison
 make compare   # rebuild this table and the corner plot from existing results
 ```
 
-Individual samplers: `make laplace`, `make rejection`, `make smc`, `make dynesty`.
+Individual samplers: `make laplace`, `make rejection`, `make smc`, `make aspire`, `make dynesty`.
 
 ## Comparison
 
@@ -19,8 +19,9 @@ Individual samplers: `make laplace`, `make rejection`, `make smc`, `make dynesty
 
 | method | log Z | ± | n_like | efficiency | time | JSD (mbits) | worst parameter |
 |---|---|---|---|---|---|---|---|
-| `antiglitch_dynesty` | -1989.68 | 0.12 | 1634274 | 0.3% | 458.7s | — | — |
-| `antiglitch_inprior` | nan | nan | 2000 | 100.0% | 2.7s | 1.54 | A (2.02) |
-| `antiglitch_rejection` | -1989.59 | 0.00 | 50000 | 4.5% | 16.0s | 2.28 | f (2.84) |
-| `antiglitch_smc` | -1989.55 | 0.02 | 18000 | 11.1% | 16.3s | 1.58 | A (1.87) |
+| `antiglitch_aspire` | -1989.50 | 0.06 | 128000 | 1.6% | 36.8s | 1.88 | f (2.46) |
+| `antiglitch_dynesty` | -1989.68 | 0.12 | 1634274 | 0.3% | 469.3s | — | — |
+| `antiglitch_inprior` | nan | nan | 2000 | 100.0% | 3.3s | 1.11 | A (1.29) |
+| `antiglitch_rejection` | -1989.59 | 0.00 | 50000 | 4.5% | 16.8s | 1.20 | A (1.35) |
+| `antiglitch_smc` | -1989.55 | 0.02 | 18000 | 11.1% | 16.6s | 1.07 | A (1.39) |
 
