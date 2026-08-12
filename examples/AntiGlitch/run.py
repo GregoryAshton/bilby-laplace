@@ -33,8 +33,8 @@ bilby.core.utils.random.seed(DATA_SEED)
 outdir = "outdir_antiglitch_example"
 base_label = "antiglitch"
 
-N_STEPS = 100
-N_SAMPLES = 5000
+N_STEPS = 5
+N_SAMPLES = 2000
 
 
 def anti_glitch_model(frequency, psd, tstart, A, f, phi, tc, log_gamma):
@@ -322,8 +322,8 @@ def setup():
         clean=True,
         resume=False,
         sampler="laplace",
-        target_nsamples=5000,
-        npool=16,
+        target_nsamples=N_SAMPLES,
+        npool=1,
     )
 
     return _common, _common_laplace
@@ -378,7 +378,7 @@ def run_dynesty(_common):
         sample="acceptance-walk",
         naccept=60,
         maxmcmc=5000,
-        npool=16,
+        npool=1,
         clean=True,
         resume=False,
     )
