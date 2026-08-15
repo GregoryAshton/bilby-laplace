@@ -1053,6 +1053,13 @@ class Laplace(Sampler):
             fisher_method=self.kwargs["fisher_method"],
             fisher_kwargs=self.kwargs["fisher_kwargs"],
             marginalized_reference=self.injection_parameters,
+            # Drawn from the same `random.rng` bilby seeds everywhere else
+            # (via `sampling_seed_key = "seed"`, see below), rather than left
+            # to scipy's own default -- differential_evolution's default seed
+            # consults numpy's legacy global RandomState, which reseeding
+            # `random.rng` does not touch, so without this the MAP search
+            # would be unseeded even in an otherwise fully reproducible run.
+            seed=int(random.rng.integers(2**32)),
         )
 
         # Validate any user-provided sampling covariance up-front (before the
@@ -1079,6 +1086,13 @@ class Laplace(Sampler):
         # and restore (mean, cov, accumulators); a mismatched file is fatal.
         resumed = bool(self.kwargs.get("resume", True)) and self._read_saved_state()
 
+        # scipy's own function-evaluation counts for MAP finding and the
+        # Hessian -- not applicable when resuming (neither runs), and
+        # hessian_nfev stays None when a user-supplied covariance or the
+        # waveform Fisher skips scipy.differentiate.hessian entirely.
+        map_nfev = None
+        hessian_nfev = None
+
         if resumed:
             mean = np.asarray(self._checkpoint_state["mean"])
             cov = np.asarray(self._checkpoint_state["cov"])
@@ -1101,12 +1115,23 @@ class Laplace(Sampler):
                 initial_sample = None
 
             map_sample_dict = estimator.get_MAP_sample(initial_sample)
+            minimization_metadata = getattr(estimator, "minimization_metadata", None)
+            if minimization_metadata is not None:
+                map_nfev = int(getattr(minimization_metadata, "nfev", 0) or 0)
             mean = np.array(list(map_sample_dict.values()))
             if user_cov is not None:
                 logger.info("Using user-provided sampling covariance (skipping Laplace estimate)")
                 covariance = user_cov
             else:
                 covariance = estimator.calculate_posterior_covariance(map_sample_dict)
+                hessian_metadata = getattr(estimator, "hessian_metadata", None)
+                if hessian_metadata is not None:
+                    # nfev is per-Hessian-entry (an (N, N) array from
+                    # scipy.differentiate.hessian), so this sums scipy's own
+                    # per-entry bookkeeping rather than counting distinct
+                    # calls -- an upper bound if entries share cached
+                    # evaluations, but consistent and comparable across runs.
+                    hessian_nfev = int(np.sum(hessian_metadata.nfev))
             # Validate (repair) the *estimated* covariance first, then apply the
             # user's cov_scaling last so it is authoritative.  Validation
             # re-derives widths from the likelihood curvature, so scaling before
@@ -1247,6 +1272,8 @@ class Laplace(Sampler):
             log_evidence_laplace=log_evidence_laplace,
             efficiency=efficiency,
             nlikelihood=nlikelihood,
+            map_nfev=map_nfev,
+            hessian_nfev=hessian_nfev,
         )
 
         # The run finished cleanly; the resume file is no longer needed.

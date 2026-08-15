@@ -51,6 +51,7 @@ class LaplacePosteriorEstimator:
         fisher_method="hessian",
         fisher_kwargs=None,
         marginalized_reference=None,
+        seed=None,
     ):
         """Estimate posteriors using the Laplace approximation.
 
@@ -124,6 +125,21 @@ class LaplacePosteriorEstimator:
             injection. Any marginalised parameter absent here is reconstructed
             from the marginalised likelihood at the MAP. Only used by
             ``fisher_method='waveform'``.
+        seed: int, optional
+            Seeds ``scipy.optimize.differential_evolution``'s own internal
+            random stream (used for MAP finding when
+            ``minimization_method='differential_evolution'`` and no
+            ``initial_sample`` is given). scipy's default seeding consults
+            numpy's legacy global ``RandomState``, which
+            ``bilby.core.utils.random.seed()`` does not touch (it manages its
+            own ``Generator`` instance, ``random.rng``), so without this
+            ``differential_evolution`` is effectively unseeded even when the
+            rest of a bilby run is reproducible. The sampler passes a seed
+            drawn from ``random.rng`` here, so reseeding ``random.rng`` (e.g.
+            via a bilby ``sampling_seed``) reproduces the MAP search too.
+            Other minimisation paths are unaffected: the multi-start
+            Nelder-Mead starting points are drawn via ``priors.sample_subset``,
+            which already goes through ``random.rng``.
         """
         self.likelihood = likelihood
 
@@ -141,6 +157,7 @@ class LaplacePosteriorEstimator:
             self.parameter_names = parameters
         self.minimization_method = minimization_method
         self.n_prior_samples = n_prior_samples
+        self.seed = seed
         self.use_unit_cube = use_unit_cube
         self.jacobian_cap_scale = jacobian_cap_scale
         self.hessian_kwargs = hessian_kwargs if hessian_kwargs is not None else {}
@@ -160,6 +177,12 @@ class LaplacePosteriorEstimator:
         # across the repeated precision evaluations of a multi-mode search.
         self._prior_precision_cap_cache = {}
         self._prior_std_cache = None
+        # scipy's own OptimizeResult / _RichResult from MAP finding and the
+        # Hessian, kept for their `nfev` -- the true likelihood-evaluation
+        # counts for each stage, read by the sampler after each call. None
+        # until the corresponding method has actually run.
+        self.minimization_metadata = None
+        self.hessian_metadata = None
 
         # Construct prior samples at initialisation so that the prior is not stored.
         # Skip when using differential_evolution, which doesn't need starting points.
@@ -630,6 +653,7 @@ class LaplacePosteriorEstimator:
         point = np.array([sample[key] for key in self.parameter_names])
         kw = {"initial_step": 0.5, **self.hessian_kwargs}
         res = sd.hessian(self.log_posterior_from_array, point, **kw)
+        self.hessian_metadata = res
         precision = -res.ddf
         logger.debug(f"Estimated Hessian:\n{precision}")
         return precision
@@ -657,6 +681,7 @@ class LaplacePosteriorEstimator:
         }
         logger.info(f"Computing Hessian of log-posterior in unit cube (scipy.differentiate) with {kw}")
         res = sd.hessian(self.log_posterior_in_unit_cube, u_map, **kw)
+        self.hessian_metadata = res
         logger.debug(f"Hessian computed: success={res.success}, status={res.status}, nfev={res.nfev}")
 
         # scipy.differentiate reports per-element convergence.  On a noisy
@@ -852,7 +877,7 @@ class LaplacePosteriorEstimator:
         def neg_log_post(x):
             return -self.log_posterior_from_array(x)
 
-        return differential_evolution(neg_log_post, bounds=self.prior_bounds)
+        return differential_evolution(neg_log_post, bounds=self.prior_bounds, seed=self.seed)
 
     def _maximize_posterior_from_initial_sample(self, initial_sample):
         x0 = list(initial_sample.values())
