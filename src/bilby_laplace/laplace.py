@@ -6,7 +6,31 @@ import scipy.differentiate as sd
 import tqdm
 from bilby.core.prior import PriorDict
 from bilby.core.utils import logger, random
-from scipy.optimize import differential_evolution, minimize
+from scipy.optimize import OptimizeResult, differential_evolution, minimize
+
+# Convergence threshold for the global MAP search, in nats.
+#
+# ``scipy.optimize.differential_evolution`` stops when
+#
+#     std(population energies) <= atol + tol * |mean(population energies)|
+#
+# and its defaults are ``atol=0, tol=0.01`` -- a purely *relative* criterion.
+# That is fine for an objective of order unity and wrong for this one: an
+# unnormalised log-posterior carries the noise evidence, ~1.8e5 nats on a 3G
+# BNS and ~1.2e4 on a BBH, and that offset is arbitrary. The default therefore
+# stops once the population spans ~1% of it -- ~1800 nats on the BNS.
+#
+# Measured on the BNS P--P injections, that meant DE returned after **one
+# iteration** (366 evaluations), 69 to 4700 nats short of the optimum. Every one
+# of 200 injections had its "MAP" beaten by a polished candidate from the
+# secondary-mode search, which is what exposed this: the mode search was
+# quietly repairing a failed optimisation rather than finding degeneracies.
+#
+# So the criterion has to be absolute: stop when the population's log-posterior
+# spread is below a nat. On those injections that costs 46-76k evaluations
+# against 366 and lands within ~1 nat of a 10x longer run -- 0.5% of a single
+# SMC run, and the difference between a MAP and a good prior draw.
+DE_ATOL = 1.0
 
 
 def array_to_dict(keys, array):
@@ -874,10 +898,37 @@ class LaplacePosteriorEstimator:
         return pd.DataFrame(samples, columns=self.parameter_names)
 
     def _maximize_posterior_differential_evolution(self):
+        """Global MAP search: differential evolution, then a local polish.
+
+        Both departures from scipy's defaults are load-bearing; see
+        :data:`DE_ATOL` for the measurements behind them.
+        """
+
         def neg_log_post(x):
             return -self.log_posterior_from_array(x)
 
-        return differential_evolution(neg_log_post, bounds=self.prior_bounds, seed=self.seed)
+        out = differential_evolution(
+            neg_log_post,
+            bounds=self.prior_bounds,
+            seed=self.seed,
+            # Absolute, not relative: see DE_ATOL.
+            tol=0,
+            atol=DE_ATOL,
+            # scipy's own polish is L-BFGS-B, whose finite-difference gradients
+            # are useless on a likelihood whose parameters span 1e-2 to 5e3 (it
+            # returned the input unchanged after 36 evaluations, and scipy's
+            # numdiff warned of invalid subtractions). Nelder-Mead below does
+            # the job, and is the local method this class uses everywhere else.
+            polish=False,
+        )
+        polished = minimize(neg_log_post, out.x, bounds=self.prior_bounds, method="Nelder-Mead")
+        # A fresh result rather than a mutated leg: `nfev` has to price the
+        # whole search (`run_statistics` quotes it as the MAP's cost), and
+        # editing scipy's return value in place would leave the caller holding
+        # an object whose own count no longer means what it says.
+        best = OptimizeResult(**(polished if polished.fun <= out.fun else out))
+        best.nfev = out.nfev + polished.nfev
+        return best
 
     def _maximize_posterior_from_initial_sample(self, initial_sample):
         x0 = list(initial_sample.values())
