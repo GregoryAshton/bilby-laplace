@@ -105,6 +105,60 @@ class TruncatedMVNProposal:
         return np.sum(terms, axis=0)
 
 
+class TruncatedMVNMixtureProposal:
+    """Weighted mixture of :class:`TruncatedMVNProposal` components.
+
+    One component per discovered posterior mode.  This is what every
+    resampling mode draws from when ``n_modes > 1``, so ``inprior``,
+    ``rejection``, ``importance`` and ``smc`` share the *whole* proposal rather
+    than only its primary component -- without it the mode search was
+    effectively an SMC-only feature, and an ``inprior`` run was a single
+    Gaussian on the primary MAP no matter what ``n_modes`` said.
+
+    ``mean`` and ``cov`` name the *heaviest* component. They are reference
+    points (the rejection bound's starting value, the diagnostic plots), not a
+    description of the mixture, and the heaviest component is the best
+    single-point stand-in available. Note the heaviest need not be the primary
+    MAP: modes are weighted by their Laplace evidence, and a secondary found by
+    the mode search can outweigh the point the optimiser started from.
+    """
+
+    def __init__(self, components, weights=None):
+        if not components:
+            raise ValueError("a mixture proposal needs at least one component")
+        self.components = list(components)
+        k = len(self.components)
+        if weights is None:
+            w = np.full(k, 1.0 / k)
+        else:
+            w = np.asarray(weights, dtype=float)
+            if w.shape != (k,):
+                raise ValueError(f"weights must have one entry per component; got {w.shape} for k={k}")
+            if np.any(w < 0) or not np.isfinite(w).all() or w.sum() <= 0:
+                raise ValueError("weights must be finite, non-negative and not all zero")
+            w = w / w.sum()
+        self.weights = w
+        with np.errstate(divide="ignore"):  # a zero-weight component is legal
+            self._log_w = np.log(w)
+        heaviest = int(np.argmax(w))
+        self.mean = self.components[heaviest].mean
+        self.cov = self.components[heaviest].cov
+
+    def sample(self, n):
+        counts = random.rng.multinomial(n, self.weights)
+        x = np.vstack([c.sample(int(m)) for c, m in zip(self.components, counts) if m])
+        # Shuffle: the blocks above come out ordered by component, and callers
+        # truncate a concatenated batch to the number of samples they asked for
+        # (``_run_inprior``, ``_draw_inprior_samples``), which would drop the
+        # last components preferentially and silently reweight the mixture.
+        random.rng.shuffle(x, axis=0)
+        return x
+
+    def logpdf(self, x):
+        log_p = np.array([c.logpdf(x) for c in self.components])
+        return logsumexp(log_p + self._log_w[:, None], axis=0)
+
+
 class _StandardisedGaussian:
     """A multivariate normal built in standardised coordinates.
 
@@ -357,12 +411,21 @@ class Laplace(Sampler):
     fail_on_error : bool
         If True, raise SamplerError when sampling fails; otherwise just log.
     n_modes : int
-        Number of distinct posterior modes to search for when
-        ``resample='smc'``.  When ``n_modes > 1`` the optimiser is restarted
-        from multiple prior draws and distinct MAP estimates are combined into
-        a Gaussian mixture proposal for the SMC.  Modes are deduplicated by
-        requiring a normalised separation of at least ``mode_separation_sigma``
-        in some parameter.  Default is 1 (single Gaussian, original behaviour).
+        Number of distinct posterior modes to search for.  When ``n_modes > 1``
+        the optimiser is restarted from multiple prior draws and the distinct
+        MAP estimates are combined into a Gaussian mixture proposal.  Modes are
+        deduplicated by requiring a normalised separation of at least
+        ``mode_separation_sigma`` in some parameter.  Default is 1 (single
+        Gaussian, original behaviour).
+
+        The mixture is the proposal for **every** value of ``resample``:
+        ``inprior`` draws from it, ``rejection`` and ``importance`` weight
+        against its density, and ``smc`` seeds its cloud from it.  Until
+        2026-08 the search ran inside the SMC branch only, so an ``inprior``
+        run silently used a single Gaussian on the primary MAP however many
+        modes were asked for -- which made the cheap methods incomparable with
+        SMC on any multi-modal problem.  Results produced before that change
+        cannot be read as multi-mode except for ``resample='smc'``.
     mode_search_nsamples : int
         Number of prior draws used when searching for secondary modes
         (``n_modes > 1``).  Higher values make mode discovery more
@@ -435,9 +498,11 @@ class Laplace(Sampler):
         by its Laplace local evidence -- log-posterior at the mode plus half the
         log-determinant of its covariance -- so a broad shallow mode can outweigh
         a narrow tall one, which weighting by peak height alone would not
-        capture.  The weights set both the mixture proposal and the share of the
-        initial SMC cloud drawn from each mode; every mode keeps at least one
-        particle regardless.
+        capture.  The weights set the mixture component weights, and hence how
+        every resampling method draws: the share of ``inprior`` draws from each
+        mode, the density ``rejection``/``importance`` weight against, and the
+        share of the initial SMC cloud.  Every mode keeps at least one particle
+        in the SMC cloud regardless.
     smc_kwargs : dict or None
         Configuration for SMC sampling (only used when ``resample='smc'``).
         Recognised keys:
@@ -1151,13 +1216,23 @@ class Laplace(Sampler):
         # This eliminates wasted likelihood evaluations on out-of-bounds
         # samples and is especially important when the Laplace-derived sigma is
         # much larger than the prior width.
-        proposal = TruncatedMVNProposal(
-            mean,
-            cov,
-            lower=estimator.prior_bounds_min,
-            upper=estimator.prior_bounds_max,
-            periodic=self._periodic_mask(estimator.parameter_names),
-        )
+        # With ``n_modes > 1`` this also runs the mode search and returns a
+        # mixture, which every resampling method below then draws from.  On a
+        # resume the modes come back from the checkpoint instead: repeating the
+        # search would cost a second multi-start optimisation and could hand
+        # the second half of the run a different proposal from the first.
+        if resumed:
+            modes = self._checkpoint_state.get("modes")
+            mode_log_weights = self._checkpoint_state.get("mode_log_weights")
+            if modes is None:
+                logger.warning(
+                    "Checkpoint predates multi-mode proposals and carries no modes; "
+                    "resuming from the single Gaussian about the stored MAP."
+                )
+                modes = [(mean, cov, None)]
+            proposal = self._mode_proposal(estimator, modes, mode_log_weights)
+        else:
+            proposal, modes, mode_log_weights = self._build_proposal(estimator, mean, cov, cov_scaling)
 
         if self.kwargs["plot_diagnostic"] and not resumed:
             init_samples = self._draw_inprior_samples(proposal, 5000, estimator.parameter_names)
@@ -1180,6 +1255,11 @@ class Laplace(Sampler):
             if resample in ("rejection", "importance", "inprior"):
                 self._init_checkpoint_state(mode=resample, mean=mean, cov=cov)
                 self._checkpoint_state["log_evidence_laplace"] = log_evidence_laplace
+                # The modes as well as the primary MAP: a resumed run has to
+                # rebuild the *same* proposal, and re-running the mode search
+                # would neither be free nor guaranteed to find the same modes.
+                self._checkpoint_state["modes"] = modes
+                self._checkpoint_state["mode_log_weights"] = mode_log_weights
 
         log_evidence = log_evidence_laplace
         log_evidence_err = np.nan
@@ -1210,7 +1290,7 @@ class Laplace(Sampler):
                     smc_log_z,
                     smc_log_z_err,
                     nlikelihood,
-                ) = self._run_smc(mean, cov, proposal, estimator, cov_scaling)
+                ) = self._run_smc(proposal, estimator, modes, mode_log_weights)
                 if smc_log_z is not None:
                     log_evidence = float(smc_log_z)
                     log_evidence_err = float(smc_log_z_err)
@@ -1540,50 +1620,91 @@ class Laplace(Sampler):
 
         return samples, logl_out, samples, efficiency
 
-    def _run_smc(self, mean, cov, proposal, estimator, cov_scaling):
-        """Build the Laplace proposal flow and run SMC sampling.
+    def _mode_proposal(self, estimator, modes, log_weights):
+        """The proposal for a set of ``(mean, cov, log_posterior)`` modes.
 
-        Handles multi-mode discovery when ``n_modes > 1``, then delegates to
-        ``_smc_sample``.  Returns ``(samples, logl, g_samples, efficiency,
-        smc_log_z, smc_log_z_err, nlikelihood)`` where ``smc_log_z`` is
-        ``None`` if the aspire result did not carry a log-evidence attribute,
-        and ``nlikelihood`` is the true number of likelihood evaluations
-        performed by aspire (plus the final output evaluation).
+        A single :class:`TruncatedMVNProposal` for one mode, a
+        :class:`TruncatedMVNMixtureProposal` for several.  Shared by the
+        first-pass build and the resume path so a resumed run cannot quietly
+        continue from a different proposal than it started with.
+        """
+        components = [
+            TruncatedMVNProposal(
+                mode_mean,
+                mode_cov,
+                lower=estimator.prior_bounds_min,
+                upper=estimator.prior_bounds_max,
+                periodic=self._periodic_mask(estimator.parameter_names),
+            )
+            for mode_mean, mode_cov, _ in modes
+        ]
+        if len(components) == 1:
+            return components[0]
+        weights = None if log_weights is None else np.exp(log_weights - logsumexp(log_weights))
+        return TruncatedMVNMixtureProposal(components, weights)
+
+    def _build_proposal(self, estimator, mean, cov, cov_scaling):
+        """Find the posterior modes and build the proposal every mode draws from.
+
+        This runs *before* the resampling branch, so ``n_modes`` applies to
+        every method rather than to ``smc`` alone. It used to live inside
+        ``_run_smc``, which made an ``inprior`` or ``rejection`` run a single
+        Gaussian on the primary MAP however many modes were requested -- so the
+        cheap methods were not seeded from the same distribution as SMC and the
+        comparison between them was not controlled.
+
+        Returns ``(proposal, modes, log_weights)`` where *modes* is a list of
+        ``(mean, cov, log_posterior)`` triples (one entry, with
+        ``log_posterior=None``, when ``n_modes == 1``) and *log_weights* is
+        ``None`` for equal weighting or a single mode.
         """
         n_modes = self.kwargs["n_modes"]
-        if n_modes > 1:
-            map_estimates = self._find_multiple_maps(estimator, n_modes, cov_scaling, mean, cov)
-            mode_weighting = self.kwargs["mode_weights"]
-            if mode_weighting == "laplace":
-                log_weights = self._laplace_mode_log_weights(map_estimates, len(estimator.parameter_names))
-                map_estimates, log_weights = self._drop_negligible_modes(map_estimates, log_weights)
-            elif mode_weighting == "equal":
-                log_weights = None
-            else:
-                raise SamplerError(f"mode_weights must be 'equal' or 'laplace', got {mode_weighting!r}.")
+        if n_modes <= 1:
+            modes = [(np.asarray(mean, dtype=float), np.asarray(cov, dtype=float), None)]
+            return self._mode_proposal(estimator, modes, None), modes, None
+
+        modes = self._find_multiple_maps(estimator, n_modes, cov_scaling, mean, cov)
+        mode_weighting = self.kwargs["mode_weights"]
+        if mode_weighting == "laplace":
+            log_weights = self._laplace_mode_log_weights(modes, len(estimator.parameter_names))
+            modes, log_weights = self._drop_negligible_modes(modes, log_weights)
+        elif mode_weighting == "equal":
+            log_weights = None
+        else:
+            raise SamplerError(f"mode_weights must be 'equal' or 'laplace', got {mode_weighting!r}.")
+
+        proposal = self._mode_proposal(estimator, modes, log_weights)
+        weights = getattr(proposal, "weights", np.array([1.0]))
+        self._log_mode_summary(modes, estimator.parameter_names, weights)
+        return proposal, modes, log_weights
+
+    def _run_smc(self, proposal, estimator, modes, log_weights):
+        """Build the Laplace proposal flow and run SMC sampling.
+
+        The modes were found by ``_build_proposal`` before the branch, so what
+        happens here is only aspire's half of it: wrapping them in a flow and
+        seeding the cloud.  Under the default ``smc_prior_flow="learned"`` the
+        modes reach aspire only through the initial cloud its flow is trained
+        on; under ``"laplace"`` the mixture is handed to aspire directly as the
+        prior flow.
+
+        Returns ``(samples, logl, g_samples, efficiency, smc_log_z,
+        smc_log_z_err, nlikelihood)`` where ``smc_log_z`` is ``None`` if the
+        aspire result did not carry a log-evidence attribute, and
+        ``nlikelihood`` is the true number of likelihood evaluations performed
+        by aspire (plus the final output evaluation).
+        """
+        if len(modes) > 1:
             proposal_flow = GaussianMixtureFlow(
-                [m for m, _, _ in map_estimates],
-                [c for _, c, _ in map_estimates],
+                [m for m, _, _ in modes],
+                [c for _, c, _ in modes],
                 log_weights=log_weights,
             )
             mode_weight_values = proposal_flow.weights
-            self._log_mode_summary(map_estimates, estimator.parameter_names, mode_weight_values)
-            # One truncated proposal per discovered mode.  Under the default
-            # ``smc_prior_flow="learned"`` the modes reach aspire only through
-            # the initial cloud its flow is trained on; under ``"laplace"`` the
-            # mixture is handed to aspire directly as the prior flow.
-            init_proposals = [
-                TruncatedMVNProposal(
-                    mode_mean,
-                    mode_cov,
-                    lower=estimator.prior_bounds_min,
-                    upper=estimator.prior_bounds_max,
-                    periodic=self._periodic_mask(estimator.parameter_names),
-                )
-                for mode_mean, mode_cov, _ in map_estimates
-            ]
+            init_proposals = list(proposal.components)
         else:
-            proposal_flow = GaussianFlow(mean, cov)
+            mode_mean, mode_cov, _ = modes[0]
+            proposal_flow = GaussianFlow(mode_mean, mode_cov)
             init_proposals = [proposal]
             mode_weight_values = None
 
