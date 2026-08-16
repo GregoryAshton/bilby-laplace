@@ -46,8 +46,8 @@ base_label = "bns"
 
 REFERENCE_FRAME = ["A1", "CE"]
 
-N_STEPS = 100
-N_SAMPLES = 5000
+N_STEPS = 300
+N_SAMPLES = 2500
 N_FINAL_SAMPLES = 10000
 TARGET_EFFICIENCY = (0.5, 0.8)
 TARGET_EFFICIENCY_RATE = 0.5
@@ -127,7 +127,14 @@ def setup(likelihood_type="rb"):
     priors = BNSPriorDict(
         dictionary=dict(
             chirp_mass=UniformInComponentsChirpMass(
-                name="chirp_mass", minimum=1.399, maximum=1.401, unit=r"$M_{\odot}$", latex_label=r"$\mathcal{M}$"
+                # 1.399-1.401 was a range of 0.002 about an injection at 1.4:
+                # narrower than a real analysis could justify, and it was
+                # masking a defect. The Laplace proposal for chirp_mass was
+                # being inflated far past the prior and then truncated back to
+                # it, so the "proposal" was the prior and looked merely wide
+                # rather than wrong. Ten times wider keeps the posterior
+                # likelihood-dominated while letting the proposal be seen.
+                name="chirp_mass", minimum=1.39, maximum=1.41, unit=r"$M_{\odot}$", latex_label=r"$\mathcal{M}$"
             ),
             mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.2, maximum=1.0, latex_label=r"$q$"),
             mass_1=Constraint(name="mass_1", minimum=1.0, maximum=2.8),
@@ -244,6 +251,16 @@ def setup(likelihood_type="rb"):
         use_unit_cube=not use_waveform_fisher,
         fisher_method=fisher_method,
         npool=16,
+        # The Laplace proposal every resample method draws from. These live
+        # here rather than on run_smc so that inprior, rejection and smc all
+        # generate from the *same* distribution: inprior shows that proposal
+        # uncorrected, rejection shows it reweighted, smc shows it tempered,
+        # and the three are only comparable if the proposal itself is common.
+        n_modes=3,
+        mode_weights="laplace",
+        mode_separation_sigma=1,
+        mode_search_nsamples=5000,
+        mode_search_subspace=["zenith", "azimuth"],
     )
 
     return _common, _common_laplace, outdir, run_prefix
@@ -320,7 +337,6 @@ def run_rejection(_common_laplace, run_prefix):
         resample="rejection",
         max_iterations=10000000,
         batch_nsamples=10000,
-        prior_parameters=["lambda_1", "lambda_2", "psi"],
     )
 
 
@@ -342,13 +358,8 @@ def run_smc(_common_laplace, run_prefix):
             ),
         ),
         smc_plot_every=0,
-        n_modes=3,
-        mode_weights="laplace",
-        mode_separation_sigma=1,
-        mode_search_nsamples=5000,
         label=f"{run_prefix}-smc",
         resample="smc",
-        mode_search_subspace=["zenith", "azimuth"],
     )
 
 
@@ -370,7 +381,7 @@ def run_smc_direct(_common, run_prefix):
             ),
         ),
         sampler="aspire",
-        label=f"{run_prefix}-smcdirect",
+        label=f"{run_prefix}-aspire",
         enable_checkpointing=False,
         npool=16,
     )

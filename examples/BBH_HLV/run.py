@@ -38,7 +38,7 @@ bilby.core.utils.random.seed(DATA_SEED)
 outdir = "outdir_hlv_example"
 base_label = "hlv"
 
-N_STEPS = 100
+N_STEPS = 300
 N_SAMPLES = 10000
 N_FINAL_SAMPLES = 10000
 TARGET_EFFICIENCY = (0.5, 0.8)
@@ -304,7 +304,7 @@ def run_smc_direct(_common):
                 step_fn="tpcn",
             ),
         ),
-        label=f"{base_label}_smcdirect",
+        label=f"{base_label}_aspire",
         enable_checkpointing=False,
         npool=16,
     )
