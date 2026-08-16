@@ -6,11 +6,27 @@ import re
 
 import bilby
 import numpy as np
-from scipy.stats import entropy, gaussian_kde
+from scipy.stats import entropy, gaussian_kde, wasserstein_distance
 
 # JS divergences are a few thousandths of a nat on these problems, which is
 # unreadable; millibits is the unit the numbers are quoted in.
 MBITS_PER_NAT = 1000.0 / np.log(2)
+
+# The two per-parameter agreement metrics, in the order they appear in the
+# table. JSD is scale-free by construction; the earth-mover distance is not, so
+# it is divided by the reference posterior's standard deviation for that
+# parameter and reported in units of the reference sigma -- a shift of the whole
+# posterior by one sigma scores 1.0, whatever the parameter's units.
+#
+# They answer different questions and disagree usefully: JSD is dominated by
+# shape and width mismatch and saturates once two densities barely overlap,
+# while the EMD keeps growing with the displacement and so still distinguishes
+# "badly offset" from "hopelessly offset".
+METRICS = ("jsd", "emd")
+METRIC_UNITS = {"jsd": "mbits", "emd": "sigma"}
+
+# Printed for any table cell whose value was not recorded or is undefined.
+MISSING = "—"
 
 # Samples per side of every JS divergence, fixed for every result and every
 # example. The estimator is biased upward at finite N (roughly as 1/N), so a
@@ -187,11 +203,91 @@ def _format_efficiency(eff):
     from an exact zero.  Below 0.1% we switch to two significant figures (e.g.
     ``0.0034%``) so the value stays visible; a true zero still prints ``0.0%``.
     """
+    if not np.isfinite(eff):
+        return MISSING
     if eff <= 0:
         return "0.0%"
     if eff < 0.1:
         return f"{eff:.2g}%"
     return f"{eff:.1f}%"
+
+
+def _format_time(seconds):
+    """A duration in the largest unit that leaves it above 1, e.g. ``"10.4h"``.
+
+    These runs span four orders of magnitude in cost -- ten seconds for the
+    in-prior draw against ten hours for dynesty -- and quoting all of them in
+    seconds makes the expensive ones unreadable strings of digits.
+    """
+    if not np.isfinite(seconds):
+        return MISSING
+    for scale, suffix in ((86400.0, "d"), (3600.0, "h"), (60.0, "m")):
+        if seconds >= scale:
+            return f"{seconds / scale:.1f}{suffix}"
+    return f"{seconds:.1f}s"
+
+
+def _format_mevals(n_like):
+    """Likelihood evaluations in millions, to three significant figures.
+
+    Three significant figures rather than a fixed number of decimals because
+    the same column carries both a 48.3 million evaluation SMC run and a 0.005
+    million in-prior draw, and a fixed ``{:.2f}`` would print the latter as
+    ``0.01``.
+    """
+    return MISSING if not np.isfinite(n_like) else f"{n_like / 1e6:.3g}"
+
+
+def _format_metric(value):
+    """A metric value to two decimals, or the missing marker."""
+    return MISSING if not np.isfinite(value) else f"{value:.2f}"
+
+
+def _format_worst(summary):
+    """``"tilt_1 (15.81)"`` -- the parameter a metric is worst on, and its value."""
+    return MISSING if not summary["worst"] else f"{summary['worst']} ({summary['worst_value']:.2f})"
+
+
+def _settings_summary(result):
+    """The few sampler settings worth putting beside a row's numbers.
+
+    Just enough to tell two runs of the same method apart: the SMC cloud size
+    and mutation length for anything that runs aspire (whether seeded by Laplace
+    or not), the live-point count for dynesty, and nothing at all for the
+    methods that draw straight from the Laplace proposal -- their cost is set by
+    ``target_nsamples``, which is the number of samples asked for rather than a
+    tuning choice.
+
+    Read from ``sampler_kwargs``, so it reports what the run actually used
+    rather than what the example script currently says.
+    """
+    kwargs = getattr(result, "sampler_kwargs", None) or {}
+    if not isinstance(kwargs, dict):
+        return ""
+    if sampler_family(getattr(result, "label", "")) == "dynesty":
+        nlive = kwargs.get("nlive")
+        return "" if nlive is None else f"nlive={int(nlive)}"
+
+    # The Laplace sampler nests its aspire settings under ``smc_kwargs``; the
+    # no-Laplace control goes through aspire's own plugin, which puts
+    # ``n_samples`` at the top level and the mutation settings under
+    # ``sample_kwargs``.  Non-SMC Laplace runs have ``smc_kwargs=None`` and so
+    # fall through to the top level, where neither key exists.
+    smc = kwargs.get("smc_kwargs") or kwargs
+    if not isinstance(smc, dict):
+        return ""
+    inner = smc.get("sampler_kwargs")
+    if not isinstance(inner, dict):
+        outer = smc.get("sample_kwargs")
+        inner = outer.get("sampler_kwargs") if isinstance(outer, dict) else None
+    n_samples = smc.get("n_samples")
+    n_steps = inner.get("n_steps") if isinstance(inner, dict) else None
+    parts = []
+    if n_samples is not None:
+        parts.append(f"nsamples={int(n_samples)}")
+    if n_steps is not None:
+        parts.append(f"nsteps={int(n_steps)}")
+    return ", ".join(parts)
 
 
 def sampler_labels(results):
@@ -303,6 +399,51 @@ def _jsd(a, b, n_grid=100):
     return float(0.5 * entropy(pa, m) + 0.5 * entropy(pb, m))
 
 
+def _emd(a, b):
+    """Earth-mover distance between two 1-D sample sets, in units of *b*'s sigma.
+
+    *b* is the reference sample, so the scale is the same for every result in a
+    column and a value reads as "this posterior is displaced by this fraction of
+    a reference standard deviation". NaN when the reference has no spread, which
+    would make the normalisation meaningless rather than merely large.
+
+    Unlike the JSD this needs no density estimate: it is an exact functional of
+    the two empirical CDFs, so it carries none of the KDE's bandwidth choice.
+    """
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    scale = np.std(b)
+    if not np.isfinite(scale) or scale <= 0:
+        return float("nan")
+    return float(wasserstein_distance(a, b) / scale)
+
+
+def _metric_summary(per_key):
+    """``{"mean", "worst", "worst_value"}`` over a parameter -> value mapping."""
+    finite = {k: v for k, v in per_key.items() if np.isfinite(v)}
+    if not finite:
+        return dict(mean=float("nan"), worst=None, worst_value=float("nan"))
+    worst = max(finite, key=finite.get)
+    return dict(mean=float(np.mean(list(finite.values()))),
+                worst=worst, worst_value=finite[worst])
+
+
+def _empty_metrics():
+    """A row of undefined metrics, one entry per :data:`METRICS`."""
+    return {m: dict(mean=float("nan"), worst=None, worst_value=float("nan")) for m in METRICS}
+
+
+def _compare_pair(draw, reference_draw, keys, bounds):
+    """Both metrics of *draw* against *reference_draw*, summarised over *keys*."""
+    per_key = {m: {} for m in METRICS}
+    for k in keys:
+        pair = [draw[k].to_numpy(), reference_draw[k].to_numpy()]
+        if bounds.get(k):
+            pair = _recentre_periodic(pair, bounds[k])
+        per_key["jsd"][k] = _jsd(*pair) * MBITS_PER_NAT
+        per_key["emd"][k] = _emd(*pair)
+    return {m: _metric_summary(per_key[m]) for m in METRICS}
+
+
 def _reference_index(results):
     """Index of the dynesty result, or None if the set has no reference run."""
     for i, r in enumerate(results):
@@ -312,12 +453,12 @@ def _reference_index(results):
 
 
 def divergence_from_reference(results):
-    """Mean JS divergence of each result's 1-D marginals from the dynesty run.
+    """Agreement of each result's 1-D marginals with the dynesty run.
 
     Returns ``(rows, reference_index, n_samples)``, where *rows* is a list
-    aligned to *results* of ``{"mean": mbits, "worst": name, "worst_value":
-    mbits}`` (values NaN and *worst* None where undefined), and *n_samples* is
-    :data:`JSD_N`, the fixed size every divergence is evaluated at.
+    aligned to *results* of ``{metric: {"mean", "worst", "worst_value"}}`` for
+    each of :data:`METRICS` (values NaN and *worst* None where undefined), and
+    *n_samples* is :data:`JSD_N`, the fixed size every metric is evaluated at.
     ``reference_index`` is None when no dynesty result is present, or when the
     reference is itself too short, in which case every row is empty.
 
@@ -327,14 +468,14 @@ def divergence_from_reference(results):
     both sets are binned on one shared grid, so a posterior split across the
     wrap point is split identically in both.
     """
-    empty = [dict(mean=float("nan"), worst=None, worst_value=float("nan")) for _ in results]
+    empty = [_empty_metrics() for _ in results]
     index = _reference_index(results)
     if index is None or len(results) < 2:
         return empty, index, 0
     if len(results[index].posterior) < JSD_N:
         bilby.core.utils.logger.warning(
             f"reference has {len(results[index].posterior)} samples, fewer than "
-            f"JSD_N={JSD_N}; skipping the divergence column")
+            f"JSD_N={JSD_N}; skipping the agreement columns")
         return empty, None, 0
 
     reference = results[index]
@@ -353,21 +494,9 @@ def divergence_from_reference(results):
     rows = []
     for i, draw in enumerate(draws):
         if i == index or draw is None or not keys:
-            rows.append(dict(mean=float("nan"), worst=None, worst_value=float("nan")))
+            rows.append(_empty_metrics())
             continue
-        per_key = {}
-        for k in keys:
-            pair = [draw[k].to_numpy(), draws[index][k].to_numpy()]
-            if bounds[k]:
-                pair = _recentre_periodic(pair, bounds[k])
-            per_key[k] = _jsd(*pair)
-        finite = {k: v for k, v in per_key.items() if np.isfinite(v)}
-        if not finite:
-            rows.append(dict(mean=float("nan"), worst=None, worst_value=float("nan")))
-            continue
-        worst = max(finite, key=finite.get)
-        rows.append(dict(mean=np.mean(list(finite.values())) * MBITS_PER_NAT,
-                         worst=worst, worst_value=finite[worst] * MBITS_PER_NAT))
+        rows.append(_compare_pair(draw, draws[index], keys, bounds))
     return rows, index, JSD_N
 
 
@@ -379,49 +508,139 @@ def reference_floor(results, reference_index):
     agree well. Without it a number in the table reads as a measurement when it
     is the estimator's own noise.
 
-    Returns ``(floor_mbits, n_used)``. It takes two *disjoint* draws and so
-    needs ``2 * JSD_N`` samples, which not every reference has -- the gaussian
-    example's dynesty run has 2727. Rather than report nothing there, it falls
-    back to the largest disjoint split the posterior does support and returns
-    that size. Since the floor falls with N, a value measured at ``n_used <
-    JSD_N`` is an upper bound on the floor at ``JSD_N``, which is still enough
-    to tell a real difference from noise.
+    Returns ``({metric: floor}, n_used)``, one floor per :data:`METRICS`. It
+    takes two *disjoint* draws and so needs ``2 * JSD_N`` samples, which not
+    every reference has -- the gaussian example's dynesty run has 2727. Rather
+    than report nothing there, it falls back to the largest disjoint split the
+    posterior does support and returns that size. Since the floor falls with N,
+    a value measured at ``n_used < JSD_N`` is an upper bound on the floor at
+    ``JSD_N``, which is still enough to tell a real difference from noise.
 
     The estimate is itself noisy -- one split, averaged over however many
     parameters the example has -- so treat it as an order of magnitude.
     """
+    nothing = {m: float("nan") for m in METRICS}
     if reference_index is None:
-        return float("nan"), 0
+        return nothing, 0
     reference = results[reference_index]
     posterior = reference.posterior
     n_used = min(JSD_N, len(posterior) // 2)
     if n_used < 2:
-        return float("nan"), 0
+        return nothing, 0
     rng = np.random.default_rng(_JSD_RNG_SEED)
     index = rng.permutation(len(posterior))
     a, b = posterior.iloc[index[:n_used]], posterior.iloc[index[n_used:2 * n_used]]
-    values = []
-    for k in reference.search_parameter_keys:
-        if np.ptp(posterior[k]) <= 0:
-            continue
-        # Recentred exactly as in divergence_from_reference, or the floor would
-        # be measured under a different convention from the values it bounds.
-        pair = [a[k].to_numpy(), b[k].to_numpy()]
-        wrapped = _periodic_bounds(reference, k)
-        if wrapped:
-            pair = _recentre_periodic(pair, wrapped)
-        values.append(_jsd(*pair))
-    finite = [v for v in values if np.isfinite(v)]
-    return (np.mean(finite) * MBITS_PER_NAT if finite else float("nan")), n_used
+    keys = [k for k in reference.search_parameter_keys if np.ptp(posterior[k]) > 0]
+    # Recentred exactly as in divergence_from_reference, or the floor would be
+    # measured under a different convention from the values it bounds.
+    bounds = {k: _periodic_bounds(reference, k) for k in keys}
+    summary = _compare_pair(a, b, keys, bounds)
+    return {m: summary[m]["mean"] for m in METRICS}, n_used
 
 
-def write_readme(path, rows, reference_label, n_samples, floor=float("nan"),
+def comparison_table(rows, reference_label):
+    """``(headers, cells, align)`` for the comparison table.
+
+    One definition, rendered twice -- once as plain text to the terminal and
+    once as markdown into the README -- so the table a run prints and the table
+    it writes cannot drift apart.
+
+    *cells* is a list of lists of already-formatted strings, and *align* is
+    ``"<"`` or ``">"`` per column for the fixed-width rendering.
+    """
+    headers = ["method", "log Z", "±", "Mevals", "effic.", "time"]
+    align = ["<", ">", ">", ">", ">", ">"]
+    if reference_label:
+        headers += ["JSD (mbits)", "JSD worst", "EMD (σ)", "EMD worst"]
+        align += [">", "<", ">", "<"]
+    headers += ["settings"]
+    align += ["<"]
+
+    cells = []
+    for row in rows:
+        cell = [row["name"],
+                _format_metric(row["log_z"]), _format_metric(row["log_z_err"]),
+                row["mevals"], row["efficiency"], row["time"]]
+        if reference_label:
+            for metric in METRICS:
+                summary = row["metrics"][metric]
+                cell += [_format_metric(summary["mean"]), _format_worst(summary)]
+        cell.append(row["settings"] or MISSING)
+        cells.append(cell)
+    return headers, cells, align
+
+
+def _render_text_table(headers, cells, align):
+    """The table as fixed-width lines, each column as wide as its widest cell."""
+    widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h)
+              for i, h in enumerate(headers)]
+    fmt = "  ".join(f"{{:{a}{w}}}" for a, w in zip(align, widths))
+    # Headers are left-aligned regardless: a right-aligned title over a column
+    # of short values ends up detached from them.
+    head_fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    rule = "-" * (sum(widths) + 2 * (len(widths) - 1))
+    return [head_fmt.format(*headers), rule] + [fmt.format(*c) for c in cells], len(rule)
+
+
+def _render_markdown_table(headers, cells):
+    """The same table as markdown, with the method and settings cells as code."""
+    def row(values):
+        return "| " + " | ".join(values) + " |"
+
+    lines = [row(headers), row(["---"] * len(headers))]
+    for c in cells:
+        c = list(c)
+        c[0] = f"`{c[0]}`"
+        if c[-1] != MISSING:
+            c[-1] = f"`{c[-1]}`"
+        lines.append(row(c))
+    return lines
+
+
+def _metric_note(reference_label, n_samples, floors, floor_n):
+    """The paragraphs explaining the agreement columns and their noise floors."""
+    note = [
+        f"Both agreement columns compare each 1-D marginal with `{reference_label}` "
+        f"at a fixed {n_samples} samples per side (the same count in every example, "
+        "so values are comparable across them), and report the mean over sampled "
+        "parameters alongside the single parameter that scores worst. The reference "
+        "is not ground truth -- a small value means agreement with dynesty, not "
+        "correctness.",
+        "`JSD` is the Jensen-Shannon divergence in millibits, which is dominated by "
+        "width and shape mismatch and saturates once two densities barely overlap. "
+        "`EMD` is the earth-mover distance divided by the reference posterior's "
+        "standard deviation for that parameter, so it reads as a displacement: a "
+        "posterior shifted bodily by one reference sigma scores 1.0, and unlike the "
+        "JSD it keeps growing once the overlap is gone.",
+    ]
+    if not any(np.isfinite(v) for v in floors.values()):
+        return note
+    bound = "at most " if floor_n < n_samples else ""
+    quoted = ", ".join(f"{v:.2f} {METRIC_UNITS[m]}" for m, v in floors.items()
+                       if np.isfinite(v))
+    floor_note = (f"**Noise floor: {bound}{quoted}.** That is `{reference_label}` "
+                  f"against itself, two disjoint {floor_n}-sample draws from the one "
+                  "posterior. Two finite samples of the *same* distribution do not "
+                  "score zero, so anything at or below this level is consistent with "
+                  "perfect agreement, and differences among such values are not "
+                  "measurements.")
+    if floor_n < n_samples:
+        floor_note += (" The split needs twice its size, and this reference has too "
+                       f"few samples for {n_samples}; the floor falls with N, so the "
+                       f"true figure at N={n_samples} is lower than the one quoted.")
+    floor_note += (" It is one split averaged over the sampled parameters, so read it"
+                   " as an order of magnitude, not a threshold.")
+    return note + [floor_note]
+
+
+def write_readme(path, rows, reference_label, n_samples, floors=None,
                  floor_n=0, targets=()):
     """Write the example's README.md: what it is, how to run it, and the table.
 
     Regenerated on every ``make compare``, so it always reflects the results
     actually on disk rather than a hand-copied snapshot that can go stale.
     """
+    floors = {m: float("nan") for m in METRICS} if floors is None else floors
     name = os.path.basename(os.path.dirname(os.path.abspath(path))) or "example"
     methods = ", ".join(f"`{r['name']}`" for r in rows)
     lines = [
@@ -438,44 +657,18 @@ def write_readme(path, rows, reference_label, n_samples, floor=float("nan"),
         lines += ["Individual samplers: " + ", ".join(f"`make {t}`" for t in targets) + ".", ""]
     lines += ["## Comparison", ""]
     if reference_label:
-        note = ("`JSD` is the mean over sampled parameters of the Jensen-Shannon "
-                f"divergence of each 1-D marginal from `{reference_label}`, in "
-                f"millibits, evaluated at a fixed {n_samples} samples per side "
-                "(the same count in every example, so values are comparable "
-                "across them). The reference is not ground truth -- a small "
-                "value means agreement with dynesty, not correctness.")
-        if np.isfinite(floor):
-            bound = "at most " if floor_n < n_samples else ""
-            note += (f"\n\n**Noise floor: {bound}{floor:.2f} mbits.** That is "
-                     f"`{reference_label}` against itself, two disjoint "
-                     f"{floor_n}-sample draws from the one posterior. Two "
-                     "finite samples of the *same* distribution do not score "
-                     "zero, so anything at or below this level is consistent "
-                     "with perfect agreement, and differences among such "
-                     "values are not measurements.")
-            if floor_n < n_samples:
-                note += (f" The split needs twice its size, and this reference "
-                         f"has too few samples for {n_samples}; the floor falls "
-                         f"with N, so the true figure at N={n_samples} is lower "
-                         "than the one quoted.")
-            note += (" It is one split averaged over the sampled parameters, so"
-                     " read it as an order of magnitude, not a threshold.")
-        lines += [note, ""]
-    header = "| method | log Z | ± | n_like | efficiency | time |"
-    divider = "|---|---|---|---|---|---|"
-    if reference_label:
-        header += " JSD (mbits) | worst parameter |"
-        divider += "---|---|"
-    lines += [header, divider]
-    for row in rows:
-        line = (f"| `{row['name']}` | {row['log_z']:.2f} | {row['log_z_err']:.2f} | "
-                f"{row['n_like_str'].strip()} | {row['eff_str'].strip()} | {row['time']:.1f}s |")
-        if reference_label:
-            jsd = row["jsd"]
-            worst = row["worst"]
-            line += (f" {jsd['mean']:.2f} |" if np.isfinite(jsd["mean"]) else " — |")
-            line += (f" {worst} ({jsd['worst_value']:.2f}) |" if worst else " — |")
-        lines.append(line)
+        for paragraph in _metric_note(reference_label, n_samples, floors, floor_n):
+            lines += [paragraph, ""]
+    lines += [
+        "`Mevals` is millions of likelihood evaluations and `settings` names the "
+        "few sampler settings that set a run's cost: the SMC cloud size and "
+        "mutation length for anything running aspire, the live-point count for "
+        "dynesty, and nothing for the methods that draw straight from the Laplace "
+        "proposal.",
+        "",
+    ]
+    headers, cells, _ = comparison_table(rows, reference_label)
+    lines += _render_markdown_table(headers, cells)
     lines.append("")
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
@@ -568,19 +761,10 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
     divergences, reference_index, jsd_n = divergence_from_reference(results)
     reference_label = (os.path.basename(results[reference_index].label)
                        if reference_index is not None else None)
-    jsd_floor, jsd_floor_n = reference_floor(results, reference_index)
+    floors, floor_n = reference_floor(results, reference_index)
 
     # Comparison table
     rows = []
-    W = 75 if reference_index is None else 100
-    print("\n" + "=" * W)
-    print("Comparison")
-    print("=" * W)
-    head = f"{'Method':<20} {'log Z':>10} {'± σ':>8} {'n_like':>8} {'effic.':>8} {'time':>10}"
-    if reference_index is not None:
-        head += f" {'JSD':>8} {'worst':>16}"
-    print(head)
-    print("-" * W)
     for r, _lab in zip(results, labels):
         # Coerce a missing/None evidence to NaN, but preserve a genuine 0.0 --
         # `x or np.nan` would wrongly turn a real 0.0 evidence into NaN.
@@ -614,30 +798,33 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
                 neff = len(r.posterior) if getattr(r, "posterior", None) is not None else np.nan
             if np.isfinite(neff) and np.isfinite(n_like) and n_like:
                 eff = 100.0 * neff / n_like
-        name = os.path.basename(r.label)
-        n_like_str = f"{int(n_like):>8}" if np.isfinite(n_like) else f"{'—':>8}"
-        eff_str = f"{_format_efficiency(eff):>8}" if np.isfinite(eff) else f"{'—':>8}"
-        jsd = divergences[len(rows)]
-        rows.append(dict(name=name, log_z=log_z, log_z_err=log_z_err, time=secs,
-                         n_like_str=n_like_str, eff_str=eff_str,
-                         jsd=jsd, worst=jsd["worst"]))
-        line = f"{name:<20} {log_z:>10.2f} {log_z_err:>8.2f} {n_like_str} {eff_str} {secs:>9.1f}s"
-        if reference_index is not None:
-            value = f"{jsd['mean']:.2f}" if np.isfinite(jsd["mean"]) else "—"
-            line += f" {value:>8} {(jsd['worst'] or '—'):>16}"
-        print(line)
-    print("-" * W)
-    if reference_index is not None and np.isfinite(jsd_floor):
-        bound = "<=" if jsd_floor_n < jsd_n else ""
-        print(f"JSD at N={jsd_n}; noise floor {bound}{jsd_floor:.2f} mbits "
-              f"({reference_label}, two {jsd_floor_n}-sample halves). "
+        rows.append(dict(name=os.path.basename(r.label), log_z=log_z, log_z_err=log_z_err,
+                         mevals=_format_mevals(n_like), efficiency=_format_efficiency(eff),
+                         time=_format_time(secs), settings=_settings_summary(r),
+                         metrics=divergences[len(rows)]))
+
+    # Printed from the same cells the README is built from, so the two tables
+    # cannot disagree.
+    headers, cells, align = comparison_table(rows, reference_label)
+    table, width = _render_text_table(headers, cells, align)
+    print("\n" + "=" * width)
+    print("Comparison")
+    print("=" * width)
+    print("\n".join(table))
+    print("-" * width)
+    quoted = ", ".join(f"{v:.2f} {METRIC_UNITS[m]}" for m, v in floors.items()
+                       if np.isfinite(v))
+    if reference_label and quoted:
+        bound = "<=" if floor_n < jsd_n else ""
+        print(f"Agreement at N={jsd_n} against {reference_label}; noise floor "
+              f"{bound}{quoted} (two {floor_n}-sample halves of the reference). "
               "At or below that = agreement.")
-    print("=" * W + "\n")
+    print("=" * width + "\n")
 
     # README beside the corner plot, i.e. in the example's own directory.
     directory = os.path.dirname(os.path.abspath(filename))
     readme = write_readme(os.path.join(directory, "README.md"), rows, reference_label,
-                          jsd_n, floor=jsd_floor, floor_n=jsd_floor_n,
+                          jsd_n, floors=floors, floor_n=floor_n,
                           targets=_make_targets(directory))
     logger.info(f"Comparison README written to {readme}")
 

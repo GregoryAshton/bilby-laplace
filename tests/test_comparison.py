@@ -5,16 +5,20 @@ import pytest
 
 from bilby_laplace.comparison import (
     DEFAULT_SAMPLER_COLOUR,
+    METRICS,
+    MISSING,
     SAMPLER_COLOURS,
     colours_for_results,
+    comparison_table,
     sampler_family,
     sampler_labels,
 )
 
 
 class _FakeResult:
-    def __init__(self, label):
+    def __init__(self, label, sampler_kwargs=None):
         self.label = label
+        self.sampler_kwargs = sampler_kwargs or {}
 
 
 @pytest.mark.parametrize(
@@ -138,3 +142,108 @@ def test_as_count_rejects_unusable_values(value, expected):
         assert not np.isfinite(result)
     else:
         assert result == expected
+
+
+# --------------------------------------------------------------------------
+# Table cells.  The printed table and the README table are rendered from one
+# set of formatted cells, so these cover both.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "seconds, expected",
+    [
+        (10.081, "10.1s"),
+        (59.9, "59.9s"),
+        (60.0, "1.0m"),
+        (3599.0, "60.0m"),
+        (12570.9, "3.5h"),
+        (37321.0, "10.4h"),
+        (200000.0, "2.3d"),
+        (float("nan"), MISSING),
+    ],
+)
+def test_format_time_picks_a_readable_unit(seconds, expected):
+    from bilby_laplace.comparison import _format_time
+
+    assert _format_time(seconds) == expected
+
+
+@pytest.mark.parametrize(
+    "n_like, expected",
+    [
+        (48330000, "48.3"),
+        (29213481, "29.2"),
+        (5000, "0.005"),  # a fixed 2 decimals would round this to 0.01
+        (float("nan"), MISSING),
+    ],
+)
+def test_format_mevals_keeps_small_counts_visible(n_like, expected):
+    from bilby_laplace.comparison import _format_mevals
+
+    assert _format_mevals(n_like) == expected
+
+
+def test_settings_summary_reads_each_samplers_own_layout():
+    from bilby_laplace.comparison import _settings_summary
+
+    # The Laplace sampler nests aspire's settings under smc_kwargs...
+    laplace_smc = _FakeResult("hlv_smc", dict(
+        resample="smc",
+        smc_kwargs=dict(n_samples=10000, sampler_kwargs=dict(n_steps=100)),
+    ))
+    # ...while the no-Laplace control goes through aspire's own plugin.
+    aspire = _FakeResult("hlv_aspire", dict(
+        n_samples=10000, sample_kwargs=dict(sampler_kwargs=dict(n_steps=100)),
+    ))
+    assert _settings_summary(laplace_smc) == "nsamples=10000, nsteps=100"
+    assert _settings_summary(aspire) == "nsamples=10000, nsteps=100"
+    assert _settings_summary(_FakeResult("hlv_dynesty", dict(nlive=1000))) == "nlive=1000"
+    # Drawing straight from the proposal has no cost setting worth quoting.
+    assert _settings_summary(_FakeResult("hlv_inprior", dict(
+        resample="inprior", smc_kwargs=None, target_nsamples=5000))) == ""
+
+
+def _table_row(**overrides):
+    row = dict(name="hlv_smc", log_z=-12118.41, log_z_err=0.03, mevals="29.2",
+               efficiency="0.034%", time="1.9h", settings="nsamples=10000",
+               metrics={m: dict(mean=3.5, worst="tilt_1", worst_value=12.3)
+                        for m in METRICS})
+    row.update(overrides)
+    return row
+
+
+def test_comparison_table_has_a_metric_pair_per_metric():
+    headers, cells, align = comparison_table([_table_row()], "hlv_dynesty")
+    assert len(headers) == len(cells[0]) == len(align)
+    # method, log Z, +-, Mevals, efficiency, time, two columns per metric, settings.
+    assert len(headers) == 6 + 2 * len(METRICS) + 1
+    assert cells[0][-1] == "nsamples=10000"
+    assert "tilt_1 (12.30)" in cells[0]
+
+
+def test_comparison_table_drops_the_metrics_without_a_reference():
+    headers, cells, align = comparison_table([_table_row()], None)
+    assert len(headers) == len(cells[0]) == len(align) == 7
+    assert not any("JSD" in h or "EMD" in h for h in headers)
+
+
+def test_comparison_table_marks_undefined_cells():
+    row = _table_row(log_z=float("nan"), log_z_err=float("nan"), settings="",
+                     metrics={m: dict(mean=float("nan"), worst=None,
+                                      worst_value=float("nan")) for m in METRICS})
+    _headers, cells, _align = comparison_table([row], "hlv_dynesty")
+    assert cells[0].count(MISSING) == 2 + 2 * len(METRICS) + 1
+
+
+def test_printed_and_markdown_tables_render_the_same_cells():
+    from bilby_laplace.comparison import _render_markdown_table, _render_text_table
+
+    headers, cells, align = comparison_table([_table_row()], "hlv_dynesty")
+    text, width = _render_text_table(headers, cells, align)
+    markdown = _render_markdown_table(headers, cells)
+    # Same values in both renderings, whatever the padding and the markdown's
+    # code formatting.
+    assert all(c in text[-1] for c in cells[0])
+    assert [v.strip().strip("`") for v in markdown[-1].strip("|").split("|")] == cells[0]
+    assert width == len(text[1])  # the rule spans the whole table
