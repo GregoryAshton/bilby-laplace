@@ -250,7 +250,7 @@ def setup(likelihood_type="rb"):
         target_nsamples=5000,
         use_unit_cube=not use_waveform_fisher,
         fisher_method=fisher_method,
-        npool=16,
+        npool=64,
         # The Laplace proposal every resample method draws from. These live
         # here rather than on run_smc so that inprior, rejection and smc all
         # generate from the *same* distribution: inprior shows that proposal
@@ -383,7 +383,7 @@ def run_smc_direct(_common, run_prefix):
         sampler="aspire",
         label=f"{run_prefix}-aspire",
         enable_checkpointing=False,
-        npool=16,
+        npool=64,
     )
 
 
@@ -398,7 +398,7 @@ def run_dynesty(_common, run_prefix):
         maxmcmc=5000,
         check_point_delta_t=1800,
         check_point_plot=True,
-        npool=32,
+        npool=64,
         clean=False,
         resume=True,
     )
