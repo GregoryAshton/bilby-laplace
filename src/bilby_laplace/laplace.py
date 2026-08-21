@@ -37,26 +37,26 @@ def array_to_dict(keys, array):
     return dict(zip(keys, array))
 
 
-def _pool_log_likelihood(param_keys, fixed_parameters, bounds_min, bounds_max, clip_to_bounds, x_col):
+def _pool_log_likelihood(param_keys, fixed_parameters, x_col):
     """Evaluate the log-likelihood for a single parameter vector in a pool worker.
 
-    Mirrors the serial ``wrapped_logl`` in
-    :meth:`LaplacePosteriorEstimator.log_likelihood_from_array` exactly (same
-    bounds handling), so a parallel run is numerically identical to a serial
-    one.  The (heavy) likelihood is not shipped with each task: it is pulled
-    from bilby's per-worker global, populated once when the pool is created via
+    The (heavy) likelihood is not shipped with each task: it is pulled from
+    bilby's per-worker global, populated once when the pool is created via
     :meth:`bilby...Sampler._setup_pool`.  Only the small static arguments
-    (parameter names, fixed values, prior bounds) ride along, bound in with
+    (parameter names, fixed values) ride along, bound in with
     ``functools.partial``.
+
+    No prior-support handling here.  The estimator's
+    ``log_likelihood_from_array`` screens the whole batch -- box *and*
+    constraints -- before dispatch, so every column that arrives is already in
+    support.  That is both cheaper (one vectorised test per batch instead of
+    one scalar test per task, and no bounds arrays shipped per task) and
+    stricter than the per-worker box test this used to duplicate.
     """
     from bilby.core.sampler.base_sampler import _sampling_convenience_dump
 
     likelihood = _sampling_convenience_dump.likelihood
     x = np.asarray(x_col, dtype=float)
-    if clip_to_bounds:
-        x = np.clip(x, bounds_min, bounds_max)
-    elif np.any(x < bounds_min) or np.any(x > bounds_max):
-        return -np.inf
     parameters = {**fixed_parameters, **dict(zip(param_keys, x))}
     return likelihood.log_likelihood(parameters=parameters)
 
@@ -195,6 +195,18 @@ class LaplacePosteriorEstimator:
         elif fisher_method != "hessian":
             raise ValueError(f"fisher_method must be 'hessian' or 'waveform', got {fisher_method!r}.")
         self.N = len(self.parameter_names)
+        # The full PriorDict, kept for `Constraint` priors.  A constraint is a
+        # bound on a *derived* quantity (mass_1/mass_2 from chirp_mass and
+        # mass_ratio, say), so it cannot be expressed per-parameter: enforcing
+        # it needs the dict's `conversion_function` and `evaluate_constraints`,
+        # neither of which survives the per-parameter `priors_dict` below.
+        # `PriorDict.ln_prob` applies both the per-parameter support and the
+        # constraints in one call, which is what `log_prior` uses.
+        self.priors = priors
+        # Per-parameter view of the sampled priors, for the many places that
+        # legitimately need one marginal at a time (cdf/rescale, widths,
+        # per-parameter precision).  Constraint priors are absent by
+        # construction: `non_fixed_keys` excludes them.
         self.priors_dict = {key: priors[key] for key in self.parameter_names}
         # Per-prior bound on the precision it may contribute; see
         # ``_prior_precision_cap``.  Depends only on the prior, so it is cached
@@ -208,10 +220,18 @@ class LaplacePosteriorEstimator:
         self.minimization_metadata = None
         self.hessian_metadata = None
 
-        # Construct prior samples at initialisation so that the prior is not stored.
-        # Skip when using differential_evolution, which doesn't need starting points.
+        # Starting points for the multi-start MAP search.  Drawn *constrained*:
+        # `sample_subset` ignores Constraint priors, so on a constrained prior
+        # a fraction of the starts would begin in a forbidden region where the
+        # log-posterior is -inf and the local optimiser has no gradient to
+        # follow.  Skip when using differential_evolution, which doesn't need
+        # starting points.
         if minimization_method != "differential_evolution":
-            self.prior_samples = [priors.sample_subset(self.parameter_names) for _ in range(n_prior_samples)]
+            # `sample_subset_constrained` deletes constraint keys from the list
+            # it is given, in place -- pass a copy so `parameter_names` is safe.
+            self.prior_samples = [
+                priors.sample_subset_constrained(list(self.parameter_names)) for _ in range(n_prior_samples)
+            ]
         self.prior_bounds_min = np.array([priors[key].minimum for key in self.parameter_names])
         self.prior_bounds_max = np.array([priors[key].maximum for key in self.parameter_names])
         self.prior_bounds = list(zip(self.prior_bounds_min, self.prior_bounds_max))
@@ -242,8 +262,20 @@ class LaplacePosteriorEstimator:
         return self.likelihood.log_likelihood(parameters={**self.fixed_parameters, **sample})
 
     def log_prior(self, sample):
-        """Evaluate log-prior for a parameter dict (sampled parameters only)."""
-        return sum(np.log(self.priors_dict[k].prob(float(sample[k]))) for k in self.parameter_names)
+        """Evaluate log-prior for a parameter dict (sampled parameters only).
+
+        Delegates to ``PriorDict.ln_prob`` rather than summing the marginals
+        by hand.  That is what makes every stage built on the log-posterior --
+        the MAP search, the parameter-space Hessian, the mode search and the
+        Laplace evidence -- respect ``Constraint`` priors: a constraint bounds
+        a *derived* quantity, so no product of per-parameter terms can see it.
+        ``ln_prob`` returns ``-inf`` both outside a parameter's own range and
+        for a constraint violation, and adds bilby's
+        ``normalize_constraint_factor`` so the density is normalised on the
+        constrained support (the same normalisation the rejection/importance/
+        SMC paths already get by calling ``ln_prob`` themselves).
+        """
+        return float(self.priors.ln_prob({k: float(sample[k]) for k in self.parameter_names}))
 
     def log_posterior(self, sample):
         """Evaluate log-posterior = log-likelihood + log-prior."""
@@ -252,49 +284,94 @@ class LaplacePosteriorEstimator:
             return -np.inf
         return self.log_likelihood(sample) + lp
 
+    def constraint_mask(self, x_array):
+        """Boolean mask of which columns satisfy the ``Constraint`` priors.
+
+        ``x_array`` is ``(N_params, N_samples)``, column-stacked to match
+        :meth:`log_likelihood_from_array`.  Returns a ``(N_samples,)`` bool
+        array; all-``True`` when the prior carries no constraints, without
+        touching the conversion function at all.
+
+        Deliberately vectorised over the whole batch.  bilby's dynesty wrapper
+        calls ``evaluate_constraints`` once per likelihood call, which on this
+        BNS prior costs ~23 us a point; the same check across a batch costs
+        ~0.06-0.19 us a point, because the conversion function and the
+        constraint comparisons are pure numpy broadcasts.  Since every
+        resampling mode here already hands the likelihood whole batches, the
+        constraint belongs at batch level too.
+        """
+        n = x_array.shape[1]
+        if not self.priors.constraint_keys:
+            return np.ones(n, dtype=bool)
+        sample = {key: x_array[i] for i, key in enumerate(self.parameter_names)}
+        # `evaluate_constraints` returns floats (1.0/0.0), not bools.
+        return np.asarray(self.priors.evaluate_constraints(sample), dtype=bool)
+
     def log_likelihood_from_array(self, x_array, clip_to_bounds=False):
-        x_array = np.asarray(x_array)
+        """Log-likelihood for one parameter vector or a column-stacked batch.
 
-        # Parallel path: a batch of parameter vectors, column-stacked as
-        # ``(N_params, N_samples)``, evaluated across the worker pool.  The
-        # likelihood evaluation is the dominant cost in the resampling loops and
-        # is embarrassingly parallel (no RNG in the workers), so the result is
-        # numerically identical to the serial path.
-        if self.pool is not None and x_array.ndim == 2 and x_array.shape[1] > 1:
-            return self._log_likelihood_from_array_pool(x_array, clip_to_bounds)
+        Accepts ``(N_params,)`` or ``(N_params, N_samples)`` and returns a
+        scalar or ``(N_samples,)`` respectively.  Points outside the prior
+        support -- either outside a parameter's own range or violating a
+        ``Constraint`` -- return ``-inf`` and are never handed to the
+        likelihood.
 
-        def wrapped_logl(x_array):
-            if clip_to_bounds:
-                x_array = x_array.copy()
-                idxs = x_array < self.prior_bounds_min
-                x_array[idxs] = self.prior_bounds_min[idxs]
-                idxs = x_array > self.prior_bounds_max
-                x_array[idxs] = self.prior_bounds_max[idxs]
-            else:
-                if np.any(x_array < self.prior_bounds_min) or np.any(x_array > self.prior_bounds_max):
-                    return -np.inf
+        ``clip_to_bounds`` clips into the per-parameter box, as before.  It
+        cannot rescue a constraint violation: a constraint bounds a derived
+        quantity, so there is no per-parameter projection onto the allowed
+        region, and such points still return ``-inf``.
+        """
+        x_array = np.asarray(x_array, dtype=float)
+        single = x_array.ndim == 1
+        x2 = x_array[:, None] if single else x_array
 
-            return self.log_likelihood(array_to_dict(self.parameter_names, x_array))
+        if clip_to_bounds:
+            x2 = np.clip(x2, self.prior_bounds_min[:, None], self.prior_bounds_max[:, None])
+            keep = np.ones(x2.shape[1], dtype=bool)
+        else:
+            keep = np.all(
+                (x2 >= self.prior_bounds_min[:, None]) & (x2 <= self.prior_bounds_max[:, None]),
+                axis=0,
+            )
 
-        def wrapped_logl_arb(x_array):
-            return np.apply_along_axis(wrapped_logl, 0, x_array)
+        # Constraints are only meaningful for in-box points: the conversion
+        # function can be undefined (or merely nonsense) outside a parameter's
+        # own range, so screen the box first and constrain the survivors.
+        if keep.any():
+            keep[np.flatnonzero(keep)] = self.constraint_mask(x2[:, keep])
 
-        return wrapped_logl_arb(x_array)
+        logl = np.full(x2.shape[1], -np.inf)
+        if keep.any():
+            logl[keep] = self._log_likelihood_for_columns(x2[:, keep])
+        return logl[0] if single else logl
 
-    def _log_likelihood_from_array_pool(self, x_array, clip_to_bounds):
+    def _log_likelihood_for_columns(self, x_array):
+        """Evaluate every column of ``(N_params, N_samples)``, in support already."""
+        # Parallel path: the likelihood evaluation is the dominant cost in the
+        # resampling loops and is embarrassingly parallel (no RNG in the
+        # workers), so the result is numerically identical to the serial path.
+        if self.pool is not None and x_array.shape[1] > 1:
+            return self._log_likelihood_from_array_pool(x_array)
+        return np.array(
+            [
+                self.log_likelihood(array_to_dict(self.parameter_names, x_array[:, j]))
+                for j in range(x_array.shape[1])
+            ],
+            dtype=float,
+        )
+
+    def _log_likelihood_from_array_pool(self, x_array):
         """Evaluate ``log_likelihood_from_array`` over a pool for a 2-D batch.
 
         ``x_array`` is ``(N_params, N_samples)``; each column is one parameter
-        vector.  Returns a ``(N_samples,)`` array matching the serial path.
+        vector, already screened against the prior support by the caller.
+        Returns a ``(N_samples,)`` array matching the serial path.
         """
         columns = [x_array[:, j] for j in range(x_array.shape[1])]
         worker = partial(
             _pool_log_likelihood,
             list(self.parameter_names),
             dict(self.fixed_parameters),
-            self.prior_bounds_min,
-            self.prior_bounds_max,
-            clip_to_bounds,
         )
         # Aim for a few chunks per worker so IPC overhead is amortised without
         # starving workers at the tail of the batch.
@@ -304,11 +381,16 @@ class LaplacePosteriorEstimator:
         return np.asarray(results, dtype=float)
 
     def log_posterior_from_array(self, x_array):
-        """Evaluate log-posterior from a parameter array (or column-stacked arrays)."""
+        """Evaluate log-posterior from a parameter array (or column-stacked arrays).
+
+        No explicit bounds test: ``log_posterior`` -> ``log_prior`` ->
+        ``PriorDict.ln_prob`` already returns ``-inf`` outside a parameter's
+        range *and* on a constraint violation, and ``log_posterior``
+        short-circuits before touching the likelihood.  The box test this used
+        to carry was both redundant and weaker than what it guarded.
+        """
 
         def wrapped(x_array):
-            if np.any(x_array < self.prior_bounds_min) or np.any(x_array > self.prior_bounds_max):
-                return -np.inf
             return self.log_posterior(array_to_dict(self.parameter_names, x_array))
 
         return np.apply_along_axis(wrapped, 0, x_array)
@@ -795,7 +877,13 @@ class LaplacePosteriorEstimator:
         """
         d = len(self.parameter_names)
         log_l_map = self.log_likelihood(sample)
-        log_pi_map = sum(np.log(self.priors_dict[k].prob(float(sample[k]))) for k in self.parameter_names)
+        # Via `log_prior` (i.e. `PriorDict.ln_prob`), not a hand-rolled product
+        # of marginals: on a constrained prior the two differ by
+        # `log(normalize_constraint_factor)` -- 0.50 nats on the BNS_3G prior,
+        # for instance.  The rejection/importance/SMC evidences all come from
+        # `ln_prob` already, so summing marginals here left this estimate on a
+        # different normalisation from every other log Z the sampler reports.
+        log_pi_map = self.log_prior(sample)
         sign, log_det = np.linalg.slogdet(covariance)
         if sign <= 0:
             logger.warning("covariance has non-positive determinant; " "Laplace evidence estimate may be unreliable")

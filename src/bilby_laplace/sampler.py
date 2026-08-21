@@ -37,7 +37,19 @@ class TruncatedMVNProposal:
     the acceptance step.
 
     Bounded parameters use a truncated normal, so every draw lands inside the
-    prior support however wide the Gaussian is.  *Periodic* parameters are
+    prior *box* however wide the Gaussian is.  The box is not the whole story
+    when the prior carries ``Constraint`` priors: those bound a derived
+    quantity, cannot be imposed per-marginal, and are deliberately left to the
+    accept/reject step rather than built in here.  Every consumer of this
+    proposal weights or filters by ``PriorDict.ln_prob`` (which returns
+    ``-inf`` on a violation), so constraint-violating draws are already
+    rejected -- imposing them inside ``sample`` as well would only raise the
+    acceptance rate, and would require renormalising ``logpdf`` by the
+    proposal's own constrained volume, which is not the prior's
+    ``normalize_constraint_factor`` and would need its own Monte-Carlo
+    estimate.  Correctness does not depend on it; efficiency does.
+
+    *Periodic* parameters are
     **wrapped** instead: truncation renormalises the density inside the range
     and puts zero mass on the far side of the boundary, but for an angle the
     mass below the lower edge belongs just under the upper edge.  On the
@@ -1384,11 +1396,33 @@ class Laplace(Sampler):
         self.result.meta_data["run_statistics"] = run_stats
 
     def _sample_laplace(self, mean, cov, estimator, target_nsamples):
-        """Draw samples directly from the Gaussian approximation without resampling."""
+        """Draw samples directly from the Gaussian approximation without resampling.
+
+        This mode is the raw Laplace approximation, so the draws are *not*
+        filtered to the prior support -- that is what ``resample='inprior'``
+        is for, and silently filtering here would erase the distinction.  The
+        Gaussian has tails outside any bounded prior, so on a bounded or
+        constrained prior some fraction of the output has zero prior density.
+        That fraction is reported rather than hidden: if it is not small, the
+        Gaussian is a poor fit to the constrained posterior and this mode's
+        output should not be treated as posterior samples.
+        """
         logger.info(f"Drawing {target_nsamples} samples from " f"Gaussian approximation (no resampling)")
         samples_array = random.rng.multivariate_normal(mean, cov, target_nsamples)
         samples = pd.DataFrame(samples_array, columns=estimator.parameter_names)
         samples = self._replace_with_prior_samples(samples, estimator.parameter_names)
+
+        logpi = np.real(np.array(self.priors.ln_prob(samples, axis=0)))
+        n_outside = int(np.sum(np.isinf(logpi)))
+        if n_outside:
+            logger.warning(
+                f"{n_outside}/{target_nsamples} "
+                f"({100.0 * n_outside / target_nsamples:.1f}%) of the Gaussian draws fall outside "
+                f"the prior support (out of range, or violating a Constraint prior). "
+                f"resample=None returns them unfiltered; use resample='inprior' to draw only "
+                f"in-support samples."
+            )
+
         logl = np.full(target_nsamples, np.nan)
         return samples, logl, samples, 100.0
 
@@ -1396,8 +1430,10 @@ class Laplace(Sampler):
         """Draw *n* samples from *proposal* filtered to the prior support.
 
         Draws in batches, discarding any sample where the full prior
-        log-probability is ``-inf``.  No likelihood evaluations are performed.
-        Returns a ``(n, ndim)`` float array.
+        log-probability is ``-inf`` -- which covers both a parameter falling
+        outside its own range and a ``Constraint`` violation, since
+        ``PriorDict.ln_prob`` applies both.  No likelihood evaluations are
+        performed.  Returns a ``(n, ndim)`` float array.
         """
         batch_nsamples = self.kwargs["batch_nsamples"]
         collected = []
@@ -1409,6 +1445,15 @@ class Laplace(Sampler):
                 break
             x_batch = proposal.sample(batch_nsamples)
             g_batch = pd.DataFrame(x_batch, columns=parameter_names)
+            # Substitute the prior-drawn parameters *before* the support test,
+            # as `_run_inprior` and the weighted loops do.  Doing it afterwards
+            # (as this used to) hands back a cloud that was filtered and then
+            # perturbed: a fresh draw for one parameter can push an accepted
+            # sample back outside the support, which on a constrained prior
+            # silently reintroduces exactly the points this filter exists to
+            # remove.
+            g_batch = self._replace_with_prior_samples(g_batch, parameter_names)
+            x_batch = g_batch.values
             logpi = np.real(np.array(self.priors.ln_prob(g_batch, axis=0)))
             in_prior = ~np.isinf(logpi)
             total_drawn += batch_nsamples
@@ -1423,9 +1468,6 @@ class Laplace(Sampler):
             f"Drew {len(x_out)} in-prior samples from {total_drawn} proposals "
             f"({100.0 * len(x_out) / total_drawn:.1f}% efficiency)"
         )
-        df_out = pd.DataFrame(x_out, columns=parameter_names)
-        df_out = self._replace_with_prior_samples(df_out, parameter_names)
-        x_out = df_out.values
         return x_out
 
     @staticmethod
@@ -2154,6 +2196,13 @@ class Laplace(Sampler):
 
         parameter_names = estimator.parameter_names
 
+        # Per-parameter box, which is all aspire's logit preconditioning can
+        # express -- a Constraint bounds a derived quantity and has no
+        # rectangular form.  Constraints still bind, via the log-prior below:
+        # aspire_bilby's `log_prior` is `priors.ln_prob(...)`, which returns
+        # -inf on a violation, and `_make_aspire_log_likelihood` masks on that
+        # before evaluating anything.  So the constrained region is enforced in
+        # the target, not in the preconditioner.
         prior_bounds = {key: (self.priors[key].minimum, self.priors[key].maximum) for key in parameter_names}
 
         # Only the log-prior is taken from aspire_bilby; the likelihood is our
@@ -2828,6 +2877,14 @@ class Laplace(Sampler):
         Generates a stratified grid in [0,1]^D, shuffles each
         column independently, then maps through each prior's
         inverse CDF (``rescale``).
+
+        ``rescale`` is per-parameter, so the cloud fills the prior *box*: on a
+        constrained prior part of it lands where the prior density is zero.
+        Those points are not dropped here -- the caller may still overwrite
+        some coordinates (``mode_search_subspace`` pins everything outside the
+        subspace at the primary MAP), so the only configuration worth testing
+        against the constraints is the one the caller ends up with.  The caller
+        filters.
         """
         ndim = len(parameter_names)
 
@@ -2844,6 +2901,22 @@ class Laplace(Sampler):
             samples[:, j] = self.priors[key].rescale(lhs_unit[:, j])
 
         return samples
+
+    def _drop_constraint_violations(self, x, parameter_names, context):
+        """Drop rows of an ``(n, ndim)`` cloud that violate a Constraint prior.
+
+        Returns *x* unchanged when the prior carries no constraints.
+        """
+        if not self.priors.constraint_keys or len(x) == 0:
+            return x
+        keep = np.asarray(
+            self.priors.evaluate_constraints({key: x[:, j] for j, key in enumerate(parameter_names)}),
+            dtype=bool,
+        )
+        if keep.all():
+            return x
+        logger.info(f"{context}: dropped {int((~keep).sum())}/{len(x)} candidates violating a Constraint prior")
+        return x[keep]
 
     def _find_multiple_maps(self, estimator, n_modes, cov_scaling, primary_mean, primary_cov):
         """Find up to *n_modes* distinct MAP estimates and their covariances.
@@ -2918,6 +2991,16 @@ class Laplace(Sampler):
             )
         else:
             logger.info(f"Evaluating {n_starts} prior samples " f"(Latin hypercube) to search for " f"secondary modes")
+
+        # After any subspace pinning, so the configuration tested is the one
+        # actually used as a starting point.  A start in a constraint-forbidden
+        # region is a wasted polish: the log-posterior there is a flat -inf,
+        # giving the local optimiser nothing to descend.
+        prior_x = self._drop_constraint_violations(prior_x, parameter_names, "Mode search")
+        if len(prior_x) == 0:
+            logger.warning("Mode search: every Latin hypercube start violates a Constraint prior; no secondary modes")
+            self._log_mode_summary(found_modes, parameter_names)
+            return found_modes
 
         prior_logp = np.array([float(estimator.log_posterior_from_array(x)) for x in prior_x])
 
