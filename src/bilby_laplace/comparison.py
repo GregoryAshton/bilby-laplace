@@ -54,12 +54,13 @@ JSD_N = 2000
 _JSD_RNG_SEED = 20260810
 
 SAMPLER_COLOURS = {
-    "laplace": "C1",
-    "inprior": "C1",
-    "rejection": "C2",
-    "smc": "C3",
-    "aspire": "C4",
-    "dynesty": "C0",
+    "laplace": "#009E73",  # bluish green    - raw Laplace/Gaussian approximation
+    "inprior": "#CC79A7",  # reddish purple
+    "rejection": "#D55E00",  # vermillion
+    "importance": "#56B4E9",  # sky blue
+    "smc": "#E69F00",  # orange              - the headline method
+    "aspire": "#785EF0",  # violet           - SMC from the prior, no-Laplace control
+    "dynesty": "#0072B2",  # blue            - reference nested sampler
 }
 
 # Colour for any result whose sampler family is not recognised.
@@ -148,36 +149,25 @@ def colours_for_results(results, overrides=None):
 
 
 def _prettify_method(method):
-    """Turn a method token like ``"rejection_user"`` into ``"Laplace: Rejection (user)"``.
+    """Turn a method token like ``"rejection_user"`` into ``"Rejection User"``.
 
-    The three Laplace-seeded resampling methods (``"inprior"``, ``"rejection"``,
-    ``"smc"``, and ``"importance"`` for completeness) are named
-    ``"Laplace: <Method>"`` so every Laplace variant reads as one family in a
-    legend. ``"aspire"`` -- the no-Laplace SMC control, run directly through
-    aspire -- is not a Laplace method, so it keeps its own name and falls
-    through to plain capitalisation. A config-variant suffix (e.g. the
-    ``"user"`` in ``"rejection_user"``) is kept, parenthesised rather than
-    folded into the method name.
+    ``"smc"`` is upper-cased as an acronym; ``"inprior"`` becomes
+    ``"Laplace in-prior"`` (it is the Laplace approximation drawn within the
+    prior support); other tokens are capitalised.
     """
     text = method.replace("_", " ").replace("-", " ").strip()
     if not text:
         return method
 
-    words = text.split()
-    head, tail = words[0].lower(), words[1:]
+    def _word(w):
+        lw = w.lower()
+        if lw == "smc":
+            return "SMC"
+        if lw == "inprior":
+            return "Laplace in-prior"
+        return w.capitalize()
 
-    laplace_methods = {
-        "smc": "SMC",
-        "inprior": "In-prior",
-        "rejection": "Rejection",
-        "importance": "Importance",
-    }
-    if head in laplace_methods:
-        base = f"Laplace: {laplace_methods[head]}"
-    else:
-        base = words[0].capitalize()
-
-    return f"{base} ({' '.join(tail)})" if tail else base
+    return " ".join(_word(w) for w in text.split())
 
 
 def _as_count(value):
