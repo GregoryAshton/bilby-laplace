@@ -3,7 +3,7 @@ Laplace approximation on a 2D Rosenbrock (banana) likelihood.
 
 Usage
 -----
-    python run.py --sampler laplace rejection smc smc-direct dynesty
+    python run.py --sampler laplace rejection smc smc-direct emcee dynesty
     python run.py --compare
 """
 
@@ -102,6 +102,25 @@ def run_rejection(_common_laplace):
     )
 
 
+def run_emcee(_common_laplace):
+    # The banana curvature of this likelihood mixes far more slowly than the
+    # Laplace-Gaussian proposal it starts from -- tau grows for tens of
+    # thousands of steps before settling near 300 -- so the 5000-sample target
+    # used elsewhere in this repo would need an impractically long chain.
+    # Accept fewer independent samples rather than chase that target.
+    return bilby.run_sampler(
+        **{**_common_laplace, "target_nsamples": 2500},
+        label=f"{base_label}_emcee",
+        resample="emcee",
+        emcee_kwargs=dict(
+            nwalkers=32,
+            nsteps=2000,
+            discard=1000,
+            max_nsteps=30000,
+        ),
+    )
+
+
 def run_smc(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
@@ -161,9 +180,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sampler",
         nargs="+",
-        choices=["laplace", "rejection", "smc", "smc-direct", "dynesty"],
+        choices=["laplace", "rejection", "smc", "smc-direct", "emcee", "dynesty"],
         metavar="SAMPLER",
-        help="One or more samplers to run: laplace, rejection, smc, smc-direct, dynesty",
+        help="One or more samplers to run: laplace, rejection, smc, smc-direct, emcee, dynesty",
     )
     parser.add_argument(
         "--compare",
@@ -184,6 +203,7 @@ if __name__ == "__main__":
                 "rejection": lambda: run_rejection(_common_laplace),
                 "smc": lambda: run_smc(_common_laplace),
                 "smc-direct": lambda: run_smc_direct(_common),
+                "emcee": lambda: run_emcee(_common_laplace),
                 "dynesty": lambda: run_dynesty(_common),
             }
 

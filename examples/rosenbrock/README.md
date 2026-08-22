@@ -1,6 +1,6 @@
 # rosenbrock — sampler comparison
 
-Posteriors from 5 samplers (`rosenbrock_aspire`, `rosenbrock_dynesty`, `rosenbrock_inprior`, `rosenbrock_rejection`, `rosenbrock_smc`) on the rosenbrock example, each compared against the `rosenbrock_dynesty` reference.
+Posteriors from 6 samplers (`rosenbrock_aspire`, `rosenbrock_dynesty`, `rosenbrock_emcee`, `rosenbrock_inprior`, `rosenbrock_rejection`, `rosenbrock_smc`) on the rosenbrock example, each compared against the `rosenbrock_dynesty` reference.
 
 ## Running it
 
@@ -9,7 +9,7 @@ make all       # every sampler in turn, then this comparison
 make compare   # rebuild this table and the corner plot from existing results
 ```
 
-Individual samplers: `make laplace`, `make rejection`, `make smc`, `make aspire`, `make dynesty`.
+Individual samplers: `make laplace`, `make rejection`, `make smc`, `make aspire`, `make emcee`, `make dynesty`.
 
 ## Comparison
 
@@ -23,9 +23,10 @@ Both agreement columns compare each 1-D marginal with `rosenbrock_dynesty` at a 
 
 | method | log Z | ± | Mevals | effic. | time | JSD (mbits) | JSD worst | EMD (σ) | EMD worst | settings |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `rosenbrock_aspire` | -4.10 | 0.03 | 20 | 0.025% | 42.8s | 2.11 | x (2.21) | 0.09 | y (0.09) | `nsamples=5000, nsteps=1000` |
-| `rosenbrock_dynesty` | -4.13 | 0.07 | 0.212 | 1.7% | 10.7s | — | — | — | — | `nlive=1000` |
-| `rosenbrock_inprior` | — | — | 0.005 | 100.0% | 0.7s | 44.81 | y (61.48) | 0.28 | x (0.32) | — |
-| `rosenbrock_rejection` | -4.09 | 0.01 | 0.202 | 2.5% | 2.7s | 1.20 | x (1.59) | 0.04 | y (0.04) | — |
-| `rosenbrock_smc` | -4.16 | 0.03 | 18.3 | 0.027% | 2.4m | 0.69 | y (0.77) | 0.04 | y (0.04) | `nsamples=5000, nsteps=1000` |
+| `rosenbrock_aspire` | -4.06 | 0.03 | 20 | 0.025% | 1.2m | 2.26 | x (2.91) | 0.07 | x (0.07) | `nsamples=5000, nsteps=1000` |
+| `rosenbrock_dynesty` | -4.13 | 0.07 | 0.212 | 1.7% | 25.1s | — | — | — | — | `nlive=1000` |
+| `rosenbrock_emcee` | — | — | 0.76 | 0.3% | 1.0m | 2.32 | x (2.68) | 0.07 | y (0.08) | — |
+| `rosenbrock_inprior` | — | — | 0.005 | 100.0% | 3.4s | 43.15 | y (59.23) | 0.28 | x (0.32) | — |
+| `rosenbrock_rejection` | -4.09 | 0.01 | 0.202 | 2.5% | 4.7s | 1.49 | x (2.05) | 0.05 | x (0.06) | — |
+| `rosenbrock_smc` | -4.12 | 0.03 | 18.3 | 0.027% | 1.4m | 1.43 | x (1.73) | 0.04 | y (0.04) | `nsamples=5000, nsteps=1000` |
 

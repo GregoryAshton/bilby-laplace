@@ -1,6 +1,6 @@
 PYTHON ?= python
 
-laplace rejection smc dynesty:
+laplace rejection smc emcee dynesty:
 	$(PYTHON) run.py --sampler $@
 
 aspire:
@@ -9,6 +9,6 @@ aspire:
 compare:
 	$(PYTHON) run.py --compare
 
-all: laplace rejection smc aspire dynesty compare
+all: laplace rejection smc aspire emcee dynesty compare
 
-.PHONY: all compare laplace rejection smc aspire dynesty
+.PHONY: all compare laplace rejection smc aspire emcee dynesty

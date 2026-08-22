@@ -3,7 +3,7 @@ Laplace approximation on a 2D correlated Gaussian likelihood.
 
 Usage
 -----
-    python run.py --sampler laplace rejection rejection-user smc smc-direct dynesty
+    python run.py --sampler laplace rejection rejection-user smc smc-direct emcee dynesty
     python run.py --compare
 """
 
@@ -130,6 +130,20 @@ def run_rejection_user(_common_laplace, sampling_cov):
     )
 
 
+def run_emcee(_common_laplace):
+    return bilby.run_sampler(
+        **_common_laplace,
+        label="emcee",
+        resample="emcee",
+        emcee_kwargs=dict(
+            nwalkers=32,
+            nsteps=2000,
+            discard=1000,
+            max_nsteps=6000,
+        ),
+    )
+
+
 def run_smc(_common_laplace):
     return bilby.run_sampler(
         **_common_laplace,
@@ -187,9 +201,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sampler",
         nargs="+",
-        choices=["laplace", "rejection", "rejection-user", "smc", "smc-direct", "dynesty"],
+        choices=["laplace", "rejection", "rejection-user", "smc", "smc-direct", "emcee", "dynesty"],
         metavar="SAMPLER",
-        help="One or more samplers to run: laplace, rejection, rejection-user, smc, smc-direct, dynesty",
+        help="One or more samplers to run: laplace, rejection, rejection-user, smc, smc-direct, emcee, dynesty",
     )
     parser.add_argument(
         "--compare",
@@ -211,6 +225,7 @@ if __name__ == "__main__":
                 "rejection-user": lambda: run_rejection_user(_common_laplace, true_cov),
                 "smc": lambda: run_smc(_common_laplace),
                 "smc-direct": lambda: run_smc_direct(_common),
+                "emcee": lambda: run_emcee(_common_laplace),
                 "dynesty": lambda: run_dynesty(_common),
             }
 
