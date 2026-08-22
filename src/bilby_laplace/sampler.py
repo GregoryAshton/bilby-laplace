@@ -327,9 +327,9 @@ class Laplace(Sampler):
     outdir : str
     label : str
     resample : str or None
-        Resampling method: ``'rejection'`` (default), ``'importance'``, ``'smc'``, or
-        ``None`` / ``'None'`` to skip resampling and return raw Laplace-approximation
-        samples.
+        Resampling method: ``'rejection'`` (default), ``'importance'``, ``'inprior'``,
+        ``'smc'``, ``'emcee'``, or ``None`` / ``'None'`` to skip resampling and return
+        raw Laplace-approximation samples.
     npool : int
         Number of processes for parallel likelihood evaluation (bilby standard
         argument, default 1; the aliases ``n_pool``, ``cores``, ``threads`` and
@@ -540,6 +540,72 @@ class Laplace(Sampler):
         Any other keys are forwarded directly to
         ``aspire.Aspire.sample_posterior()``, so all aspire parameters are
         accessible this way.
+    emcee_kwargs : dict or None
+        Configuration for ``resample='emcee'`` (only used then). Sampling runs
+        in batches of ``nsteps``, re-estimating the integrated autocorrelation
+        time after each and stopping once the chain holds ``target_nsamples``
+        independent samples (or at ``max_nsteps``). Recognised keys:
+
+        ``nwalkers`` : int
+            Number of ensemble walkers. Defaults to ``max(4 * ndim, 32)``.
+
+            Worth choosing deliberately: an autocorrelation-time estimate is
+            only trustworthy once the chain is ~50 tau long, and at that point
+            the run already holds ``50 * nwalkers`` independent samples. Any
+            ``nwalkers`` much above ``target_nsamples / 50`` therefore *cannot*
+            stop near the target and will oversample by that ratio (a warning
+            is logged). ``nwalkers ~= target_nsamples / 50`` makes the two
+            conditions coincide, which is the cheapest place to sit -- bounded
+            below by needing enough walkers to keep the likelihood pool busy,
+            since each half-ensemble move evaluates ``nwalkers / 2`` points.
+        ``nsteps`` : int
+            Steps per batch, and the length of the first batch. Default 5000.
+            Sets the granularity of the convergence check: the check costs no
+            likelihood evaluations but is a serial barrier, while overshoot
+            past the target is bounded by one batch.
+        ``max_nsteps`` : int
+            Hard cap on total steps. Defaults to ``nsteps``, i.e. a single
+            batch and no growth, so adaptive running is opt-in. Reaching it
+            with too few samples logs a warning rather than failing.
+        ``target_nsamples`` : int
+            Independent samples to collect before stopping. Defaults to the
+            sampler-wide ``target_nsamples``, matching every other resampling
+            mode.
+        ``discard`` : int
+            Number of leading steps discarded as burn-in before flattening the
+            chain. Default ``nsteps // 2``. Fixed across batches (burn-in does
+            not grow with the chain).
+        ``autocorr_tol`` : float
+            How many autocorrelation times the post-burn-in chain must span
+            before its tau estimate is trusted. Default 50 (emcee's own
+            ``tol``), which is conservative -- ~10 already gives a usable if
+            low-biased estimate. Lowering it shortens a slow-mixing run
+            considerably at the cost of a weaker guarantee, so the achieved
+            chain-length/tau ratio is logged every batch and a warning is
+            issued when the value is below emcee's own bar. Note this also
+            rescales the useful walker count (see ``nwalkers``).
+        ``backend_file`` : str, bool, or None
+            Persist the full un-thinned chain to HDF5 via
+            ``emcee.backends.HDFBackend``. ``True`` writes
+            ``{outdir}/{label}_emcee_chain.h5``, a string is used as the path,
+            and ``None`` (default) keeps it off. The returned samples are
+            thinned, so this is the only copy of the raw chain -- worth having
+            for analysis the run itself cannot do, above all re-estimating tau
+            at several ``discard`` values, which distinguishes a tau measuring
+            leftover burn-in drift from a genuinely slow mode. The file holds
+            ``nwalkers * nsteps * ndim`` floats, so it is large for a long run,
+            and any chain already in it is cleared at startup.
+        ``thin`` : int, optional
+            Fixed thinning factor. If omitted (default), the post-burn-in
+            chain is thinned automatically by the estimated integrated
+            autocorrelation time (the largest across parameters), so the
+            returned samples are approximately independent -- matching every
+            other resampling mode, and what the comparison metrics (JSD/EMD
+            against a reference sampler) assume of their input.
+
+        Any other keys are forwarded to ``emcee.EnsembleSampler``. Walkers are
+        seeded from the Laplace proposal via the same in-prior draw used to seed
+        SMC's initial cloud (:meth:`_draw_inprior_samples`).
     smc_progress : bool
         If True (default) and ``resample='smc'`` with an SMC-family sampler,
         register a per-iteration callback that logs a one-line progress summary
@@ -616,6 +682,7 @@ class Laplace(Sampler):
         smc_prior_flow="learned",
         mode_weights="equal",
         smc_kwargs=None,
+        emcee_kwargs=None,
         smc_progress=True,
         smc_plot_every=0,
         max_iterations=1e6,
@@ -1318,10 +1385,14 @@ class Laplace(Sampler):
                 samples, logl, g_samples, efficiency, log_evidence, log_evidence_err = self._run_importance_sampling(
                     proposal, estimator, map_sample_dict
                 )
+            elif resample == "emcee":
+                samples, logl, g_samples, efficiency, nlikelihood = self._run_emcee(proposal, estimator)
+                log_evidence = np.nan
+                log_evidence_err = np.nan
             else:
                 raise ValueError(
                     f"Unknown resample method {resample!r}. "
-                    f"Expected one of: None, 'rejection', 'importance', 'inprior', 'smc'."
+                    f"Expected one of: None, 'rejection', 'importance', 'inprior', 'smc', 'emcee'."
                 )
         finally:
             self._close_pool()
@@ -2142,6 +2213,340 @@ class Laplace(Sampler):
 
         logger.info(f"IS log-evidence: {log_z:.2f} +/- {log_z_err:.2f}")
         return log_z, log_z_err
+
+    # Default reliability factor: an integrated-autocorrelation-time estimate
+    # is only trustworthy once the chain is this many tau long. This is emcee's
+    # own `integrated_time` default (its `tol`), and it warns below it.
+    #
+    # It is deliberately conservative -- Sokal's guidance is that a chain of
+    # ~10 tau already gives a usable estimate, biased low -- so it is
+    # overridable via ``emcee_kwargs={"autocorr_tol": ...}``. Lowering it
+    # trades a weaker guarantee for a much shorter run, which on a
+    # slow-mixing posterior can be the difference between finishing and not;
+    # the achieved ratio is always logged, so the weaker guarantee stays
+    # visible rather than being hidden by a passing check.
+    #
+    # This factor also sets the useful walker count. Independent samples are
+    # `nwalkers * n_post_burn / tau`, and the bar says `n_post_burn / tau >=
+    # tol`, so by the time the estimate can be trusted the run already holds
+    # at least `tol * nwalkers` independent samples. Any nwalkers above
+    # `target_nsamples / tol` therefore cannot stop before overshooting the
+    # target -- at nwalkers=500, tol=50 and a 5000-sample target it must
+    # reach ~25000, five times more sampling than asked for. Choosing
+    # `nwalkers ~= target_nsamples / tol` makes the two conditions coincide.
+    _EMCEE_AUTOCORR_RELIABLE_FACTOR = 50
+
+    def _emcee_autocorr_status(self, ensemble, discard, nwalkers, parameter_names, tol=None):
+        """Autocorrelation state of a (possibly still-growing) emcee chain.
+
+        Returns ``(tau, tau_max, n_independent, reliable)``: the per-parameter
+        integrated autocorrelation times, the largest of them (the binding
+        one -- the chain is only as mixed as its worst coordinate), how many
+        approximately independent samples the post-burn-in chain therefore
+        holds, and whether it is long enough (*tol* times ``tau_max``, tol
+        defaulting to :attr:`_EMCEE_AUTOCORR_RELIABLE_FACTOR`) for that
+        estimate to be trusted at all.
+
+        ``tau_max`` is ``nan`` and ``n_independent`` zero when no parameter
+        yields a finite estimate, which is the honest answer for a chain too
+        short to say anything about -- and, via ``reliable=False``, keeps the
+        batch loop in :meth:`_run_emcee` running rather than stopping on a
+        number that does not exist yet.
+        """
+        if tol is None:
+            tol = self._EMCEE_AUTOCORR_RELIABLE_FACTOR
+        # `quiet=True`: emcee raises `AutocorrError` below *its own* (fixed,
+        # 50x) bar. Here that is the normal state of an early batch, not an
+        # error -- the whole point of the loop is to keep sampling until our
+        # `tol` clears, which may be lower than emcee's.
+        tau = np.asarray(ensemble.get_autocorr_time(discard=discard, quiet=True), dtype=float)
+        finite_tau = tau[np.isfinite(tau) & (tau > 0)]
+        n_post_burn = max(0, ensemble.iteration - discard)
+        if finite_tau.size == 0:
+            return tau, np.nan, 0, False
+        tau_max = float(np.max(finite_tau))
+        n_independent = int(nwalkers * n_post_burn / tau_max)
+        reliable = n_post_burn >= tol * tau_max
+        return tau, tau_max, n_independent, reliable
+
+    def _run_emcee(self, proposal, estimator):
+        """Draw samples via emcee's affine-invariant ensemble sampler.
+
+        Walkers are seeded from the Laplace proposal with
+        :meth:`_draw_inprior_samples`, the same in-prior draw used to seed
+        SMC's initial cloud, so every resampling method starts from an
+        identically-constructed cloud.
+
+        No reweighting is applied: emcee's stationary distribution *is* the
+        target posterior, unlike the Gaussian proposal the other resampling
+        methods correct. There is consequently no evidence estimate here.
+
+        Periodic parameters (``boundary="periodic"``, e.g. a polarisation or
+        sky angle) are wrapped into range before every log-probability
+        evaluation and in the returned samples, so a walker can cross the
+        seam freely instead of the crossing itself reading as leaving the
+        prior -- the same treatment :class:`TruncatedMVNProposal` gives every
+        other resampling mode.
+
+        Sampling runs in batches of ``nsteps``, re-estimating the integrated
+        autocorrelation time after each and continuing only while the chain
+        holds fewer than ``target_nsamples`` independent samples, or is still
+        too short for that estimate to be trusted (see
+        :meth:`_emcee_autocorr_status`). This is what stops the run length
+        from having to be guessed in advance: a chain that mixes well stops
+        early, and one that does not keeps going to ``max_nsteps``.
+
+        Batching is the whole cost control here. The convergence check itself
+        touches no likelihood (it is an FFT over the stored chain), but it is
+        a *serial* barrier -- every walker has to finish the batch before it
+        runs -- so the batch has to be long enough that the barrier is
+        amortised, while short enough that the run does not overshoot the
+        target by much. Overshoot is bounded by one batch, so ``nsteps``
+        trades a serial stall against wasted sampling.
+
+        Consecutive walker steps are correlated, so the flattened chain is
+        thinned by the estimated autocorrelation time before being returned
+        -- otherwise the "samples" handed back are not independent draws,
+        which is what every other resampling mode returns and what the
+        comparison metrics (JSD/EMD against a reference sampler,
+        effective-sample counts) assume. Pass ``emcee_kwargs={"thin": ...}``
+        to override this with a fixed thinning factor instead.
+
+        ``efficiency`` is reported on the same footing as every other
+        resampling mode -- final (thinned) samples per likelihood evaluation
+        -- rather than emcee's own mean acceptance fraction (logged
+        separately): unlike rejection/importance, a rejected MCMC move still
+        keeps (repeats) a sample, so acceptance fraction and
+        samples-per-evaluation are not the same number here.
+
+        Returns ``(samples, logl, g_samples, efficiency, nlikelihood)``.
+        """
+        import emcee
+
+        parameter_names = estimator.parameter_names
+        ndim = len(parameter_names)
+
+        emcee_kw = dict(self.kwargs.get("emcee_kwargs") or {})
+        nwalkers = int(emcee_kw.pop("nwalkers", max(4 * ndim, 32)))
+        nsteps = int(emcee_kw.pop("nsteps", 5000))
+        # `max_nsteps == nsteps` (the default) runs exactly one batch, i.e.
+        # the previous fixed-length behaviour, so growth is opt-in.
+        max_nsteps = int(emcee_kw.pop("max_nsteps", nsteps))
+        discard = int(emcee_kw.pop("discard", nsteps // 2))
+        thin_override = emcee_kw.pop("thin", None)
+        target_nsamples = int(emcee_kw.pop("target_nsamples", self.kwargs["target_nsamples"]))
+        autocorr_tol = float(emcee_kw.pop("autocorr_tol", self._EMCEE_AUTOCORR_RELIABLE_FACTOR))
+        backend_file = emcee_kw.pop("backend_file", None)
+        if discard >= nsteps:
+            raise SamplerError(f"emcee_kwargs['discard'] ({discard}) must be less than nsteps ({nsteps}).")
+        if max_nsteps < nsteps:
+            raise SamplerError(
+                f"emcee_kwargs['max_nsteps'] ({max_nsteps}) must be at least nsteps ({nsteps}), "
+                f"which is the first batch's length."
+            )
+        if autocorr_tol <= 0:
+            raise SamplerError(f"emcee_kwargs['autocorr_tol'] ({autocorr_tol}) must be positive.")
+
+        logger.info(
+            f"Running emcee: {nwalkers} walkers x {nsteps} steps per batch "
+            f"(discard {discard}, max {max_nsteps} steps, target {target_nsamples} independent "
+            f"samples, autocorr_tol {autocorr_tol:g})"
+        )
+        if autocorr_tol < self._EMCEE_AUTOCORR_RELIABLE_FACTOR:
+            logger.warning(
+                f"autocorr_tol={autocorr_tol:g} is below emcee's own {self._EMCEE_AUTOCORR_RELIABLE_FACTOR} "
+                f"bar, so the autocorrelation time may be underestimated (and the independent-sample "
+                f"count correspondingly overstated). The achieved chain-length/tau ratio is logged each "
+                f"batch; check it before trusting the count."
+            )
+        # The reliability bar alone guarantees `autocorr_tol * nwalkers`
+        # independent samples, so a large walker count cannot stop near the
+        # target -- flag it rather than silently oversampling by that factor.
+        floor_from_walkers = int(autocorr_tol * nwalkers)
+        if floor_from_walkers > 2 * target_nsamples:
+            logger.warning(
+                f"nwalkers={nwalkers} cannot yield fewer than {floor_from_walkers} independent "
+                f"samples once the autocorrelation estimate becomes reliable, far above the "
+                f"{target_nsamples} requested: the run will overshoot. Consider "
+                f"nwalkers~={int(target_nsamples // autocorr_tol)}."
+            )
+
+        # Optional persistence of the full (un-thinned) chain. `True` uses the
+        # conventional per-run path; a string is taken as an explicit one.
+        # Worth it for post-hoc analysis the run itself cannot do -- above all
+        # re-estimating tau at several `discard` values, which distinguishes a
+        # tau measuring leftover burn-in drift from a genuinely slow mode --
+        # and it is the only copy of the raw chain, since the returned samples
+        # are thinned. Off by default: the file is nwalkers * nsteps * ndim
+        # floats, which is large for a long run.
+        backend = None
+        if backend_file:
+            from bilby.core.utils import check_directory_exists_and_if_not_mkdir
+
+            if backend_file is True:
+                backend_file = f"{self.outdir}/{self.label}_emcee_chain.h5"
+            check_directory_exists_and_if_not_mkdir(self.outdir)
+            backend = emcee.backends.HDFBackend(str(backend_file))
+            # Fresh run: `reset` clears any chain left by a previous one, so a
+            # stale file cannot be silently appended to or mistaken for this
+            # run's output. (Resuming from a backend is not wired up here.)
+            backend.reset(nwalkers, ndim)
+            logger.info(f"Persisting the full emcee chain to {backend_file}")
+
+        initial_theta = self._draw_inprior_samples(proposal, nwalkers, parameter_names)
+
+        # A periodic coordinate (e.g. psi, azimuth) has no hard edge: 0 and
+        # the period are the same point.  emcee's stretch move knows nothing
+        # about this and proposes freely in real-valued space, so without
+        # wrapping, a proposal that drifts past a periodic parameter's
+        # boundary reads as "outside the prior" (-inf) and is rejected --
+        # exactly the false rejection-at-the-wall every other resampling mode
+        # avoids via `TruncatedMVNProposal`'s wrapping / aspire's declared
+        # `periodic_parameters`. Wrapping here lets a walker cross the seam
+        # freely instead of piling up against it.
+        periodic_mask = self._periodic_mask(parameter_names)
+        lower = estimator.prior_bounds_min
+        period = estimator.prior_bounds_max - lower
+
+        def wrap_periodic(x):
+            if not periodic_mask.any():
+                return x
+            x = np.array(x, dtype=float, copy=True)
+            x[:, periodic_mask] = lower[periodic_mask] + np.mod(
+                x[:, periodic_mask] - lower[periodic_mask], period[periodic_mask]
+            )
+            return x
+
+        # Real likelihood-evaluation count, for cost accounting comparable
+        # with the other resampling modes (see `_make_aspire_log_likelihood`,
+        # which counts the same way): only in-prior points are ever handed to
+        # the likelihood, so this is the work actually done, not nwalkers *
+        # nsteps.
+        n_likelihood_evaluations = [0]
+
+        def log_prob_batch(x_batch):
+            """Vectorised log-posterior for a batch of walker positions.
+
+            Out-of-prior-support points (including ``Constraint``
+            violations, via ``PriorDict.ln_prob``) get ``-inf`` and are never
+            handed to the likelihood, matching every other resampling mode.
+            Periodic parameters are wrapped into range first, so crossing
+            their boundary is not itself treated as leaving the prior.
+            """
+            x_batch = wrap_periodic(np.atleast_2d(np.asarray(x_batch, dtype=float)))
+            g_df = pd.DataFrame(x_batch, columns=parameter_names)
+            logpi = np.real(np.array(self.priors.ln_prob(g_df, axis=0)))
+            in_prior = ~np.isinf(logpi)
+            logl = np.full(len(g_df), -np.inf)
+            if in_prior.any():
+                logl[in_prior] = estimator.log_likelihood_from_array(x_batch[in_prior].T)
+                n_likelihood_evaluations[0] += int(in_prior.sum())
+            return logl + logpi
+
+        # vectorize=True hands log_prob_batch the whole set of walkers being
+        # moved at once (rather than one at a time), which is what lets it
+        # route through the estimator's pooled batch path exactly like every
+        # other resampling mode.
+        ensemble = emcee.EnsembleSampler(
+            nwalkers, ndim, log_prob_batch, vectorize=True, backend=backend, **emcee_kw
+        )
+
+        # --- Batched sampling, growing the chain until it has enough
+        # independent samples (or hits `max_nsteps`). ---
+        state = initial_theta
+        tau = np.full(ndim, np.nan)
+        tau_max, n_independent, reliable = np.nan, 0, False
+        tau_history = []
+        while True:
+            n_run = min(nsteps, max_nsteps - ensemble.iteration)
+            ensemble.run_mcmc(state, n_run, progress=True)
+            # `None` continues from the sampler's stored final state, so the
+            # next batch is a seamless continuation, not a restart.
+            state = None
+
+            tau, tau_max, n_independent, reliable = self._emcee_autocorr_status(
+                ensemble, discard, nwalkers, parameter_names, tol=autocorr_tol
+            )
+            # Kept for the diagnostic: how tau evolves with chain length is
+            # what distinguishes a converging chain (tau flattens) from a
+            # drifting one (tau grows with the chain, so the independent-sample
+            # count never improves however long the run).
+            tau_history.append((ensemble.iteration, np.array(tau, dtype=float)))
+            # The chain-length/tau ratio is the achieved reliability, quoted
+            # against the bar so a lowered `autocorr_tol` cannot hide how far
+            # short of emcee's own 50x the estimate actually is.
+            ratio = (ensemble.iteration - discard) / tau_max if np.isfinite(tau_max) and tau_max > 0 else np.nan
+            logger.info(
+                f"emcee at {ensemble.iteration}/{max_nsteps} steps: "
+                f"tau_max={tau_max:.1f}, chain/tau={ratio:.1f} (bar {autocorr_tol:g}), "
+                f"{n_independent}/{target_nsamples} independent samples"
+                f"{'' if reliable else ' (tau estimate not yet reliable)'}"
+            )
+            if reliable and n_independent >= target_nsamples:
+                break
+            if ensemble.iteration >= max_nsteps:
+                caveat = (
+                    ""
+                    if reliable
+                    else (
+                        ", and the autocorrelation estimate is still below its reliability bar, "
+                        "so both that count and the thinning below are uncertain"
+                    )
+                )
+                logger.warning(
+                    f"emcee stopped at max_nsteps={max_nsteps} with {n_independent} independent "
+                    f"samples against the {target_nsamples} requested{caveat}. "
+                    f"Raise max_nsteps, or reduce target_nsamples."
+                )
+                break
+
+        logger.info(
+            "Autocorrelation time per parameter: "
+            + ", ".join(f"{name}={t:.1f}" for name, t in zip(parameter_names, tau))
+        )
+
+        if thin_override is not None:
+            thin = max(1, int(thin_override))
+            logger.info(f"Using user-specified emcee thinning: thin={thin}")
+        elif not np.isfinite(tau_max):
+            thin = 1
+            logger.warning(
+                "Could not estimate the emcee autocorrelation time (non-finite for every "
+                "parameter); returning unthinned samples. Consider raising max_nsteps."
+            )
+        else:
+            thin = max(1, int(np.ceil(tau_max)))
+
+        chain = ensemble.get_chain(discard=discard, thin=thin, flat=True)
+        log_prob_flat = ensemble.get_log_prob(discard=discard, thin=thin, flat=True)
+
+        # emcee's stored chain holds the raw (possibly out-of-range) walker
+        # positions `log_prob_batch` wrapped only for evaluation; wrap the
+        # output too so returned periodic parameters sit in their canonical
+        # range, matching every other resampling mode.
+        chain = wrap_periodic(chain)
+        samples = pd.DataFrame(chain, columns=parameter_names)
+        # Recover log-likelihood alone (emcee only tracks the log-posterior)
+        # by subtracting the log-prior back off; cheap relative to the
+        # likelihood and avoids a second round of likelihood evaluations.
+        logpi = np.real(np.array(self.priors.ln_prob(samples, axis=0)))
+        logl = log_prob_flat - logpi
+
+        nlikelihood = int(n_likelihood_evaluations[0])
+        efficiency = 100.0 * len(samples) / nlikelihood if nlikelihood else np.nan
+        logger.info(
+            f"emcee complete: {len(samples)} samples kept (thin={thin}) from {nlikelihood} "
+            f"likelihood evaluations ({efficiency:.3f}% effective); mean acceptance fraction "
+            f"{100.0 * float(np.mean(ensemble.acceptance_fraction)):.1f}%"
+        )
+
+        if self.kwargs["plot_diagnostic"]:
+            try:
+                self.create_emcee_diagnostic(samples, ensemble, discard, thin, tau_history, autocorr_tol)
+            except Exception as exc:  # a diagnostic must never crash a completed run
+                logger.warning(f"Failed to create emcee diagnostic plot: {exc}")
+
+        return samples, logl, samples, efficiency, nlikelihood
 
     @staticmethod
     def _make_aspire_log_likelihood(estimator, counter):
@@ -3736,3 +4141,198 @@ class Laplace(Sampler):
         # so the files already reflect the final state.
 
         return fig
+
+    # Walker traces plotted per row are capped at this many, chosen once
+    # (the first N of the exchangeable ensemble, no need for a random pick)
+    # rather than all of them: a full nwalkers=1000 ensemble would draw a
+    # million-plus line segments per row and make the figure both slow to
+    # render and unreadable.
+    _EMCEE_TRACE_MAX_WALKERS = 200
+
+    def _plot_emcee_tau_row(self, axes_pair, tau_history, parameter_names, discard, tol):
+        """Autocorrelation time against chain length (left) and its final
+        per-parameter values (right); see :meth:`create_emcee_diagnostic`.
+
+        The worst-mixing parameter is highlighted because it alone sets the
+        thinning and the independent-sample count -- the chain is only as
+        mixed as its slowest coordinate.
+        """
+        ax_left, ax_right = axes_pair
+        steps = np.array([h[0] for h in tau_history], dtype=float)
+        taus = np.vstack([h[1] for h in tau_history])  # (n_checks, ndim)
+
+        final_tau = taus[-1]
+        worst = int(np.nanargmax(final_tau)) if np.any(np.isfinite(final_tau)) else 0
+
+        for i, name in enumerate(parameter_names):
+            if i == worst:
+                continue
+            ax_left.plot(steps, taus[:, i], color="0.75", lw=0.8, zorder=2)
+        ax_left.plot(steps, taus[:, worst], color="C3", lw=1.6, zorder=3, label=self._label_for(parameter_names[worst]))
+        # Reliability frontier: the estimate is only trustworthy where the
+        # post-burn-in chain is `_EMCEE_AUTOCORR_RELIABLE_FACTOR` tau long,
+        # i.e. where a tau curve sits *below* this line. A converging chain's
+        # tau flattens and the frontier overtakes it; a drifting chain's tau
+        # climbs alongside it and they never cross.
+        frontier = np.maximum(steps - discard, 0.0) / tol
+        ax_left.plot(steps, frontier, color="k", ls="--", lw=1.2, zorder=4, label=f"reliability bar ({tol:g}x)")
+        ax_left.set_yscale("log")
+        ax_left.set_ylabel("autocorr. time")
+        ax_left.set_xlabel("Step")
+        ax_left.legend(fontsize="x-small", loc="upper left")
+
+        order = np.argsort(final_tau)
+        ax_right.barh(
+            np.arange(len(order)),
+            final_tau[order],
+            color=["C3" if i == worst else "0.75" for i in order],
+        )
+        ax_right.set_yticks(np.arange(len(order)))
+        ax_right.set_yticklabels([self._label_for(parameter_names[i]) for i in order], fontsize="xx-small")
+        ax_right.set_xlabel("final autocorr. time")
+
+    def create_emcee_diagnostic(self, samples, ensemble, discard, thin, tau_history=None, autocorr_tol=None):
+        """Trace of the emcee ensemble (left) and the final independent
+        posterior (right), one row per parameter plus log-likelihood/log-prior.
+
+        Loosely modelled on :meth:`_save_smc_evolution_marginals_figure`: the
+        same left/right, one-row-per-parameter(+log-likelihood/log-prior)
+        layout, with the SMC version's per-iteration weighted scatter and
+        quantile machinery replaced by a plain per-step walker trace -- there
+        are no SMC-style particle weights or annealing iterations here, just
+        one un-tempered chain per walker.
+
+        *samples* is the final (burn-in-discarded, thinned) DataFrame
+        :meth:`_run_emcee` is about to return -- exactly what the right-hand
+        marginals are histograms of. *ensemble* is the ``emcee.EnsembleSampler``
+        that produced it, from which the left-hand trace is drawn thinned by
+        the same *thin* used for ``samples`` -- both so the two panels are on
+        a comparable footing, and because the raw (unthinned) trace is mostly
+        redundant, highly-correlated ink that is slow to render at any
+        realistic ``nwalkers``. *discard* marks the burn-in cutoff on the trace.
+
+        *tau_history*, when given, is the ``[(step, tau_vector), ...]`` record
+        :meth:`_run_emcee` accumulates across its batches, and adds a final
+        row tracking the autocorrelation estimate against chain length. That
+        row is the one that says whether the run is converging at all: a
+        chain that is mixing has tau flatten while the reliability frontier
+        (``(step - discard) / 50``, drawn dashed) climbs past it, whereas a
+        drifting chain has tau grow roughly in step with the chain, so the
+        two never cross and the independent-sample count stops improving.
+        """
+        import matplotlib.pyplot as plt
+
+        parameter_names = list(samples.columns)
+        ndim = len(parameter_names)
+
+        # Periodic parameters are wrapped for the same reason `log_prob_batch`
+        # wraps them: emcee's raw chain can wander outside a periodic
+        # parameter's canonical range, and plotting that raw drift would
+        # obscure the actual (wrapped) trajectory with a spurious trend.
+        lower = np.array([self.priors[name].minimum for name in parameter_names])
+        upper = np.array([self.priors[name].maximum for name in parameter_names])
+        periodic_mask = self._periodic_mask(parameter_names)
+        period = upper - lower
+
+        def wrap(x):
+            if not periodic_mask.any():
+                return x
+            x = np.array(x, dtype=float, copy=True)
+            x[..., periodic_mask] = lower[periodic_mask] + np.mod(
+                x[..., periodic_mask] - lower[periodic_mask], period[periodic_mask]
+            )
+            return x
+
+        # Thin the trace itself by the same `thin` used for `samples` -- not
+        # just for consistency, but because plotting every one of nsteps *
+        # nwalkers raw points (correlated at the same timescale `thin`
+        # corrects for) is both slow to render and mostly redundant ink.
+        total_steps = ensemble.iteration
+        chain = wrap(ensemble.get_chain(thin=thin))  # (n_thinned, nwalkers, ndim)
+        log_prob = ensemble.get_log_prob(thin=thin)  # (n_thinned, nwalkers)
+        n_thinned, nwalkers, _ = chain.shape
+        # Actual step indices of the thinned points (matches emcee's own
+        # `chain[thin-1::thin]` slicing), so the x-axis and the `discard`
+        # cutoff below stay in real step units regardless of `thin`.
+        step = np.arange(thin - 1, total_steps, thin)
+        n_shown = min(nwalkers, self._EMCEE_TRACE_MAX_WALKERS)
+
+        # Decompose the full trace's log-posterior into likelihood + prior,
+        # matching SMC's two extra rows. Prior evaluation is cheap (no
+        # likelihood calls), so this costs nothing next to the sampling itself.
+        flat_for_prior = pd.DataFrame(chain.reshape(-1, ndim), columns=parameter_names)
+        logpi_full = np.real(np.array(self.priors.ln_prob(flat_for_prior, axis=0))).reshape(n_thinned, nwalkers)
+        logl_full = log_prob - logpi_full
+
+        show_tau = bool(tau_history)
+        n_rows = ndim + 2 + (1 if show_tau else 0)
+        fig, axs = plt.subplots(
+            n_rows,
+            2,
+            figsize=(11, 2.0 * n_rows),
+            gridspec_kw={"width_ratios": [3, 1.5]},
+            squeeze=False,
+        )
+        for r in range(1, n_rows):
+            axs[r, 0].sharex(axs[0, 0])
+
+        def _plot_row(row_idx, trace, final_vals, label, is_last, true_val=None):
+            ax_left = axs[row_idx, 0]
+            ax_left.axvspan(0, discard, color="lightgray", alpha=0.4, zorder=0)
+            # Markers, not connected lines: adjacent *plotted* points are
+            # `thin` real steps apart, so a line between them would draw a
+            # trajectory the walker never actually took. A 2-D y-array plots
+            # one marker series per column in a single call -- far cheaper
+            # than looping over `n_shown` individual plot() calls.
+            ax_left.plot(step, trace[:, :n_shown], color="C0", alpha=0.15, marker=".", markersize=2, linestyle="none")
+            if true_val is not None:
+                ax_left.axhline(true_val, color="k", ls="--", lw=1.0, zorder=2)
+            ax_left.set_ylabel(label)
+            if is_last:
+                ax_left.set_xlabel("Step")
+            else:
+                ax_left.tick_params(labelbottom=False)
+
+            ax_right = axs[row_idx, 1]
+            ax_right.hist(final_vals, bins=40, density=True, color="C0", alpha=0.75, edgecolor="none")
+            ax_right.set_yticks([])
+            if is_last:
+                ax_right.set_xlabel(label)
+            else:
+                ax_right.tick_params(labelbottom=False)
+
+        for i, name in enumerate(parameter_names):
+            true_val = self.injection_parameters.get(name) if self.injection_parameters else None
+            _plot_row(
+                i,
+                chain[:, :, i],
+                samples[name].values,
+                self._label_for(name),
+                is_last=False,
+                true_val=true_val,
+            )
+
+        # Same (discard, thin) `_run_emcee` used to build `samples`, so this
+        # reproduces its exact log-likelihood/log-prior rather than
+        # recomputing anything from scratch.
+        final_logpi = np.real(np.array(self.priors.ln_prob(samples, axis=0)))
+        final_logpost = ensemble.get_log_prob(discard=discard, thin=thin, flat=True)
+        final_logl = final_logpost - final_logpi
+
+        _plot_row(ndim, logl_full, final_logl, "log likelihood", is_last=False)
+        _plot_row(ndim + 1, logpi_full, final_logpi, "log prior", is_last=not show_tau)
+
+        if show_tau:
+            self._plot_emcee_tau_row(
+                axs[n_rows - 1], tau_history, parameter_names, discard,
+                self._EMCEE_AUTOCORR_RELIABLE_FACTOR if autocorr_tol is None else autocorr_tol,
+            )
+
+        fig.suptitle("emcee walker trace and final posterior")
+        fig.tight_layout(rect=[0, 0, 1, 0.99])
+        safe_save_figure(
+            fig=fig,
+            filename=f"{self.outdir}/{self.label}_diagnostic_emcee_evolution.png",
+            dpi=150,
+        )
+        plt.close(fig)
