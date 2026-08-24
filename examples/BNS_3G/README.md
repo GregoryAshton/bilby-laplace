@@ -1,6 +1,6 @@
 # BNS_3G — sampler comparison
 
-Posteriors from 4 samplers (`rb-aspire`, `rb-dynesty`, `rb-inprior`, `rb-smc`) on the BNS_3G example, each compared against the `rb-dynesty` reference.
+Posteriors from 5 samplers (`rb-aspire`, `rb-dynesty`, `rb-emcee`, `rb-inprior`, `rb-smc`) on the BNS_3G example, each compared against the `rb-dynesty` reference.
 
 ## Running it
 
@@ -25,6 +25,7 @@ Both agreement columns compare each 1-D marginal with `rb-dynesty` at a fixed 20
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `rb-aspire` | -181182.38 | 0.08 | 18.9 | 0.053% | 5.7m | 1.68 | chi_1 (2.63) | 0.05 | mass_ratio (0.08) | `nsamples=2500, nsteps=300` |
 | `rb-dynesty` | -181182.19 | 0.22 | 42.9 | 0.016% | 25.8m | — | — | — | — | `nlive=1000` |
-| `rb-inprior` | — | — | 0.005 | 99.4% | 23.2s | 128.95 | lambda_1 (375.03) | 1.04 | lambda_1 (3.66) | — |
-| `rb-smc` | -181182.70 | 0.06 | 10.5 | 0.095% | 4.2m | 1.73 | mass_ratio (2.95) | 0.04 | psi (0.06) | `nsamples=2500, nsteps=300` |
+| `rb-emcee` | — | — | 8.48 | 0.024% | 59.6m | 4.53 | chi_1 (10.69) | 0.10 | chi_1 (0.17) | — |
+| `rb-inprior` | — | — | 0.005 | 99.4% | 23.2s | 132.87 | lambda_1 (381.13) | 1.06 | lambda_1 (3.64) | — |
+| `rb-smc` | -181182.70 | 0.06 | 10.5 | 0.095% | 4.2m | 1.62 | chirp_mass (2.98) | 0.04 | chirp_mass (0.06) | `nsamples=2500, nsteps=300` |
 

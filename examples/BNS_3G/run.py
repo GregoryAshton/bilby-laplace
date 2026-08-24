@@ -7,7 +7,7 @@ Supports two likelihood types: std (standard) and rb (relative binning).
 
 Usage
 -----
-    python run.py --likelihood rb --sampler laplace rejection smc smc-direct dynesty
+    python run.py --likelihood rb --sampler laplace rejection smc smc-direct emcee dynesty
     python run.py --likelihood rb --compare
     python run.py --compare
 """
@@ -51,6 +51,47 @@ N_SAMPLES = 2500
 N_FINAL_SAMPLES = 10000
 TARGET_EFFICIENCY = (0.5, 0.8)
 TARGET_EFFICIENCY_RATE = 0.5
+
+# emcee's ensemble steps are a different quantity from N_STEPS above (aspire's
+# per-temperature mutation-chain length): there is no annealing schedule here,
+# so the whole posterior has to be reached by one un-tempered random walk.
+#
+# The run length is not fixed: the sampler grows the chain in N_EMCEE_STEPS
+# batches, re-estimating the autocorrelation time after each, and stops once
+# it holds `target_nsamples` independent samples. So these are a batch size
+# and a ceiling, not a prescription.
+#
+# The three settings below are tied together by one relation: an
+# autocorrelation estimate is trustworthy once the chain spans
+# `autocorr_tol` tau, and at that point the run holds
+# `autocorr_tol * nwalkers` independent samples. Picking them so the
+# reliability bar and the sample target coincide is the cheapest place to sit
+# -- `N_EMCEE_TARGET / N_EMCEE_WALKERS == N_EMCEE_AUTOCORR_TOL`, i.e.
+# 2000 / 100 = 20 here. Fixed-length runs at 500-1000 walkers had to
+# overshoot to 25000+ samples to clear the same bar. Fewer walkers is not
+# free either: each half-ensemble move evaluates nwalkers / 2 points, so 100
+# walkers is 50 per batch against npool=64.
+#
+# tol=20 rather than emcee's default 50 is a deliberate, measured compromise.
+# mass_ratio's tau on this posterior is ~3500 and its *estimate is still
+# rising with chain length* (1300 at 15k steps, 2330 at 30k, 3540 at 60k), so
+# the true value is a lower bound and clearing a 50x bar would need ~6.5e6
+# steps, about 40 hours. At 20x it needs ~1.3e5 steps, under an hour. The
+# price is a tau biased low, so "2000 independent samples" is optimistic and
+# the returned draws are mildly correlated; the marginals are still usable
+# for the JSD/EMD comparison, which is what this example is for. The achieved
+# chain/tau ratio is logged every batch, and the sampler warns that the bar
+# is below emcee's own, so the weaker guarantee stays on the record. Verified
+# stationary (not burn-in): tau on length-matched halves of a 60000-step
+# chain was 2327 vs 2357 for mass_ratio, with block means flat.
+N_EMCEE_WALKERS = 100
+N_EMCEE_TARGET = 2000
+N_EMCEE_AUTOCORR_TOL = 20
+N_EMCEE_STEPS = 1000
+# Ceiling, not a prescription: the loop stops as soon as the bar clears,
+# expected near 1.3e5 steps. The headroom covers the extrapolation's slop.
+N_EMCEE_MAX_STEPS = 250000
+N_EMCEE_DISCARD = 500
 
 
 def setup(likelihood_type="rb"):
@@ -340,6 +381,31 @@ def run_rejection(_common_laplace, run_prefix):
     )
 
 
+def run_emcee(_common_laplace, run_prefix):
+    return bilby.run_sampler(
+        **_common_laplace,
+        label=f"{run_prefix}-emcee",
+        resample="emcee",
+        emcee_kwargs=dict(
+            nwalkers=N_EMCEE_WALKERS,
+            nsteps=N_EMCEE_STEPS,
+            max_nsteps=N_EMCEE_MAX_STEPS,
+            discard=N_EMCEE_DISCARD,
+            # Overrides the sampler-wide target_nsamples=5000: 5000 is out of
+            # reach here at any practical run length (see the note above).
+            target_nsamples=N_EMCEE_TARGET,
+            autocorr_tol=N_EMCEE_AUTOCORR_TOL,
+            # `backend_file=True` persists the raw chain (~0.9 GB here) for
+            # analysis the run itself cannot do. Left off now that the
+            # question it was added for is settled: re-estimating tau on
+            # length-matched halves of a 60000-step chain gave 2327 vs 2357
+            # for mass_ratio (ratio 1.01), with block means flat, so the chain
+            # is stationary and tau is not inflated by leftover burn-in. Turn
+            # it back on to redo that kind of sub-range analysis.
+        ),
+    )
+
+
 def run_smc(_common_laplace, run_prefix):
     return bilby.run_sampler(
         **_common_laplace,
@@ -487,11 +553,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sampler",
         nargs="+",
-        choices=["laplace", "rejection", "smc", "smc-direct", "dynesty"],
+        choices=["laplace", "rejection", "smc", "smc-direct", "emcee", "dynesty"],
         metavar="SAMPLER",
         help=(
             "One or more samplers to run: laplace, rejection, smc, smc-direct"
-            " (SMC straight from the prior, no Laplace stage), dynesty"
+            " (SMC straight from the prior, no Laplace stage), emcee, dynesty"
         ),
     )
     parser.add_argument(
@@ -527,6 +593,7 @@ if __name__ == "__main__":
                 "rejection": lambda: run_rejection(_common_laplace, _run_prefix),
                 "smc": lambda: run_smc(_common_laplace, _run_prefix),
                 "smc-direct": lambda: run_smc_direct(_common, _run_prefix),
+                "emcee": lambda: run_emcee(_common_laplace, _run_prefix),
                 "dynesty": lambda: run_dynesty(_common, _run_prefix),
             }
 

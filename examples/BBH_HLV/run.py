@@ -222,7 +222,7 @@ def setup():
         target_nsamples=5000,
         use_unit_cube=True,
         fisher_method="waveform",
-        npool=16,
+        npool=64,
     )
 
     return _common, _common_laplace
@@ -306,7 +306,7 @@ def run_smc_direct(_common):
         ),
         label=f"{base_label}_aspire",
         enable_checkpointing=False,
-        npool=16,
+        npool=64,
     )
 
 
@@ -321,7 +321,7 @@ def run_dynesty(_common):
         maxmcmc=5000,
         check_point_delta_t=1800,
         check_point_plot=True,
-        npool=16,
+        npool=64,
         clean=False,
         resume=True,
     )
