@@ -15,21 +15,15 @@ from scipy.optimize import OptimizeResult, differential_evolution, minimize
 #     std(population energies) <= atol + tol * |mean(population energies)|
 #
 # and its defaults are ``atol=0, tol=0.01`` -- a purely *relative* criterion.
-# That is fine for an objective of order unity and wrong for this one: an
-# unnormalised log-posterior carries the noise evidence, ~1.8e5 nats on a 3G
-# BNS and ~1.2e4 on a BBH, and that offset is arbitrary. The default therefore
-# stops once the population spans ~1% of it -- ~1800 nats on the BNS.
+# That is fine for an objective of order unity but wrong here: an unnormalised
+# log-posterior carries the (arbitrary) noise evidence as an additive offset,
+# so a relative criterion stops once the population spread is a fixed
+# fraction of that offset rather than of the actual posterior structure --
+# which can trigger convergence after a single generation, well short of the
+# true MAP.
 #
-# Measured on the BNS P--P injections, that meant DE returned after **one
-# iteration** (366 evaluations), 69 to 4700 nats short of the optimum. Every one
-# of 200 injections had its "MAP" beaten by a polished candidate from the
-# secondary-mode search, which is what exposed this: the mode search was
-# quietly repairing a failed optimisation rather than finding degeneracies.
-#
-# So the criterion has to be absolute: stop when the population's log-posterior
-# spread is below a nat. On those injections that costs 46-76k evaluations
-# against 366 and lands within ~1 nat of a 10x longer run -- 0.5% of a single
-# SMC run, and the difference between a MAP and a good prior draw.
+# The criterion therefore has to be absolute: stop only once the population's
+# log-posterior spread itself is below a nat, independent of the offset.
 DE_ATOL = 1.0
 
 
@@ -50,8 +44,8 @@ def _pool_log_likelihood(param_keys, fixed_parameters, x_col):
     ``log_likelihood_from_array`` screens the whole batch -- box *and*
     constraints -- before dispatch, so every column that arrives is already in
     support.  That is both cheaper (one vectorised test per batch instead of
-    one scalar test per task, and no bounds arrays shipped per task) and
-    stricter than the per-worker box test this used to duplicate.
+    one scalar test per task) and stricter than a per-worker box test would be
+    (it also covers ``Constraint`` priors, not just parameter bounds).
     """
     from bilby.core.sampler.base_sampler import _sampling_convenience_dump
 
@@ -436,15 +430,6 @@ class LaplacePosteriorEstimator:
             result[i] = 1.0 / p
         return result
 
-    def log_likelihood_in_unit_cube(self, u_array):
-        """L̃(u) = L(θ(u)); same shape contract as log_likelihood_from_array."""
-
-        def wrapped(u):
-            x = self._from_unit_cube(u)
-            return self.log_likelihood(array_to_dict(self.parameter_names, x))
-
-        return np.apply_along_axis(wrapped, 0, u_array)
-
     def log_posterior_in_unit_cube(self, u_array):
         """log p(θ(u)|d) = log L(θ(u)) + log π(θ(u)); in unit-cube coords."""
 
@@ -534,11 +519,10 @@ class LaplacePosteriorEstimator:
         """Per-parameter prior standard deviation, estimated from draws.
 
         Cached: depends only on the priors, not on where the precision is
-        evaluated.  Evaluated rather than assumed, because the obvious closed form
-        -- ``width / sqrt(12)``, the std of a *uniform* prior -- is wrong for
-        every non-uniform prior, and this scale is exactly what sets the width
-        of a direction the data does not constrain.  A ``Sine`` prior is
-        overstated by 32% and an ``AlignedSpin`` by 73%.
+        evaluated.  Evaluated rather than assumed, because the obvious closed
+        form -- ``width / sqrt(12)``, the std of a *uniform* prior -- is wrong
+        for every non-uniform prior, and this scale is exactly what sets the
+        width of a direction the data does not constrain.
 
         Diagonal only: the estimator does not retain the full ``PriorDict``, so
         correlations a constraint prior would induce are not captured.  Any
@@ -571,11 +555,9 @@ class LaplacePosteriorEstimator:
         """Bound the parameter-space precision below by the prior precision.
 
         The waveform Fisher (unlike the unit-cube Hessian) is not automatically
-        prior-bounded, so a direction the data leaves unconstrained -- e.g. the
+        prior-bounded, so a direction the data leaves unconstrained -- e.g. a
         polarisation angle under phase marginalisation, whose Schur complement
         can be near-singular -- would otherwise invert to a runaway variance.
-        On the precessing BBH example the raw Fisher gives tilt_2 a marginal
-        sigma of 12 rad, larger than its entire prior range.
 
         Rescaling by the prior standard deviation maps the prior precision to
         the identity, so in those units "no wider than the prior" is
@@ -589,25 +571,16 @@ class LaplacePosteriorEstimator:
         prior width is non-finite (an unbounded prior cannot bound the
         posterior).
 
-        This replaces flooring the rescaled *eigenvalues* at 1.  That version
-        only ever added precision, and adding precision anywhere can only
-        decrease every marginal variance, so it was a one-way narrowing
-        operation: its docstring's claim that no marginal variance exceeds the
-        prior described a bound on conditional variance along eigendirections,
-        not on the marginals it actually moved.  It rescued parameters that
-        started too wide but narrowed ones that did not -- ``phi_jl`` sat at
-        1.01x dynesty in the raw Fisher and the floor took it to 0.53x -- and
-        on the delta_phase BBH it left ``tilt_1``'s proposal at 0.69x, which
-        the SMC then had to spend its mixing budget undoing.  Capping the
-        marginals leaves already-narrow directions alone by construction while
-        still killing the runaway the bound exists for (``tilt_2`` at
-        sigma = 12 rad on the raw Fisher).
+        The bound is applied to the marginals rather than to the rescaled
+        *eigenvalues*: flooring eigenvalues only ever adds precision, which can
+        only shrink every marginal variance, so it narrows already-narrow
+        directions along with the runaway ones instead of leaving them alone.
+        Capping the marginals directly leaves already-narrow directions
+        untouched by construction while still killing the runaway.
 
         The scale comes from ``_prior_standard_deviations`` rather than the
-        uniform-prior ``width / sqrt(12)``: that form is exact for 9 of the 13
-        parameters of the precessing BBH example but overstates every ``Sine``
-        prior by 32%, which inflated tilt_2 to 1.33x dynesty's width where the
-        sampled scale gives 1.04x.
+        uniform-prior ``width / sqrt(12)``, which is wrong for any non-uniform
+        prior (see that method).
         """
         precision = 0.5 * (precision + precision.T)
         widths = np.array([self.prior_width_dict[k] for k in self.parameter_names])
@@ -717,17 +690,15 @@ class LaplacePosteriorEstimator:
             d2 = (lp_plus - 2.0 * lp + lp_minus) / h**2
             value = -d2 if np.isfinite(d2) else 0.0
             # Bound the contribution.  Evaluated pointwise this curvature is
-            # unbounded in *both* directions and both bites in practice.  It
-            # diverges at a cusp in the prior density: an ``AlignedSpin`` prior
-            # diverges logarithmically at chi = 0, the MAP of a log-posterior is
-            # pulled onto that cusp, and differencing it there returns ~1.5e7 --
-            # collapsing that parameter's width by a factor of ~800 with the
-            # likelihood Fisher contributing nothing.  And it goes negative
-            # wherever log pi is locally convex (the flank of that same cusp
-            # gives ~-70), which subtracts information and pushes the precision
-            # matrix towards indefiniteness.  A one-dimensional prior can supply
-            # neither more information than its own inverse variance nor less
-            # than none, so clamp to that range.
+            # unbounded in both directions: it diverges wherever the prior
+            # density has a cusp (e.g. a log-divergent density at a boundary),
+            # which can collapse that parameter's estimated width to near zero
+            # even with no likelihood information; it can also go negative
+            # wherever log pi is locally convex, which subtracts information
+            # and pushes the precision matrix towards indefiniteness.  A
+            # one-dimensional prior can supply neither more information than
+            # its own inverse variance nor less than none, so clamp to that
+            # range.
             precision[i] = float(np.clip(value, 0.0, self._prior_precision_cap(key, prior)))
         return precision
 
@@ -902,21 +873,13 @@ class LaplacePosteriorEstimator:
     #
     # This is a numerical guard, not a statistical bound. The statistical bound
     # -- no direction wider than the prior -- is `_floor_precision_at_prior`,
-    # and at the previous 1e-10 this floor was tighter than that on both GW
-    # examples and silently overrode it: preconditioned condition numbers are
-    # 8.6e12 on the BNS and 5.4e11 on the BBH, so a cap at 1e10 bit by factors
-    # of 860 and 54. The cost was borne by exactly the parameters the data does
-    # not constrain, which the prior bound had correctly set to prior width:
-    # lambda_1 was squeezed from 6.1x dynesty's width to 0.21x, and on the BBH
-    # a_2 from 1.1x to 0.55x. That is what `prior_parameters` used to work
-    # around by drawing lambda_1, lambda_2 and psi from the prior directly.
-    #
-    # At 1e-14 the guard is inert on both examples and fires only on genuinely
-    # zero or negative eigenvalues. The price is real: inverting at a condition
-    # number of ~1e13 leaves roughly three of the sixteen digits double
-    # precision carries. That is acceptable only because the preconditioning
-    # above has already removed the units spread (4.1e17 -> 8.6e12 on the BNS)
-    # and because the prior bound constrains the result.
+    # and this floor must stay looser than that one: if it fires first on a
+    # poorly-constrained direction, it silently overrides the prior bound
+    # instead of leaving that direction to it, understating the true width of
+    # exactly the parameters the data does not constrain. Set low enough that
+    # it fires only on genuinely zero or negative eigenvalues, relying on the
+    # diagonal preconditioning above to have already removed most of the
+    # parameter-scale-driven ill-conditioning.
     COVARIANCE_REL_FLOOR = 1e-14
 
     def calculate_posterior_covariance(self, sample):
@@ -1037,7 +1000,8 @@ class LaplacePosteriorEstimator:
         )
 
     def get_maximum_likelihood_sample(self, initial_sample=None):
-        """Deprecated alias for :meth:`get_MAP_sample`."""
+        """Alias for :meth:`get_MAP_sample`, used internally by
+        :meth:`sample_array` for ``sample='maxL'``."""
         return self.get_MAP_sample(initial_sample)
 
     def get_MAP_sample(self, initial_sample=None):
@@ -1049,9 +1013,9 @@ class LaplacePosteriorEstimator:
         is run from that starting point.
 
         When ``minimization_method`` is not ``'differential_evolution'`` and no
-        ``initial_sample`` is given, the legacy multi-start Nelder-Mead strategy
-        is used: ``n_prior_samples`` random prior draws are each used as starting
-        points for a local optimizer and the best result is returned.
+        ``initial_sample`` is given, a multi-start local-optimizer strategy is
+        used instead: ``n_prior_samples`` random prior draws are each used as
+        starting points for a local optimizer and the best result is returned.
         """
         if initial_sample:
             logger.info("Finding MAP from initial parameters")
