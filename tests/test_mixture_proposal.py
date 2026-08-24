@@ -225,12 +225,10 @@ def test_every_resampling_path_is_handed_the_same_proposal(
     """The invariant, enforced end to end through ``run_sampler``.
 
     Given the same inputs, ``resample`` must change only what is *done* with
-    the proposal, never how it is built. This has now been violated twice --
-    the mode search was written inside the SMC branch when it was introduced
-    (5b63551), and the 2026-08-05 fix that wired the mixture into aspire's
-    initial cloud (b91bd6b) wired it into aspire *only*, leaving inprior,
-    rejection and importance on the primary Gaussian. Both times the symptom
-    was silent: the kwargs said ``n_modes=3`` and the run did something else.
+    the proposal, never how it is built. This has been violated before by
+    writing the mode search inside a single resampling branch (e.g. only
+    inside SMC's), which silently leaves every other ``resample`` value on the
+    primary Gaussian even though the kwargs asked for a mixture.
 
     So this test does not inspect ``_build_proposal``; it captures the proposal
     object each path actually receives and demands they agree.
@@ -254,10 +252,11 @@ def test_every_resampling_path_is_handed_the_same_proposal(
     monkeypatch.setattr(_Laplace, "_run_rejection_sampling", _capture("rejection", 6))
     monkeypatch.setattr(_Laplace, "_run_importance_sampling", _capture("importance", 6))
     monkeypatch.setattr(_Laplace, "_run_smc", _capture("smc", 7))
+    monkeypatch.setattr(_Laplace, "_run_emcee", _capture("emcee", 5))
     modes = [(m, COV, -float(i)) for i, m in enumerate(MODE_MEANS)]
     monkeypatch.setattr(_Laplace, "_find_multiple_maps", lambda *a, **k: list(modes))
 
-    for resample in ("inprior", "rejection", "importance", "smc"):
+    for resample in ("inprior", "rejection", "importance", "smc", "emcee"):
         sampler = _Laplace(
             likelihood=gaussian_likelihood,
             priors=gaussian_priors,
@@ -271,7 +270,7 @@ def test_every_resampling_path_is_handed_the_same_proposal(
         )
         sampler.run_sampler()
 
-    assert set(seen) == {"inprior", "rejection", "importance", "smc"}
+    assert set(seen) == {"inprior", "rejection", "importance", "smc", "emcee"}
     reference = seen["inprior"]
     # "All four agree" is necessary but not sufficient: under the old code they
     # agreed on the *single* primary Gaussian, and SMC built its mixture

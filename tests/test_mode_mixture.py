@@ -174,10 +174,15 @@ def test_too_few_samples_for_the_modes_is_an_error():
 # --------------------------------------------------------------------------
 
 
-def test_unknown_mode_weights_is_rejected(sampler):
+def test_unknown_mode_weights_is_rejected(sampler, estimator, monkeypatch):
+    monkeypatch.setattr(
+        Laplace, "_find_multiple_maps", lambda *a, **k: [(MEANS[0], TIGHT, 10.0), (MEANS[1], TIGHT, 10.0)]
+    )
+    sampler.kwargs["n_modes"] = 2
     sampler.kwargs["mode_weights"] = "bogus"
 
-    assert sampler.kwargs["mode_weights"] not in ("equal", "laplace")
+    with pytest.raises(SamplerError, match="mode_weights must be"):
+        sampler._build_proposal(estimator, MEANS[0], TIGHT, 1)
 
 
 def test_mode_search_subspace_defaults_to_none(sampler):
