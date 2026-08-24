@@ -105,9 +105,7 @@ def test_figures_are_written_once_at_the_end(sampler, monkeypatch):
     """The end-of-run render must fire even though the callback never plots."""
     calls = []
     monkeypatch.setattr(sampler, "_save_smc_stats_figure", lambda h: calls.append("stats"))
-    monkeypatch.setattr(
-        sampler, "_save_smc_evolution_marginals_figure", lambda h, s: calls.append("evolution")
-    )
+    monkeypatch.setattr(sampler, "_save_smc_evolution_marginals_figure", lambda h, s: calls.append("evolution"))
     sampler.kwargs["plot_diagnostic"] = True
 
     class _History:
@@ -133,6 +131,7 @@ def test_missing_history_is_not_an_error(sampler):
 
 def test_a_failed_figure_does_not_lose_the_run(sampler, monkeypatch, caplog):
     """Plotting is best-effort: a completed run must survive a broken figure."""
+
     def _boom(*args, **kwargs):
         raise RuntimeError("matplotlib exploded")
 

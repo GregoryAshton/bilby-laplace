@@ -16,7 +16,6 @@ round-trip where the bug lived.
 import bilby
 import numpy as np
 import pytest
-
 from conftest import MU, PRIOR_MAX, PRIOR_MIN, TRUE_COV, CorrelatedGaussianLikelihood
 
 # A big, distinctive noise evidence: large enough that an omitted or doubled

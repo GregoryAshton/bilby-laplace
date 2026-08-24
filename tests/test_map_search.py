@@ -77,9 +77,7 @@ def test_the_offset_does_not_change_where_the_search_lands(offset_priors):
     with_offset = _estimator(_OffsetGaussianLikelihood(offset=OFFSET), offset_priors).get_MAP_sample()
     without = _estimator(_OffsetGaussianLikelihood(offset=0.0), offset_priors).get_MAP_sample()
 
-    np.testing.assert_allclose(
-        [with_offset["x"], with_offset["y"]], [without["x"], without["y"]], atol=1e-3
-    )
+    np.testing.assert_allclose([with_offset["x"], with_offset["y"]], [without["x"], without["y"]], atol=1e-3)
 
 
 @pytest.fixture

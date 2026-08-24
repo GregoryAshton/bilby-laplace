@@ -28,4 +28,3 @@ Both agreement columns compare each 1-D marginal with `antiglitch_dynesty` at a 
 | `antiglitch_inprior` | — | — | 0.002 | 100.0% | 3.3s | 1.11 | A (1.29) | 0.03 | log_gamma (0.04) | — |
 | `antiglitch_rejection` | -1989.59 | 0.00 | 0.05 | 4.5% | 16.8s | 1.20 | A (1.35) | 0.04 | log_gamma (0.06) | — |
 | `antiglitch_smc` | -1989.55 | 0.02 | 0.018 | 11.1% | 16.6s | 1.07 | A (1.39) | 0.04 | A (0.06) | `nsamples=2000, nsteps=5` |
-

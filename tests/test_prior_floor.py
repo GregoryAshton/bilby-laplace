@@ -137,10 +137,9 @@ def test_uniform_scale_is_exact(gaussian_likelihood):
 
 def test_scale_is_deterministic(gaussian_likelihood):
     """Two estimators built from the same priors must agree exactly."""
+
     def build():
-        return LaplacePosteriorEstimator(
-            gaussian_likelihood, PriorDict(dict(x=Sine(name="x"), y=Uniform(-5, 5, "y")))
-        )
+        return LaplacePosteriorEstimator(gaussian_likelihood, PriorDict(dict(x=Sine(name="x"), y=Uniform(-5, 5, "y"))))
 
     bilby.core.utils.random.seed(1)
     a = build()._prior_standard_deviations()

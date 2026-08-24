@@ -27,4 +27,3 @@ Both agreement columns compare each 1-D marginal with `hlv_dynesty` at a fixed 2
 | `hlv_dynesty` | -12118.37 | 0.19 | 44.6 | 0.016% | 1.6h | — | — | — | — | `nlive=1000` |
 | `hlv_inprior` | — | — | 0.005 | 100.0% | 21.1s | 93.86 | delta_phase (416.48) | 0.42 | mass_ratio (0.81) | — |
 | `hlv_smc` | -12118.43 | 0.03 | 29.2 | 0.034% | 52.0m | 4.59 | chirp_mass (12.65) | 0.10 | a_1 (0.19) | `nsamples=10000, nsteps=300` |
-

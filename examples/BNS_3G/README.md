@@ -28,4 +28,3 @@ Both agreement columns compare each 1-D marginal with `rb-dynesty` at a fixed 20
 | `rb-emcee` | — | — | 8.48 | 0.024% | 59.6m | 4.53 | chi_1 (10.69) | 0.10 | chi_1 (0.17) | — |
 | `rb-inprior` | — | — | 0.005 | 99.4% | 23.2s | 132.87 | lambda_1 (381.13) | 1.06 | lambda_1 (3.64) | — |
 | `rb-smc` | -181182.70 | 0.06 | 10.5 | 0.095% | 4.2m | 1.62 | chirp_mass (2.98) | 0.04 | chirp_mass (0.06) | `nsamples=2500, nsteps=300` |
-

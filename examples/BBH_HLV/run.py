@@ -69,8 +69,7 @@ def setup():
     # seeds the optimiser from this dict, which must cover every sampled
     # parameter. The signal itself is still injected with `phase`.
     injection_parameters["delta_phase"] = np.mod(
-        injection_parameters["phase"]
-        + np.sign(np.cos(injection_parameters["theta_jn"])) * injection_parameters["psi"],
+        injection_parameters["phase"] + np.sign(np.cos(injection_parameters["theta_jn"])) * injection_parameters["psi"],
         2 * np.pi,
     )
 

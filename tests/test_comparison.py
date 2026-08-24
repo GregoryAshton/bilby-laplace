@@ -79,9 +79,7 @@ def test_colour_overrides_prefer_the_longest_match():
 def test_colour_overrides_require_contiguous_tokens():
     # "smc-fast" must not match a label that merely contains both tokens apart.
     results = [_FakeResult("rb-smc-rejection-fast")]
-    assert colours_for_results(results, overrides={"smc-fast": "#785EF0"}) == [
-        SAMPLER_COLOURS["rejection"]
-    ]
+    assert colours_for_results(results, overrides={"smc-fast": "#785EF0"}) == [SAMPLER_COLOURS["rejection"]]
 
 
 def test_palette_is_hex_and_unique():
@@ -188,27 +186,42 @@ def test_settings_summary_reads_each_samplers_own_layout():
     from bilby_laplace.comparison import _settings_summary
 
     # The Laplace sampler nests aspire's settings under smc_kwargs...
-    laplace_smc = _FakeResult("hlv_smc", dict(
-        resample="smc",
-        smc_kwargs=dict(n_samples=10000, sampler_kwargs=dict(n_steps=100)),
-    ))
+    laplace_smc = _FakeResult(
+        "hlv_smc",
+        dict(
+            resample="smc",
+            smc_kwargs=dict(n_samples=10000, sampler_kwargs=dict(n_steps=100)),
+        ),
+    )
     # ...while the no-Laplace control goes through aspire's own plugin.
-    aspire = _FakeResult("hlv_aspire", dict(
-        n_samples=10000, sample_kwargs=dict(sampler_kwargs=dict(n_steps=100)),
-    ))
+    aspire = _FakeResult(
+        "hlv_aspire",
+        dict(
+            n_samples=10000,
+            sample_kwargs=dict(sampler_kwargs=dict(n_steps=100)),
+        ),
+    )
     assert _settings_summary(laplace_smc) == "nsamples=10000, nsteps=100"
     assert _settings_summary(aspire) == "nsamples=10000, nsteps=100"
     assert _settings_summary(_FakeResult("hlv_dynesty", dict(nlive=1000))) == "nlive=1000"
     # Drawing straight from the proposal has no cost setting worth quoting.
-    assert _settings_summary(_FakeResult("hlv_inprior", dict(
-        resample="inprior", smc_kwargs=None, target_nsamples=5000))) == ""
+    assert (
+        _settings_summary(_FakeResult("hlv_inprior", dict(resample="inprior", smc_kwargs=None, target_nsamples=5000)))
+        == ""
+    )
 
 
 def _table_row(**overrides):
-    row = dict(name="hlv_smc", log_z=-12118.41, log_z_err=0.03, mevals="29.2",
-               efficiency="0.034%", time="1.9h", settings="nsamples=10000",
-               metrics={m: dict(mean=3.5, worst="tilt_1", worst_value=12.3)
-                        for m in METRICS})
+    row = dict(
+        name="hlv_smc",
+        log_z=-12118.41,
+        log_z_err=0.03,
+        mevals="29.2",
+        efficiency="0.034%",
+        time="1.9h",
+        settings="nsamples=10000",
+        metrics={m: dict(mean=3.5, worst="tilt_1", worst_value=12.3) for m in METRICS},
+    )
     row.update(overrides)
     return row
 
@@ -229,9 +242,12 @@ def test_comparison_table_drops_the_metrics_without_a_reference():
 
 
 def test_comparison_table_marks_undefined_cells():
-    row = _table_row(log_z=float("nan"), log_z_err=float("nan"), settings="",
-                     metrics={m: dict(mean=float("nan"), worst=None,
-                                      worst_value=float("nan")) for m in METRICS})
+    row = _table_row(
+        log_z=float("nan"),
+        log_z_err=float("nan"),
+        settings="",
+        metrics={m: dict(mean=float("nan"), worst=None, worst_value=float("nan")) for m in METRICS},
+    )
     _headers, cells, _align = comparison_table([row], "hlv_dynesty")
     assert cells[0].count(MISSING) == 2 + 2 * len(METRICS) + 1
 

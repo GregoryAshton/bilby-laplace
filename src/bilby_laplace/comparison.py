@@ -78,8 +78,14 @@ TRUTH_COLOUR = "#000000"
 # elsewhere) under different environments -- a single query would silently
 # misattribute those versions to every row.
 VERSION_PACKAGES = (
-    "bilby", "bilby-laplace", "dynesty", "aspire-inference", "aspire-bilby",
-    "minipcn", "numpy", "scipy",
+    "bilby",
+    "bilby-laplace",
+    "dynesty",
+    "aspire-inference",
+    "aspire-bilby",
+    "minipcn",
+    "numpy",
+    "scipy",
 )
 
 
@@ -425,8 +431,7 @@ def _metric_summary(per_key):
     if not finite:
         return dict(mean=float("nan"), worst=None, worst_value=float("nan"))
     worst = max(finite, key=finite.get)
-    return dict(mean=float(np.mean(list(finite.values()))),
-                worst=worst, worst_value=finite[worst])
+    return dict(mean=float(np.mean(list(finite.values()))), worst=worst, worst_value=finite[worst])
 
 
 def _empty_metrics():
@@ -477,7 +482,8 @@ def divergence_from_reference(results):
     if len(results[index].posterior) < JSD_N:
         bilby.core.utils.logger.warning(
             f"reference has {len(results[index].posterior)} samples, fewer than "
-            f"JSD_N={JSD_N}; skipping the agreement columns")
+            f"JSD_N={JSD_N}; skipping the agreement columns"
+        )
         return empty, None, 0
 
     reference = results[index]
@@ -485,12 +491,13 @@ def divergence_from_reference(results):
     # A result shorter than JSD_N gets no draw at all: comparing it at its own
     # size would put a number in the table that is not on the same scale as the
     # rest of the column.
-    draws = [r.posterior.iloc[rng.permutation(len(r.posterior))[:JSD_N]]
-             if len(r.posterior) >= JSD_N else None for r in results]
+    draws = [
+        r.posterior.iloc[rng.permutation(len(r.posterior))[:JSD_N]] if len(r.posterior) >= JSD_N else None
+        for r in results
+    ]
 
     keys = [
-        k for k in reference.search_parameter_keys
-        if all(k in d and np.ptp(d[k]) > 0 for d in draws if d is not None)
+        k for k in reference.search_parameter_keys if all(k in d and np.ptp(d[k]) > 0 for d in draws if d is not None)
     ]
     bounds = {k: _periodic_bounds(reference, k) for k in keys}
     rows = []
@@ -531,7 +538,7 @@ def reference_floor(results, reference_index):
         return nothing, 0
     rng = np.random.default_rng(_JSD_RNG_SEED)
     index = rng.permutation(len(posterior))
-    a, b = posterior.iloc[index[:n_used]], posterior.iloc[index[n_used:2 * n_used]]
+    a, b = posterior.iloc[index[:n_used]], posterior.iloc[index[n_used : 2 * n_used]]
     keys = [k for k in reference.search_parameter_keys if np.ptp(posterior[k]) > 0]
     # Recentred exactly as in divergence_from_reference, or the floor would be
     # measured under a different convention from the values it bounds.
@@ -588,9 +595,14 @@ def comparison_table(rows, reference_label):
 
     cells = []
     for row in rows:
-        cell = [row["name"],
-                _format_metric(row["log_z"]), _format_metric(row["log_z_err"]),
-                row["mevals"], row["efficiency"], row["time"]]
+        cell = [
+            row["name"],
+            _format_metric(row["log_z"]),
+            _format_metric(row["log_z_err"]),
+            row["mevals"],
+            row["efficiency"],
+            row["time"],
+        ]
         if reference_label:
             for metric in METRICS:
                 summary = row["metrics"][metric]
@@ -611,17 +623,13 @@ def versions_table(rows):
     """
     headers = ["method"] + list(VERSION_PACKAGES)
     align = ["<"] + [">"] * len(VERSION_PACKAGES)
-    cells = [
-        [row["name"]] + [row["versions"].get(package, MISSING) for package in VERSION_PACKAGES]
-        for row in rows
-    ]
+    cells = [[row["name"]] + [row["versions"].get(package, MISSING) for package in VERSION_PACKAGES] for row in rows]
     return headers, cells, align
 
 
 def _render_text_table(headers, cells, align):
     """The table as fixed-width lines, each column as wide as its widest cell."""
-    widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h)
-              for i, h in enumerate(headers)]
+    widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h) for i, h in enumerate(headers)]
     fmt = "  ".join(f"{{:{a}{w}}}" for a, w in zip(align, widths))
     # Headers are left-aligned regardless: a right-aligned title over a column
     # of short values ends up detached from them.
@@ -639,6 +647,7 @@ def _render_markdown_table(headers, cells, code_columns=(0, -1)):
     the kind of thing code font is for and there is no free-text column to
     single out.
     """
+
     def row(values):
         return "| " + " | ".join(values) + " |"
 
@@ -680,23 +689,28 @@ def _metric_note(reference_label, n_samples, floors, floor_n):
         return note
     bound = "at most " if floor_n < n_samples else ""
     quoted = _format_finite_floors(floors)
-    floor_note = (f"**Noise floor: {bound}{quoted}.** That is `{reference_label}` "
-                  f"against itself, two disjoint {floor_n}-sample draws from the one "
-                  "posterior. Two finite samples of the *same* distribution do not "
-                  "score zero, so anything at or below this level is consistent with "
-                  "perfect agreement, and differences among such values are not "
-                  "measurements.")
+    floor_note = (
+        f"**Noise floor: {bound}{quoted}.** That is `{reference_label}` "
+        f"against itself, two disjoint {floor_n}-sample draws from the one "
+        "posterior. Two finite samples of the *same* distribution do not "
+        "score zero, so anything at or below this level is consistent with "
+        "perfect agreement, and differences among such values are not "
+        "measurements."
+    )
     if floor_n < n_samples:
-        floor_note += (" The split needs twice its size, and this reference has too "
-                       f"few samples for {n_samples}; the floor falls with N, so the "
-                       f"true figure at N={n_samples} is lower than the one quoted.")
-    floor_note += (" It is one split averaged over the sampled parameters, so read it"
-                   " as an order of magnitude, not a threshold.")
+        floor_note += (
+            " The split needs twice its size, and this reference has too "
+            f"few samples for {n_samples}; the floor falls with N, so the "
+            f"true figure at N={n_samples} is lower than the one quoted."
+        )
+    floor_note += (
+        " It is one split averaged over the sampled parameters, so read it"
+        " as an order of magnitude, not a threshold."
+    )
     return note + [floor_note]
 
 
-def write_readme(path, rows, reference_label, n_samples, floors=None,
-                 floor_n=0, targets=()):
+def write_readme(path, rows, reference_label, n_samples, floors=None, floor_n=0, targets=()):
     """Write the example's README.md: what it is, how to run it, and the table.
 
     Regenerated on every ``make compare``, so it always reflects the results
@@ -711,14 +725,22 @@ def write_readme(path, rows, reference_label, n_samples, floors=None,
     name = os.path.basename(os.path.dirname(os.path.abspath(path))) or "example"
     methods = ", ".join(f"`{r['name']}`" for r in rows)
     lines = [
-        f"# {name} — sampler comparison", "",
+        f"# {name} — sampler comparison",
+        "",
         f"Posteriors from {len(rows)} samplers ({methods}) on the {name} example, "
-        + (f"each compared against the `{reference_label}` reference."
-           if reference_label else "with no reference sampler among them."),
-        "", "## Running it", "", "```",
+        + (
+            f"each compared against the `{reference_label}` reference."
+            if reference_label
+            else "with no reference sampler among them."
+        ),
+        "",
+        "## Running it",
+        "",
+        "```",
         "make all       # every sampler in turn, then this comparison",
         "make compare   # rebuild this table and the corner plot from existing results",
-        "```", "",
+        "```",
+        "",
     ]
     if targets:
         lines += ["Individual samplers: " + ", ".join(f"`make {t}`" for t in targets) + ".", ""]
@@ -766,13 +788,13 @@ def _make_targets(directory):
         return ()
     for line in open(path):
         if line.startswith(".PHONY:"):
-            return tuple(t for t in line.split(":", 1)[1].split()
-                         if t not in ("all", "compare"))
+            return tuple(t for t in line.split(":", 1)[1].split() if t not in ("all", "compare"))
     return ()
 
 
-def compare(pattern, filename, injection_parameters=None, sampler_only_labels=False,
-            colour_overrides=None, parameters=None):
+def compare(
+    pattern, filename, injection_parameters=None, sampler_only_labels=False, colour_overrides=None, parameters=None
+):
     """Load result files matching pattern, print comparison table, and create corner plot.
 
     Parameters
@@ -838,8 +860,7 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
     # Divergence from the reference sampler, computed once for both the printed
     # table and the README so the two cannot disagree.
     divergences, reference_index, jsd_n = divergence_from_reference(results)
-    reference_label = (os.path.basename(results[reference_index].label)
-                       if reference_index is not None else None)
+    reference_label = os.path.basename(results[reference_index].label) if reference_index is not None else None
     floors, floor_n = reference_floor(results, reference_index)
 
     # Comparison table
@@ -877,10 +898,19 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
                 neff = len(r.posterior) if getattr(r, "posterior", None) is not None else np.nan
             if np.isfinite(neff) and np.isfinite(n_like) and n_like:
                 eff = 100.0 * neff / n_like
-        rows.append(dict(name=os.path.basename(r.label), log_z=log_z, log_z_err=log_z_err,
-                         mevals=_format_mevals(n_like), efficiency=_format_efficiency(eff),
-                         time=_format_time(secs), settings=_settings_summary(r),
-                         metrics=divergences[len(rows)], versions=_software_versions(r)))
+        rows.append(
+            dict(
+                name=os.path.basename(r.label),
+                log_z=log_z,
+                log_z_err=log_z_err,
+                mevals=_format_mevals(n_like),
+                efficiency=_format_efficiency(eff),
+                time=_format_time(secs),
+                settings=_settings_summary(r),
+                metrics=divergences[len(rows)],
+                versions=_software_versions(r),
+            )
+        )
 
     # Printed from the same cells the README is built from, so the two tables
     # cannot disagree.
@@ -894,9 +924,11 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
     quoted = _format_finite_floors(floors)
     if reference_label and quoted:
         bound = "<=" if floor_n < jsd_n else ""
-        print(f"Agreement at N={jsd_n} against {reference_label}; noise floor "
-              f"{bound}{quoted} (two {floor_n}-sample halves of the reference). "
-              "At or below that = agreement.")
+        print(
+            f"Agreement at N={jsd_n} against {reference_label}; noise floor "
+            f"{bound}{quoted} (two {floor_n}-sample halves of the reference). "
+            "At or below that = agreement."
+        )
     print("=" * width + "\n")
 
     if any(row.get("versions") for row in rows):
@@ -910,9 +942,15 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
 
     # README beside the corner plot, i.e. in the example's own directory.
     directory = os.path.dirname(os.path.abspath(filename))
-    readme = write_readme(os.path.join(directory, "README.md"), rows, reference_label,
-                          jsd_n, floors=floors, floor_n=floor_n,
-                          targets=_make_targets(directory))
+    readme = write_readme(
+        os.path.join(directory, "README.md"),
+        rows,
+        reference_label,
+        jsd_n,
+        floors=floors,
+        floor_n=floor_n,
+        targets=_make_targets(directory),
+    )
     logger.info(f"Comparison README written to {readme}")
 
     import matplotlib.pyplot as plt

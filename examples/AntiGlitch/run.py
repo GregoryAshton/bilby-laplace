@@ -153,9 +153,7 @@ class AntiGlitchLikelihood(bilby.Likelihood):
         optimal_snr_squared = ifo.optimal_snr_squared(signal=signal)
         if self.time_marginalization:
             d_inner_h_array = (4 / ifo.duration) * np.fft.fft(
-                signal[0:-1]
-                * ifo.frequency_domain_strain.conjugate()[0:-1]
-                / ifo.power_spectral_density_array[0:-1]
+                signal[0:-1] * ifo.frequency_domain_strain.conjugate()[0:-1] / ifo.power_spectral_density_array[0:-1]
             )
         else:
             d_inner_h_array = None
@@ -166,12 +164,11 @@ class AntiGlitchLikelihood(bilby.Likelihood):
 
     def _setup_time_marginalization(self):
         self._delta_tc = 2 / self.ifo.sampling_frequency
-        self._times = self.ifo.start_time + np.linspace(
-            0, self.ifo.duration, int(self.ifo.duration / 2 * self.ifo.sampling_frequency + 1)
-        )[1:]
-        self.time_mask = (self._times >= self._prior["tc"].minimum) & (
-            self._times <= self._prior["tc"].maximum
+        self._times = (
+            self.ifo.start_time
+            + np.linspace(0, self.ifo.duration, int(self.ifo.duration / 2 * self.ifo.sampling_frequency + 1))[1:]
         )
+        self.time_mask = (self._times >= self._prior["tc"].minimum) & (self._times <= self._prior["tc"].maximum)
         self.time_prior_array = self._prior["tc"].prob(self._times) * self._delta_tc
 
     def time_marginalized_likelihood(self, d_inner_h_tc_array, h_inner_h):
@@ -301,9 +298,7 @@ def setup():
         )
     )
 
-    likelihood = AntiGlitchLikelihood(
-        ifo, priors=priors, time_marginalization=True, phase_marginalization=True
-    )
+    likelihood = AntiGlitchLikelihood(ifo, priors=priors, time_marginalization=True, phase_marginalization=True)
 
     _common = dict(
         sampling_seed=SAMPLING_SEED,

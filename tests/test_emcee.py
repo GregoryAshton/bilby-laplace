@@ -247,9 +247,7 @@ def test_backend_file_persists_the_full_unthinned_chain(emcee_setup):
     the raw chain -- and must hold every step, not the thinned subset."""
     sampler, estimator, proposal = emcee_setup
     nwalkers, nsteps = 16, 300
-    sampler.kwargs["emcee_kwargs"] = dict(
-        nwalkers=nwalkers, nsteps=nsteps, discard=50, backend_file=True
-    )
+    sampler.kwargs["emcee_kwargs"] = dict(nwalkers=nwalkers, nsteps=nsteps, discard=50, backend_file=True)
 
     samples, *_ = sampler._run_emcee(proposal, estimator)
 
@@ -267,9 +265,7 @@ def test_backend_file_accepts_an_explicit_path(emcee_setup, tmp_path):
     sampler, estimator, proposal = emcee_setup
     target = tmp_path / "nested" / "chain.h5"
     target.parent.mkdir()
-    sampler.kwargs["emcee_kwargs"] = dict(
-        nwalkers=8, nsteps=100, discard=20, backend_file=str(target)
-    )
+    sampler.kwargs["emcee_kwargs"] = dict(nwalkers=8, nsteps=100, discard=20, backend_file=str(target))
 
     sampler._run_emcee(proposal, estimator)
 
@@ -319,9 +315,7 @@ def test_target_nsamples_defaults_to_the_sampler_wide_value(emcee_setup, monkeyp
 def test_explicit_target_nsamples_overrides_the_sampler_wide_value(emcee_setup, monkeypatch):
     sampler, estimator, proposal = emcee_setup
     sampler.kwargs["target_nsamples"] = 10**9  # would never be reached
-    sampler.kwargs["emcee_kwargs"] = dict(
-        nwalkers=40, nsteps=300, max_nsteps=9000, discard=100, target_nsamples=2000
-    )
+    sampler.kwargs["emcee_kwargs"] = dict(nwalkers=40, nsteps=300, max_nsteps=9000, discard=100, target_nsamples=2000)
     checks = _count_batches(sampler, monkeypatch)
 
     sampler._run_emcee(proposal, estimator)
@@ -348,9 +342,7 @@ def test_autocorr_status_reports_the_binding_parameter(emcee_setup):
         def get_autocorr_time(**kwargs):
             return np.array([10.0, 25.0])
 
-    tau, tau_max, n_independent, reliable = sampler._emcee_autocorr_status(
-        _Stub(), discard, nwalkers, ["x", "y"]
-    )
+    tau, tau_max, n_independent, reliable = sampler._emcee_autocorr_status(_Stub(), discard, nwalkers, ["x", "y"])
 
     assert tau_max == 25.0  # the worst-mixing coordinate binds
     assert n_independent == int(nwalkers * (450 - discard) / 25.0)
@@ -414,9 +406,7 @@ def test_emcee_diagnostic_gains_a_row_for_the_tau_history(emcee_setup, monkeypat
     sampler, estimator, _ = emcee_setup
     ndim = len(estimator.parameter_names)
     ensemble = _StubEnsemble(ndim)
-    samples = pd.DataFrame(
-        np.zeros((ensemble.n_thinned * ensemble.nwalkers, ndim)), columns=estimator.parameter_names
-    )
+    samples = pd.DataFrame(np.zeros((ensemble.n_thinned * ensemble.nwalkers, ndim)), columns=estimator.parameter_names)
     tau_history = [(2, np.full(ndim, 5.0)), (4, np.arange(1.0, ndim + 1.0))] if with_history else None
 
     captured = {}
@@ -552,4 +542,3 @@ def test_periodic_samples_recover_the_wrapped_density(periodic_emcee_setup):
     wrapped_deviation = np.mod(x - WRAPPED_TRUE_VALUE + PERIOD / 2, PERIOD) - PERIOD / 2
     assert wrapped_deviation.mean() == pytest.approx(0.0, abs=0.15)
     assert wrapped_deviation.std() == pytest.approx(WRAPPED_SIGMA, abs=0.3)
-

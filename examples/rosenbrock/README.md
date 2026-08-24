@@ -42,4 +42,3 @@ Recorded in each result's own metadata at the time it was produced -- not necess
 | `rosenbrock_inprior` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
 | `rosenbrock_rejection` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
 | `rosenbrock_smc` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
-

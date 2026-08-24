@@ -339,6 +339,7 @@ def test_primary_covariance_is_not_re_validated(sampler, estimator):
 
 def test_no_global_optimisation_is_run_for_the_primary(sampler, estimator, monkeypatch):
     """Guards the regression directly: the DE call must be gone."""
+
     def _boom(*args, **kwargs):
         raise AssertionError("differential evolution must not run for the primary mode")
 

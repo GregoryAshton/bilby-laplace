@@ -157,7 +157,9 @@ def _sampler_with_modes(gaussian_likelihood, gaussian_priors, tmp_path, monkeypa
     return sampler
 
 
-def test_single_mode_still_gives_a_plain_proposal(gaussian_likelihood, gaussian_priors, tmp_path, monkeypatch, estimator):
+def test_single_mode_still_gives_a_plain_proposal(
+    gaussian_likelihood, gaussian_priors, tmp_path, monkeypatch, estimator
+):
     sampler = _sampler_with_modes(gaussian_likelihood, gaussian_priors, tmp_path, monkeypatch, n_modes=1)
 
     proposal, modes, log_weights = sampler._build_proposal(estimator, MODE_MEANS[0], COV, 1)
@@ -188,8 +190,13 @@ def test_the_search_runs_for_inprior_not_only_for_smc(
     built = []
     for resample in ("inprior", "rejection", "importance", "smc"):
         sampler = _sampler_with_modes(
-            gaussian_likelihood, gaussian_priors, tmp_path, monkeypatch, n_modes=2,
-            resample=resample, mode_weights="equal",
+            gaussian_likelihood,
+            gaussian_priors,
+            tmp_path,
+            monkeypatch,
+            n_modes=2,
+            resample=resample,
+            mode_weights="equal",
         )
         proposal, _, _ = sampler._build_proposal(estimator, MODE_MEANS[0], COV, 1)
         built.append(type(proposal))
@@ -208,9 +215,7 @@ def test_a_single_surviving_mode_collapses_to_a_plain_proposal(
     sampler = _sampler_with_modes(
         gaussian_likelihood, gaussian_priors, tmp_path, monkeypatch, n_modes=2, mode_weights="laplace"
     )
-    monkeypatch.setattr(
-        Laplace, "_drop_negligible_modes", lambda self, modes, lw: ([modes[1]], np.array([lw[1]]))
-    )
+    monkeypatch.setattr(Laplace, "_drop_negligible_modes", lambda self, modes, lw: ([modes[1]], np.array([lw[1]])))
 
     proposal, modes, _ = sampler._build_proposal(estimator, MODE_MEANS[0], COV, 1)
 
@@ -219,9 +224,7 @@ def test_a_single_surviving_mode_collapses_to_a_plain_proposal(
     np.testing.assert_allclose(proposal.mean, MODE_MEANS[1])
 
 
-def test_every_resampling_path_is_handed_the_same_proposal(
-    gaussian_likelihood, gaussian_priors, tmp_path, monkeypatch
-):
+def test_every_resampling_path_is_handed_the_same_proposal(gaussian_likelihood, gaussian_priors, tmp_path, monkeypatch):
     """The invariant, enforced end to end through ``run_sampler``.
 
     Given the same inputs, ``resample`` must change only what is *done* with
@@ -305,6 +308,4 @@ def test_modes_rebuild_the_same_proposal_on_resume(
     rebuilt = sampler._mode_proposal(estimator, modes, log_weights)
 
     np.testing.assert_allclose(rebuilt.weights, proposal.weights)
-    np.testing.assert_allclose(
-        [c.mean for c in rebuilt.components], [c.mean for c in proposal.components]
-    )
+    np.testing.assert_allclose([c.mean for c in rebuilt.components], [c.mean for c in proposal.components])
