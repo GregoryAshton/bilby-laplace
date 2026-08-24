@@ -17,7 +17,7 @@ import timeit
 
 import bilby
 import numpy as np
-from bilby.core.prior import Constraint, Cosine, Sine, Uniform
+from bilby.core.prior import Constraint, Sine, Uniform
 from bilby.gw.likelihood import RelativeBinningGravitationalWaveTransient
 from bilby.gw.prior import (
     AlignedSpin,
@@ -175,7 +175,11 @@ def setup(likelihood_type="rb"):
                 # it, so the "proposal" was the prior and looked merely wide
                 # rather than wrong. Ten times wider keeps the posterior
                 # likelihood-dominated while letting the proposal be seen.
-                name="chirp_mass", minimum=1.39, maximum=1.41, unit=r"$M_{\odot}$", latex_label=r"$\mathcal{M}$"
+                name="chirp_mass",
+                minimum=1.39,
+                maximum=1.41,
+                unit=r"$M_{\odot}$",
+                latex_label=r"$\mathcal{M}$",
             ),
             mass_ratio=UniformInComponentsMassRatio(name="mass_ratio", minimum=0.2, maximum=1.0, latex_label=r"$q$"),
             mass_1=Constraint(name="mass_1", minimum=1.0, maximum=2.8),
@@ -545,10 +549,7 @@ if __name__ == "__main__":
         "--likelihood",
         choices=["std", "rb"],
         default=None,
-        help=(
-            "Likelihood: std (standard) or rb (relative binning)."
-            " Required when running samplers."
-        ),
+        help=("Likelihood: std (standard) or rb (relative binning)." " Required when running samplers."),
     )
     parser.add_argument(
         "--sampler",

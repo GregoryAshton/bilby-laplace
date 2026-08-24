@@ -84,8 +84,7 @@ class TruncatedMVNProposal:
         self._a = (self._lower - self.mean) / self._sigma
         self._b = (self._upper - self.mean) / self._sigma
         self._dists = [
-            truncnorm(a=self._a[i], b=self._b[i], loc=self.mean[i], scale=self._sigma[i])
-            for i in range(self._ndim)
+            truncnorm(a=self._a[i], b=self._b[i], loc=self.mean[i], scale=self._sigma[i]) for i in range(self._ndim)
         ]
 
     def _wrap(self, x, i):
@@ -184,9 +183,7 @@ class _StandardisedGaussian:
         self.mean = np.asarray(mean, dtype=float)
         self.cov = np.asarray(cov, dtype=float)
         self._sd = np.sqrt(np.diag(self.cov))
-        self._dist = multivariate_normal(
-            mean=np.zeros_like(self.mean), cov=self.cov / np.outer(self._sd, self._sd)
-        )
+        self._dist = multivariate_normal(mean=np.zeros_like(self.mean), cov=self.cov / np.outer(self._sd, self._sd))
         self._log_jacobian = float(np.sum(np.log(self._sd)))
 
     def logpdf(self, x):
@@ -1605,8 +1602,7 @@ class Laplace(Sampler):
         # splits it into train/validation sets by position.
         random.rng.shuffle(x_out)
         logger.info(
-            f"Initial SMC cloud: {len(x_out)} samples over {k} modes "
-            f"({', '.join(str(len(c)) for c in chunks)})"
+            f"Initial SMC cloud: {len(x_out)} samples over {k} modes " f"({', '.join(str(len(c)) for c in chunks)})"
         )
         return x_out
 
@@ -2429,9 +2425,7 @@ class Laplace(Sampler):
         # moved at once (rather than one at a time), which is what lets it
         # route through the estimator's pooled batch path exactly like every
         # other resampling mode.
-        ensemble = emcee.EnsembleSampler(
-            nwalkers, ndim, log_prob_batch, vectorize=True, backend=backend, **emcee_kw
-        )
+        ensemble = emcee.EnsembleSampler(nwalkers, ndim, log_prob_batch, vectorize=True, backend=backend, **emcee_kw)
 
         # --- Batched sampling, growing the chain until it has enough
         # independent samples (or hits `max_nsteps`). ---
@@ -2677,9 +2671,7 @@ class Laplace(Sampler):
 
         # Draw initial samples filtered to the prior support, consistent with
         # the inprior/rejection sampling paths.
-        initial_theta = self._draw_initial_smc_samples(
-            init_proposals, n_initial, parameter_names, weights=mode_weights
-        )
+        initial_theta = self._draw_initial_smc_samples(init_proposals, n_initial, parameter_names, weights=mode_weights)
 
         if len(init_proposals) > 1 and self.kwargs["plot_diagnostic"]:
             # Overwrite the proposal diagnostic now that the real initial cloud
@@ -4135,7 +4127,7 @@ class Laplace(Sampler):
         final_tau = taus[-1]
         worst = int(np.nanargmax(final_tau)) if np.any(np.isfinite(final_tau)) else 0
 
-        for i, name in enumerate(parameter_names):
+        for i, _name in enumerate(parameter_names):
             if i == worst:
                 continue
             ax_left.plot(steps, taus[:, i], color="0.75", lw=0.8, zorder=2)
@@ -4295,7 +4287,10 @@ class Laplace(Sampler):
 
         if show_tau:
             self._plot_emcee_tau_row(
-                axs[n_rows - 1], tau_history, parameter_names, discard,
+                axs[n_rows - 1],
+                tau_history,
+                parameter_names,
+                discard,
                 self._EMCEE_AUTOCORR_RELIABLE_FACTOR if autocorr_tol is None else autocorr_tol,
             )
 

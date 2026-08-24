@@ -347,10 +347,7 @@ class LaplacePosteriorEstimator:
         if self.pool is not None and x_array.shape[1] > 1:
             return self._log_likelihood_from_array_pool(x_array)
         return np.array(
-            [
-                self.log_likelihood(array_to_dict(self.parameter_names, x_array[:, j]))
-                for j in range(x_array.shape[1])
-            ],
+            [self.log_likelihood(array_to_dict(self.parameter_names, x_array[:, j])) for j in range(x_array.shape[1])],
             dtype=float,
         )
 
@@ -656,7 +653,8 @@ class LaplacePosteriorEstimator:
         reconstructed = self.likelihood.generate_posterior_sample_from_marginalized_likelihood(dict(base))
         values = {name: float(reconstructed[name]) for name in names}
         logger.info(
-            f"Reconstructed marginalised parameter(s) at the MAP: " f"{ {k: round(v, 6) for k, v in values.items()} }"
+            f"Reconstructed marginalised parameter(s) at the MAP: "
+            f"{ {k: round(v, 6) for k, v in values.items()} }"  # noqa: E201,E202 (spaces avoid `{{`/`}}`)
         )
         return values
 
