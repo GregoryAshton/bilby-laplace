@@ -30,3 +30,16 @@ Both agreement columns compare each 1-D marginal with `rosenbrock_dynesty` at a 
 | `rosenbrock_rejection` | -4.09 | 0.01 | 0.202 | 2.5% | 4.7s | 1.49 | x (2.05) | 0.05 | x (0.06) | — |
 | `rosenbrock_smc` | -4.12 | 0.03 | 18.3 | 0.027% | 1.4m | 1.43 | x (1.73) | 0.04 | y (0.04) | `nsamples=5000, nsteps=1000` |
 
+## Software versions
+
+Recorded in each result's own metadata at the time it was produced -- not necessarily what is installed now, and can legitimately differ row to row if results were generated at different times.
+
+| method | bilby | bilby-laplace | dynesty | aspire-inference | aspire-bilby | minipcn | numpy | scipy |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `rosenbrock_aspire` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `rosenbrock_dynesty` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `rosenbrock_emcee` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `rosenbrock_inprior` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `rosenbrock_rejection` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `rosenbrock_smc` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+

@@ -31,3 +31,17 @@ Both agreement columns compare each 1-D marginal with `dynesty` at a fixed 2000 
 | `rejection_user` | -4.61 | 0.01 | 0.027 | 18.8% | 3.4s | 2.22 | x (2.97) | 0.05 | x (0.05) | — |
 | `smc` | -4.61 | 0.01 | 0.045 | 11.1% | 25.3s | 1.17 | y (1.18) | 0.03 | y (0.04) | `nsamples=5000, nsteps=5` |
 
+## Software versions
+
+Recorded in each result's own metadata at the time it was produced -- not necessarily what is installed now, and can legitimately differ row to row if results were generated at different times.
+
+| method | bilby | bilby-laplace | dynesty | aspire-inference | aspire-bilby | minipcn | numpy | scipy |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `aspire` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `dynesty` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `emcee` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `laplace` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `rejection` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `rejection_user` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+| `smc` | `2.8.2` | `0.1.1.dev128+g0cad4fe0d.d20260819` | `3.1.0` | `0.1.0` | `0.1.0` | `0.2.0a3` | `2.5.2` | `1.18.0` |
+

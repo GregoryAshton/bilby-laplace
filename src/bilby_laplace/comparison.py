@@ -70,6 +70,23 @@ DEFAULT_SAMPLER_COLOUR = "#999999"  # neutral grey
 # every sampler colour above.
 TRUTH_COLOUR = "#000000"
 
+# Distribution names (as pip/PyPI knows them, not import names -- aspire's
+# import name is `aspire`, not `aspire-inference`), pulled per-row out of each
+# result's own `meta_data["environment_packages"]` (bilby's snapshot of the
+# conda/pip environment active when *that* result was produced). Motivated
+# directly by the minipcn regression this project has already hit once: a
+# same-numbered package reinstall silently changed SMC's behaviour, and
+# nothing about the example's own output would have caught it without the
+# exact version being on record next to the row it produced. Per-row, not a
+# single environment-wide query at `make compare` time, because different
+# rows can come from results generated at different times (or copied in from
+# elsewhere) under different environments -- a single query would silently
+# misattribute those versions to every row.
+VERSION_PACKAGES = (
+    "bilby", "bilby-laplace", "dynesty", "aspire-inference", "aspire-bilby",
+    "minipcn", "numpy", "scipy",
+)
+
 
 def _label_tokens(label):
     """Lower-cased alphanumeric tokens of a label's basename.
@@ -528,6 +545,34 @@ def reference_floor(results, reference_index):
     return {m: summary[m]["mean"] for m in METRICS}, n_used
 
 
+def _software_versions(result):
+    """``{package: version}`` for VERSION_PACKAGES, read from *this result's own*
+    ``meta_data["environment_packages"]`` -- the environment that actually
+    produced it, not whatever is active in the shell running ``make compare``.
+
+    ``environment_packages`` is bilby's own snapshot of every conda/pip
+    package in that environment (parallel ``name``/``version`` columns); this
+    just looks up the packages this project cares about within it. A package
+    missing from that snapshot (not installed when the result was produced,
+    e.g. no reason for a dynesty-only environment to have aspire/minipcn) or
+    a result with no ``environment_packages`` at all (an older result
+    predating this metadata, or ``BILBY_INCLUDE_GLOBAL_METADATA`` unset) is
+    silently omitted rather than reported as an error.
+
+    ``environment_packages`` is a plain dict of parallel lists for a result
+    loaded from hdf5, but a ``pandas.DataFrame`` for one loaded from json --
+    bilby's json (de)serialisation round-trips a dict-of-lists back into a
+    DataFrame. ``len(...) == 0`` (rather than a bare truthiness check) is
+    what actually works on both: a non-empty DataFrame's truth value is
+    ambiguous and raises.
+    """
+    env = (result.meta_data or {}).get("environment_packages")
+    if env is None or len(env) == 0 or "name" not in env or "version" not in env:
+        return {}
+    installed = dict(zip(env["name"], env["version"]))
+    return {package: installed[package] for package in VERSION_PACKAGES if package in installed}
+
+
 def comparison_table(rows, reference_label):
     """``(headers, cells, align)`` for the comparison table.
 
@@ -560,6 +605,24 @@ def comparison_table(rows, reference_label):
     return headers, cells, align
 
 
+def versions_table(rows):
+    """``(headers, cells, align)`` for the per-row software-versions table.
+
+    Same one-definition-rendered-twice pattern as :func:`comparison_table`.
+    One row per result, one column per tracked package -- deliberately a
+    second table rather than more columns bolted onto the comparison table,
+    since VERSION_PACKAGES already has 8 entries and the comparison table is
+    wide enough without them.
+    """
+    headers = ["method"] + list(VERSION_PACKAGES)
+    align = ["<"] + [">"] * len(VERSION_PACKAGES)
+    cells = [
+        [row["name"]] + [row["versions"].get(package, MISSING) for package in VERSION_PACKAGES]
+        for row in rows
+    ]
+    return headers, cells, align
+
+
 def _render_text_table(headers, cells, align):
     """The table as fixed-width lines, each column as wide as its widest cell."""
     widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h)
@@ -572,17 +635,27 @@ def _render_text_table(headers, cells, align):
     return [head_fmt.format(*headers), rule] + [fmt.format(*c) for c in cells], len(rule)
 
 
-def _render_markdown_table(headers, cells):
-    """The same table as markdown, with the method and settings cells as code."""
+def _render_markdown_table(headers, cells, code_columns=(0, -1)):
+    """The same table as markdown, with *code_columns* cells as code.
+
+    Defaults to the comparison table's convention (method name, settings) --
+    the two free-text-ish columns that read better in a monospace font.
+    ``versions_table`` passes every column, since a version string is exactly
+    the kind of thing code font is for and there is no free-text column to
+    single out.
+    """
     def row(values):
         return "| " + " | ".join(values) + " |"
 
-    lines = [row(headers), row(["---"] * len(headers))]
+    n = len(headers)
+    code_columns = {c % n for c in code_columns} if cells else set()
+
+    lines = [row(headers), row(["---"] * n)]
     for c in cells:
         c = list(c)
-        c[0] = f"`{c[0]}`"
-        if c[-1] != MISSING:
-            c[-1] = f"`{c[-1]}`"
+        for i in code_columns:
+            if c[i] != MISSING:
+                c[i] = f"`{c[i]}`"
         lines.append(row(c))
     return lines
 
@@ -629,6 +702,11 @@ def write_readme(path, rows, reference_label, n_samples, floors=None,
 
     Regenerated on every ``make compare``, so it always reflects the results
     actually on disk rather than a hand-copied snapshot that can go stale.
+
+    Each *row* must carry a ``"versions"`` entry (see :func:`_software_versions`)
+    -- read from that specific result's own metadata, not the environment
+    running ``make compare`` right now, since results can be generated at
+    different times or copied in from elsewhere.
     """
     floors = {m: float("nan") for m in METRICS} if floors is None else floors
     name = os.path.basename(os.path.dirname(os.path.abspath(path))) or "example"
@@ -660,6 +738,18 @@ def write_readme(path, rows, reference_label, n_samples, floors=None,
     headers, cells, _ = comparison_table(rows, reference_label)
     lines += _render_markdown_table(headers, cells)
     lines.append("")
+    if any(row.get("versions") for row in rows):
+        lines += [
+            "## Software versions",
+            "",
+            "Recorded in each result's own metadata at the time it was produced -- "
+            "not necessarily what is installed now, and can legitimately differ "
+            "row to row if results were generated at different times.",
+            "",
+        ]
+        v_headers, v_cells, _ = versions_table(rows)
+        lines += _render_markdown_table(v_headers, v_cells, code_columns=range(len(v_headers)))
+        lines.append("")
     with open(path, "w") as fh:
         fh.write("\n".join(lines) + "\n")
     return path
@@ -791,7 +881,7 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
         rows.append(dict(name=os.path.basename(r.label), log_z=log_z, log_z_err=log_z_err,
                          mevals=_format_mevals(n_like), efficiency=_format_efficiency(eff),
                          time=_format_time(secs), settings=_settings_summary(r),
-                         metrics=divergences[len(rows)]))
+                         metrics=divergences[len(rows)], versions=_software_versions(r)))
 
     # Printed from the same cells the README is built from, so the two tables
     # cannot disagree.
@@ -810,6 +900,15 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
               f"{bound}{quoted} (two {floor_n}-sample halves of the reference). "
               "At or below that = agreement.")
     print("=" * width + "\n")
+
+    if any(row.get("versions") for row in rows):
+        v_headers, v_cells, v_align = versions_table(rows)
+        v_table, v_width = _render_text_table(v_headers, v_cells, v_align)
+        print("=" * v_width)
+        print("Software versions (per result's own metadata)")
+        print("=" * v_width)
+        print("\n".join(v_table))
+        print("=" * v_width + "\n")
 
     # README beside the corner plot, i.e. in the example's own directory.
     directory = os.path.dirname(os.path.abspath(filename))
