@@ -655,6 +655,11 @@ def _render_markdown_table(headers, cells, code_columns=(0, -1)):
     return lines
 
 
+def _format_finite_floors(floors):
+    """``"1.23 mbits, 0.45 sigma"`` for whichever :data:`METRICS` have a finite floor."""
+    return ", ".join(f"{v:.2f} {METRIC_UNITS[m]}" for m, v in floors.items() if np.isfinite(v))
+
+
 def _metric_note(reference_label, n_samples, floors, floor_n):
     """The paragraphs explaining the agreement columns and their noise floors."""
     note = [
@@ -674,8 +679,7 @@ def _metric_note(reference_label, n_samples, floors, floor_n):
     if not any(np.isfinite(v) for v in floors.values()):
         return note
     bound = "at most " if floor_n < n_samples else ""
-    quoted = ", ".join(f"{v:.2f} {METRIC_UNITS[m]}" for m, v in floors.items()
-                       if np.isfinite(v))
+    quoted = _format_finite_floors(floors)
     floor_note = (f"**Noise floor: {bound}{quoted}.** That is `{reference_label}` "
                   f"against itself, two disjoint {floor_n}-sample draws from the one "
                   "posterior. Two finite samples of the *same* distribution do not "
@@ -887,8 +891,7 @@ def compare(pattern, filename, injection_parameters=None, sampler_only_labels=Fa
     print("=" * width)
     print("\n".join(table))
     print("-" * width)
-    quoted = ", ".join(f"{v:.2f} {METRIC_UNITS[m]}" for m, v in floors.items()
-                       if np.isfinite(v))
+    quoted = _format_finite_floors(floors)
     if reference_label and quoted:
         bound = "<=" if floor_n < jsd_n else ""
         print(f"Agreement at N={jsd_n} against {reference_label}; noise floor "

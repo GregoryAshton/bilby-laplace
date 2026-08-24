@@ -802,6 +802,20 @@ class Laplace(Sampler):
             return
         self._checkpoint_state.update(fields)
 
+    @staticmethod
+    def _resume_accumulator_lists(state, *names):
+        """Fresh list copies of checkpointed accumulator fields, by name.
+
+        Every batched resampling loop (in-prior, rejection, importance) only
+        ever passes scalar counters to ``_update_checkpoint_state`` on each
+        iteration, relying on the accumulator lists themselves already being
+        registered. On resume that registration has to be redone with lists
+        the loop actually owns -- reusing the checkpoint's own list objects
+        here would leave the checkpoint pointing at containers the loop never
+        appends to, silently losing every sample accepted after the resume.
+        """
+        return [list(state[name]) for name in names]
+
     def _maybe_periodic_checkpoint(self):
         """Save the resume file if `check_point_delta_t` seconds have elapsed."""
         delta_t = float(self.kwargs.get("check_point_delta_t") or 0)
@@ -1641,17 +1655,12 @@ class Laplace(Sampler):
         state = self._checkpoint_state
         resumed_loop = state is not None and "samples_list" in state
         if resumed_loop:
-            samples_list = list(state["samples_list"])
-            logl_list = list(state["logl_list"])
+            samples_list, logl_list = self._resume_accumulator_lists(state, "samples_list", "logl_list")
             total_drawn = int(state["total_drawn"])
             n_accepted = int(state["n_accepted"])
             logger.info(
                 f"Resumed in-prior sampling at {n_accepted}/{target_nsamples} " f"accepted ({total_drawn} drawn)"
             )
-            # Re-register the freshly-copied accumulator lists: the in-loop
-            # updates below only pass scalar counters, so without this the
-            # checkpoint would keep pointing at the loaded (pre-resume) lists
-            # and lose everything appended after the resume.
             self._update_checkpoint_state(
                 samples_list=samples_list,
                 logl_list=logl_list,
@@ -1876,10 +1885,9 @@ class Laplace(Sampler):
             # be recomputed: every prior accept used this bound, and changing
             # it mid-run would invalidate the rejection sample).
             ln_M = float(state["ln_M"])
-            all_samples = list(state["all_samples"])
-            all_logl = list(state["all_logl"])
-            all_g_samples = list(state["all_g_samples"])
-            all_ln_r = list(state["all_ln_r"])
+            all_samples, all_logl, all_g_samples, all_ln_r = self._resume_accumulator_lists(
+                state, "all_samples", "all_logl", "all_g_samples", "all_ln_r"
+            )
             n_accepted = int(state["n_accepted"])
             n_proposed = int(state["n_proposed"])
             n_bound_violations = int(state.get("n_bound_violations", 0))
@@ -1887,10 +1895,6 @@ class Laplace(Sampler):
                 f"Resumed rejection sampling at {n_accepted}/{target_nsamples} "
                 f"accepted ({n_proposed} proposed, ln_M = {ln_M:.2f})"
             )
-            # Re-register the freshly-copied accumulator lists: the in-loop
-            # updates below only pass scalar counters, so without this the
-            # checkpoint would keep pointing at the loaded (pre-resume) lists
-            # and lose everything appended after the resume.
             self._update_checkpoint_state(
                 ln_M=ln_M,
                 all_samples=all_samples,
@@ -2065,19 +2069,14 @@ class Laplace(Sampler):
         state = self._checkpoint_state
         resumed_loop = state is not None and "all_samples" in state
         if resumed_loop:
-            all_samples = list(state["all_samples"])
-            all_logl = list(state["all_logl"])
-            all_g_samples = list(state["all_g_samples"])
-            all_ln_r = list(state["all_ln_r"])
+            all_samples, all_logl, all_g_samples, all_ln_r = self._resume_accumulator_lists(
+                state, "all_samples", "all_logl", "all_g_samples", "all_ln_r"
+            )
             n_accepted = int(state["n_accepted"])
             n_proposed = int(state["n_proposed"])
             logger.info(
                 f"Resumed importance sampling at {n_accepted}/{target_nsamples} " f"drawn ({n_proposed} proposed)"
             )
-            # Re-register the freshly-copied accumulator lists: the in-loop
-            # updates below only pass scalar counters, so without this the
-            # checkpoint would keep pointing at the loaded (pre-resume) lists
-            # and lose everything appended after the resume.
             self._update_checkpoint_state(
                 all_samples=all_samples,
                 all_logl=all_logl,
@@ -2113,19 +2112,7 @@ class Laplace(Sampler):
             g_df = self._replace_with_prior_samples(g_df, estimator.parameter_names)
             x = g_df.values
 
-            logpi = np.real(np.array(self.priors.ln_prob(g_df, axis=0)))
-            in_prior = ~np.isinf(logpi)
-            logl = np.full(batch_nsamples, -np.inf)
-            if in_prior.any():
-                logl[in_prior] = estimator.log_likelihood_from_array(x[in_prior].T)
-            else:
-                msg = "All proposal samples fell outside the prior"
-                if self.kwargs["fail_on_error"]:
-                    raise SamplerError(msg)
-                logger.debug(msg)
-
-            log_g = self._effective_log_proposal(proposal, x, estimator.parameter_names)
-            ln_r = logl + logpi - log_g
+            ln_r, logl = self._compute_ln_ratios(x, g_df, proposal, estimator)
 
             finite = np.isfinite(ln_r)
             if not finite.any():
