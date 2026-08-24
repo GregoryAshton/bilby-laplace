@@ -351,7 +351,7 @@ class Laplace(Sampler):
     minimization_method : str
         Optimization method. Default is ``'differential_evolution'`` (global
         optimizer; recommended for real data). Set to ``'Nelder-Mead'`` to use
-        the legacy multi-start local optimizer.
+        a multi-start local optimizer instead.
     plot_diagnostic : bool
         If True, produce a corner diagnostic plot after resampling.
     cov_scaling : float or dict
@@ -465,11 +465,9 @@ class Laplace(Sampler):
         analytic and exactly the proposal we constructed, mode weights
         included, and flow training stops being a source of run-to-run scatter.
 
-        **Measured much worse on the precessing BBH** -- mean JS divergence
-        from dynesty 86 mbits against 8.8 for the trained flow, with widths
-        collapsing to ~0.55 of the reference across the spin block, and the
-        schedule stretching from 10 tempering iterations to 12. The reason is
-        not that the mixture is Gaussian: it is that
+        **Measured substantially worse on a precessing-BBH example** than the
+        trained flow, on both divergence-from-reference and tempering-schedule
+        length. The reason is not that the mixture is Gaussian: it is that
         :class:`GaussianMixtureFlow` is built on plain ``multivariate_normal``
         and so is *unbounded and non-periodic*, while the trained flow inherits
         aspire's logit transform on bounded coordinates and angular treatment
@@ -498,10 +496,10 @@ class Laplace(Sampler):
         to a known mode is skipped before polishing, and a polished candidate
         closer than this is discarded as a duplicate.  Default 3.0.
 
-        Lower it when a real secondary mode sits close to the primary: on the
-        HLV example the second sky mode is 3.3 sigma away in azimuth and 2 sigma
-        in zenith, so at the default it is rejected as a duplicate and the
-        search keeps a distant sidelobe instead.  Raise it if one broad mode is
+        Lower it when a real secondary mode sits close to the primary -- e.g. a
+        sky-position mode only a few sigma away in some coordinates -- since at
+        the default such a mode is rejected as a duplicate and the search keeps
+        a distant sidelobe instead.  Raise it if one broad mode is
         being split into several.  This is deliberately per-run rather than a
         new default -- the right value depends on how well separated the
         posterior's modes are, which is the thing being discovered.
@@ -1415,10 +1413,10 @@ class Laplace(Sampler):
         # reads the returned evidence as a log Bayes factor and adds the noise
         # evidence back on top (see ``bilby.core.sampler.run_sampler``), so the
         # noise term has to come off here first.  The per-sample values take the
-        # identical shift -- subtracting it from ``logl`` alone, as this did,
-        # left one extra noise evidence in the reported log Z: ~13000 nats on a
-        # GW likelihood, enough to make log Z incomparable with any other
-        # sampler.  Shifting by a constant leaves ``log_evidence_err`` alone.
+        # identical shift, so both stay on the same (log Bayes factor)
+        # convention bilby expects; leaving ``logl`` on the full-log-Z
+        # convention here would double-count the noise evidence once bilby
+        # adds it back.  Shifting by a constant leaves ``log_evidence_err`` alone.
         if self.use_ratio:
             log_noise_evidence = self.likelihood.noise_log_likelihood()
             logl -= log_noise_evidence
@@ -1518,11 +1516,10 @@ class Laplace(Sampler):
             g_batch = pd.DataFrame(x_batch, columns=parameter_names)
             # Substitute the prior-drawn parameters *before* the support test,
             # as `_run_inprior` and the weighted loops do.  Doing it afterwards
-            # (as this used to) hands back a cloud that was filtered and then
-            # perturbed: a fresh draw for one parameter can push an accepted
-            # sample back outside the support, which on a constrained prior
-            # silently reintroduces exactly the points this filter exists to
-            # remove.
+            # would hand back a cloud that was filtered and then perturbed: a
+            # fresh draw for one parameter can push an accepted sample back
+            # outside the support, which on a constrained prior silently
+            # reintroduces exactly the points this filter exists to remove.
             g_batch = self._replace_with_prior_samples(g_batch, parameter_names)
             x_batch = g_batch.values
             logpi = np.real(np.array(self.priors.ln_prob(g_batch, axis=0)))
@@ -1760,11 +1757,9 @@ class Laplace(Sampler):
         """Find the posterior modes and build the proposal every mode draws from.
 
         This runs *before* the resampling branch, so ``n_modes`` applies to
-        every method rather than to ``smc`` alone. It used to live inside
-        ``_run_smc``, which made an ``inprior`` or ``rejection`` run a single
-        Gaussian on the primary MAP however many modes were requested -- so the
-        cheap methods were not seeded from the same distribution as SMC and the
-        comparison between them was not controlled.
+        every method rather than to ``smc`` alone: every resampling method is
+        seeded from the same mixture proposal, so comparisons between them
+        stay controlled.
 
         Returns ``(proposal, modes, log_weights)`` where *modes* is a list of
         ``(mean, cov, log_posterior)`` triples (one entry, with
@@ -3145,8 +3140,7 @@ class Laplace(Sampler):
         than the Gaussian predicts, and that eigenvalue is inflated to match.
         Directions are never shrunk.
 
-        Two things keep that from running away, both learned from the 3G BNS,
-        where this step turned a sound proposal into the prior.
+        Two things keep that from running away.
 
         It works in *prior-scaled* coordinates, as the rest of the estimator
         does -- the unit-cube path, ``_floor_precision_at_prior``, and the
@@ -3157,13 +3151,11 @@ class Laplace(Sampler):
 
         And no direction is inflated past the prior. A posterior cannot be
         wider than its prior, so a scaled eigenvalue above 1 is not a wide
-        posterior but a failed probe. That matters here because the BNS Fisher
-        is genuinely rank-deficient -- 5 of 13 scaled eigenvalues sit below 1,
-        the smallest at 2e-13 -- so those directions are already at prior width
-        by the time this runs. The probe then finds the likelihood flat along
-        them, which is true and not informative, and without the cap it widens
-        them further; chirp_mass reached 696x dynesty's width, i.e. the prior,
-        from a Fisher that gave 1.36x.
+        posterior but a failed probe: on a Fisher with genuinely rank-deficient
+        (near-zero) eigenvalues, those directions are already at prior width by
+        the time this runs, the probe then finds the likelihood flat along
+        them (true but uninformative), and without the cap it would widen them
+        past the prior on that alone.
         """
         prior_sd = np.asarray(estimator._prior_standard_deviations(), dtype=float)
         outer_sd = np.outer(prior_sd, prior_sd)
@@ -3201,15 +3193,13 @@ class Laplace(Sampler):
             # step is far below the scale on which the likelihood varies
             # smoothly, so the probe is reading its numerical noise floor.
             #
-            # The second is what happens on a sharply-measured parameter. On
-            # the 3G BNS the chirp_mass eigendirection has sigma = 3.2e-6
-            # against a log-likelihood of ~1.8e5; the measured drop came out at
-            # 4e-9 and the direction was widened by a factor of 11391 in sigma,
-            # with geocent_time close behind at 2792. Four directions were
-            # driven to the same 3.6e-2, which is the signature of a floor
-            # being hit rather than of anything measured. Truncation to the
-            # prior then hid it, leaving a "Laplace proposal" that was the
-            # prior in those coordinates.
+            # The second is what happens on a sharply-measured parameter, whose
+            # 1-sigma step is small enough that the measured drop is dominated
+            # by floating-point noise rather than genuine curvature. Without a
+            # floor, several such directions can all get driven to the same
+            # noise-floor drop and be "widened" by an enormous, meaningless
+            # factor; truncation to the prior then hides it, leaving a
+            # "Laplace proposal" that is the prior in those coordinates.
             #
             # Below the threshold the direction is treated as unresolved and
             # given the same bounded widening as a flat one, rather than an
@@ -3223,11 +3213,10 @@ class Laplace(Sampler):
                 # negative, i.e. the likelihood rising into numerical noise --
                 # says the probe could not resolve the direction, not that the
                 # posterior is wide along it. Widening anyway, even by a
-                # "safe" bounded factor, is what wrecked this: a near-null
-                # direction sits close to prior width already, so 4x takes it
-                # to the prior, and any parameter with a component along it
-                # inherits that. On the BNS it moved chirp_mass from 1.36x
-                # dynesty to 84x while the measured drops were ~1e-6.
+                # "safe" bounded factor, is unsound: a near-null direction can
+                # already sit close to prior width, so even a modest widening
+                # factor pushes it (and any parameter with a component along
+                # it) out to the prior on noise alone.
                 #
                 # Directions the data genuinely does not constrain are not
                 # lost: they already carry large variance from the Fisher, and
@@ -3258,14 +3247,11 @@ class Laplace(Sampler):
         # Use 1e-9 * max as the floor to stay comfortably above that threshold.
         #
         # Applied in prior-scaled coordinates. A ridge proportional to the
-        # identity in *raw* units is set by the largest-scale parameter and
-        # swamps the smallest: on the BNS, lambda carries a variance ~1e4, so
-        # the floor came out at ~1e-5 and was added to chirp_mass, whose
-        # variance is ~5e-9. That alone widened chirp_mass by a factor of 45 --
-        # far more than anything the validation above was doing -- and it fired
-        # whether or not a single direction had been inflated. Scaling first
-        # gives each parameter a jitter proportional to its own prior width,
-        # which is the same convention the rest of the estimator uses.
+        # identity in *raw* units is set by the largest-variance parameter and
+        # would swamp the smallest, added regardless of whether any direction
+        # had actually been inflated. Scaling first gives each parameter a
+        # jitter proportional to its own prior width, which is the same
+        # convention the rest of the estimator uses.
         scaled_out = 0.5 * (cov / outer_sd + (cov / outer_sd).T)
         eigvals_out = np.linalg.eigvalsh(scaled_out)
         min_floor = max(1e-9 * eigvals_out.max(), 1e-30)
@@ -3334,12 +3320,10 @@ class Laplace(Sampler):
 
         Taking the primary rather than recomputing it is what makes
         ``n_modes > 1`` a superset of ``n_modes = 1`` instead of a different
-        analysis.  This used to run its own differential evolution, ignoring
-        ``use_injection_for_map`` and skipping the polish that secondary
-        candidates get; on the HLV example that landed 59-200 nats below the
-        injection-seeded MAP and at the wrong sky position, which lengthened the
-        SMC schedule from ~7 tempering iterations to 15+ purely by degrading the
-        seed.  It also cost a redundant global optimisation and Hessian.
+        analysis: recomputing it here would ignore ``use_injection_for_map``
+        and skip the polish that secondary candidates get, degrading the seed
+        that later resampling (e.g. SMC's tempering schedule) relies on, as
+        well as costing a redundant global optimisation and Hessian.
 
         Returns a list of ``(mean, cov, log_posterior)`` triples sorted by
         descending log-posterior.

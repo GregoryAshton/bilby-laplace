@@ -38,13 +38,10 @@ MISSING = "—"
 # value could not be compared with the same example's value from last week, let
 # alone with another example's.
 #
-# 2000 rather than 1000: at 1000 the noise floor is 1.3-2.6 mbits, which is
-# larger than the divergences on the examples that agree well -- every gaussian
-# value sat below its own floor, and the ranking of the four samplers reversed
-# purely from the sample count. 2000 roughly halves that floor while still
-# fitting inside every posterior here, the smallest being a 2727-sample dynesty
-# run. It also matches the configuration study in paper/, which settled on the
-# same value for the same reason.
+# Chosen small enough to fit inside every posterior these comparisons run
+# against, but large enough that the finite-N bias noted above stays well
+# under the divergences being measured -- too small a value can make the
+# noise floor dominate the signal and even reverse a sampler ranking.
 #
 # Results shorter than this are reported as "—" rather than compared at a
 # smaller size, which would silently reintroduce exactly that problem.
@@ -73,12 +70,10 @@ TRUTH_COLOUR = "#000000"
 # Distribution names (as pip/PyPI knows them, not import names -- aspire's
 # import name is `aspire`, not `aspire-inference`), pulled per-row out of each
 # result's own `meta_data["environment_packages"]` (bilby's snapshot of the
-# conda/pip environment active when *that* result was produced). Motivated
-# directly by the minipcn regression this project has already hit once: a
-# same-numbered package reinstall silently changed SMC's behaviour, and
-# nothing about the example's own output would have caught it without the
-# exact version being on record next to the row it produced. Per-row, not a
-# single environment-wide query at `make compare` time, because different
+# conda/pip environment active when *that* result was produced). Recorded
+# because a same-numbered package reinstall can silently change sampler
+# behaviour with nothing in the example's own output to catch it. Per-row, not
+# a single environment-wide query at `make compare` time, because different
 # rows can come from results generated at different times (or copied in from
 # elsewhere) under different environments -- a single query would silently
 # misattribute those versions to every row.
@@ -517,9 +512,9 @@ def reference_floor(results, reference_index):
 
     Returns ``({metric: floor}, n_used)``, one floor per :data:`METRICS`. It
     takes two *disjoint* draws and so needs ``2 * JSD_N`` samples, which not
-    every reference has -- the gaussian example's dynesty run has 2727. Rather
-    than report nothing there, it falls back to the largest disjoint split the
-    posterior does support and returns that size. Since the floor falls with N,
+    every reference has. Rather than report nothing there, it falls back to
+    the largest disjoint split the posterior does support and returns that
+    size. Since the floor falls with N,
     a value measured at ``n_used < JSD_N`` is an upper bound on the floor at
     ``JSD_N``, which is still enough to tell a real difference from noise.
 
