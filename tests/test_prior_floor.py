@@ -1,11 +1,11 @@
 """Tests for the prior bound on the waveform precision.
 
 A direction the data does not constrain must fall back to the prior's width.
-The scale used for that fallback matters: the previous ``width / sqrt(12)``
-form is the std of a *uniform* prior, which overstates a ``Sine`` prior by 32%
-and an ``AlignedSpin`` by 73% -- and on the precessing BBH example that
-inflated tilt_2 to 1.33x dynesty's width.  Whitening by the sampled prior
-covariance instead makes the floor exact for any prior.
+The scale used for that fallback matters: ``width / sqrt(12)`` is the std of a
+*uniform* prior, so it overstates the width of any non-uniform prior (e.g. a
+``Sine`` or ``AlignedSpin``), which inflates the fallback beyond the true
+prior width.  Whitening by the sampled prior covariance instead makes the
+floor exact for any prior.
 """
 
 import bilby
@@ -73,9 +73,9 @@ def test_the_bound_never_narrows_a_marginal_already_inside_the_prior(sine_estima
     """The property the eigenvalue floor did not have, and the reason it changed.
 
     Flooring rescaled *eigenvalues* at 1 only ever adds precision, so it could
-    only shrink marginals -- including ones already narrower than the prior. On
-    the precessing BBH that left tilt_1's proposal at 0.69x dynesty. Capping
-    the marginals instead must leave those untouched.
+    only shrink marginals -- including ones already narrower than the prior,
+    which it would narrow further with no justification. Capping the
+    marginals instead must leave those untouched.
     """
     rng = np.random.default_rng(1)
     prior_var = sine_estimator._prior_standard_deviations() ** 2

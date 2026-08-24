@@ -5,11 +5,11 @@
     std(population energies) <= atol + tol * |mean(population energies)|
 
 with defaults ``atol=0, tol=0.01``.  An unnormalised log-posterior carries the
-noise evidence as an additive constant -- ~1.8e5 nats on a 3G BNS -- so the
-relative term made the search stop after a single iteration, 69 to 4700 nats
-short of the optimum on the P--P injections.  The offset is arbitrary, so the
-criterion has to be absolute; these tests pin that, using a likelihood whose
-only unusual feature is a large constant added to it.
+noise evidence as an arbitrary additive constant, so a purely relative
+criterion can converge after a single iteration, well short of the optimum,
+just because that offset is large.  The criterion has to be absolute instead;
+these tests pin that, using a likelihood whose only unusual feature is a
+large constant added to it.
 """
 
 import bilby

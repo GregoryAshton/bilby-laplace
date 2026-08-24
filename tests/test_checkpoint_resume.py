@@ -1,6 +1,6 @@
 """Regression tests for checkpoint/resume of the batched resampling loops.
 
-These guard against the accumulator-desync bug (H1): on resume the sample
+These guard against an accumulator-desync bug: on resume the sample
 accumulator lists are rebuilt as fresh copies, so they must be re-registered
 into ``_checkpoint_state`` -- otherwise the checkpoint keeps pointing at the
 loaded (pre-resume) lists and silently drops everything appended after the

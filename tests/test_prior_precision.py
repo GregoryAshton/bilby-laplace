@@ -1,12 +1,12 @@
 """Tests for the bound on the prior's contribution to the precision.
 
 ``_prior_precision_diag`` differences ``-d^2 log pi / dtheta^2`` at the MAP.
-Pointwise that curvature is unbounded in both directions, and on a real GW prior
-both bites: an ``AlignedSpin`` density diverges logarithmically at chi = 0, the
-MAP of a log-posterior is drawn onto that cusp, and differencing there returns
-~1.5e7 -- which collapsed chi_2's proposal width by a factor of ~800 on the HLV
-example, with the likelihood Fisher contributing nothing to that number.  On the
-flank of the same cusp the curvature goes negative, subtracting information.
+Pointwise that curvature is unbounded in both directions, and on a real GW
+prior both bite: an ``AlignedSpin`` density diverges logarithmically at
+chi = 0, the MAP of a log-posterior is drawn onto that cusp, and differencing
+there returns a huge value that can collapse a parameter's estimated width to
+near zero even with the likelihood contributing no information.  On the flank
+of the same cusp the curvature goes negative, subtracting information.
 
 The bound is ``1 / Var(prior)``: a prior cannot pin a parameter down more
 tightly than its own spread, nor supply negative information.  It has no free
