@@ -446,7 +446,7 @@ class Laplace(Sampler):
         Which of the two ways to find secondary modes are used, when
         ``n_modes > 1``: ``'hypercube'`` (the stochastic multi-start search
         described under ``n_modes``) and ``'symmetric'`` (seeding the modes
-        implied by ``mode_symmetries``, see ``_add_symmetric_modes``).  Default
+        implied by ``mode_symmetries``, see ``_symmetry_candidates``).  Default
         ``('hypercube', 'symmetric')`` runs both, matching every prior
         behaviour.  A third, ``'multistart'``, is available but off by default
         -- see ``mode_multistart_nstarts``.  Unknown entries raise
@@ -3414,36 +3414,91 @@ class Laplace(Sampler):
         if not np.isfinite(separation) or separation <= 0:
             raise SamplerError(f"mode_separation_sigma must be finite and positive, got {separation!r}.")
 
-        # --- 2. The searches, in order.  Each only ever *adds* candidates. ---
+        # --- 2. Discovery: every enabled search *proposes*, none accepts. ---
+        # The searches used to append directly, each stopping once n_modes was
+        # reached.  That made the budget first-come-first-served and the order
+        # in `mode_searches` silently decisive: on GW150914 the hypercube search
+        # filled all four secondary slots with near-duplicate azimuth modes
+        # (log-posteriors within 0.5 of the primary) and multistart, running
+        # second, had its every candidate discarded -- enabling it did nothing
+        # at all, with no error and no warning.  Candidates now go into one pool
+        # and compete on merit, so "up to n_modes modes" means the best n_modes
+        # found rather than the first n_modes proposed.
+        candidates = []
         if "hypercube" in searches:
-            found_modes = self._add_hypercube_modes(
-                estimator, found_modes, std_scale, separation, n_modes, cov_scaling, parameter_names, best_mean
+            candidates += self._hypercube_candidates(
+                estimator, std_scale, separation, n_modes, parameter_names, best_mean, found_modes
             )
         else:
             logger.info("mode_searches omits 'hypercube': skipping the stochastic multi-start search.")
 
         if "multistart" in searches:
-            found_modes = self._add_multistart_modes(
-                estimator, found_modes, std_scale, separation, n_modes, cov_scaling, parameter_names
-            )
+            candidates += self._multistart_candidates(estimator, parameter_names)
 
+        # Mirrors are proposed against the primary and every candidate, so a
+        # symmetry-implied mode competes on the same footing as a found one.
         if "symmetric" in searches:
-            found_modes = self._add_symmetric_modes(estimator, found_modes, std_scale, separation)
+            candidates += self._symmetry_candidates(estimator, found_modes, candidates)
 
-        # --- 3. Sort and summarise ---
+        # --- 3. Selection: rank the pool, materialise covariances top-down. ---
+        found_modes = self._select_modes(
+            estimator, found_modes, candidates, std_scale, separation, n_modes, cov_scaling, parameter_names
+        )
+
+        # --- 4. Sort and summarise ---
         found_modes.sort(key=lambda r: r[2], reverse=True)
         # The caller logs the summary once the mixture weights are known.
         return found_modes
 
-    def _add_hypercube_modes(
-        self, estimator, found_modes, std_scale, separation, n_modes, cov_scaling, parameter_names, best_mean
+    def _select_modes(
+        self, estimator, found_modes, candidates, std_scale, separation, n_modes, cov_scaling, parameter_names
     ):
+        """Keep the best *n_modes* of *candidates*, primary included.
+
+        Ranking is by log-posterior, and the Hessian is paid for only on
+        acceptance: a candidate that loses the competition never costs one.  A
+        candidate carrying a ``cov`` (a symmetry mirror, which inherits its
+        source's curvature by construction) skips the Hessian entirely.
+        """
+        if not candidates:
+            return found_modes
+
+        candidates.sort(key=lambda c: c["logp"], reverse=True)
+        logger.info(
+            f"Selecting up to {n_modes - len(found_modes)} of {len(candidates)} candidate mode(s) "
+            f"from {sorted({c['source'] for c in candidates})}"
+        )
+        for cand in candidates:
+            if len(found_modes) >= n_modes:
+                break
+            mean, logp = cand["mean"], cand["logp"]
+            if not np.isfinite(logp):
+                continue
+            if any(np.max(np.abs(mean - m) / std_scale) < separation for m, _, _ in found_modes):
+                continue
+            found_modes = self._append_mode(
+                estimator,
+                found_modes,
+                mean,
+                logp,
+                cov_scaling,
+                parameter_names,
+                label=f"Mode {len(found_modes)} ({cand['source']})",
+                context=f"{cand['source']} candidate",
+                cov=cand.get("cov"),
+            )
+        return found_modes
+
+    def _hypercube_candidates(self, estimator, std_scale, separation, n_modes, parameter_names, best_mean, found_modes):
         """Stochastic secondary-mode search over a Latin hypercube.
 
         Candidates are ranked by their log-posterior *before* polishing and only
         the best are polished, which is what keeps the cost bounded.  See
-        ``_add_multistart_modes`` for the case that ranking cannot serve.
+        ``_multistart_candidates`` for the case that ranking cannot serve.
+
+        Returns candidate dicts; acceptance is ``_select_modes``' job.
         """
+        proposed = []
         n_starts = self.kwargs["mode_search_nsamples"]
         subspace = self.kwargs.get("mode_search_subspace")
 
@@ -3483,7 +3538,7 @@ class Laplace(Sampler):
         prior_x = self._drop_constraint_violations(prior_x, parameter_names, "Mode search")
         if len(prior_x) == 0:
             logger.warning("Mode search: every Latin hypercube start violates a Constraint prior; no secondary modes")
-            return found_modes
+            return proposed
 
         prior_logp = np.array([float(estimator.log_posterior_from_array(x)) for x in prior_x])
 
@@ -3495,7 +3550,7 @@ class Laplace(Sampler):
         n_polished = 0
 
         for idx in order:
-            if len(found_modes) >= n_modes:
+            if len(proposed) >= n_modes:
                 break
             if n_polished >= max_polish:
                 break
@@ -3515,24 +3570,15 @@ class Laplace(Sampler):
             p_logp = -polished.fun
             logger.debug(f"Candidate {n_polished}: " f"log-posterior = {p_logp:.2f} " f"after local optimisation")
 
-            # Re-check after polishing
-            is_dup = any(np.max(np.abs(p_mean - m) / std_scale) < separation for m, _, _ in found_modes)
-            if is_dup:
+            # Re-check after polishing, against accepted modes and earlier proposals
+            known = [m for m, _, _ in found_modes] + [c["mean"] for c in proposed]
+            if any(np.max(np.abs(p_mean - m) / std_scale) < separation for m in known):
                 logger.debug(f"Candidate {n_polished} converged to " f"a known mode; skipping")
                 continue
 
-            found_modes = self._append_mode(
-                estimator,
-                found_modes,
-                p_mean,
-                p_logp,
-                cov_scaling,
-                parameter_names,
-                label=f"Secondary mode {len(found_modes)}",
-                context=f"candidate {n_polished}",
-            )
+            proposed.append(dict(mean=p_mean, logp=p_logp, source="hypercube"))
 
-        return found_modes
+        return proposed
 
     # Random prior starts for the full-space multi-start search.  Ten is chosen
     # from a measured hit rate rather than picked round: on the GW150914 example
@@ -3542,12 +3588,10 @@ class Laplace(Sampler):
     # follows, so the default buys that reliability for ~0.1% of a run.
     _MULTISTART_NSTARTS = 10
 
-    def _add_multistart_modes(
-        self, estimator, found_modes, std_scale, separation, n_modes, cov_scaling, parameter_names
-    ):
+    def _multistart_candidates(self, estimator, parameter_names):
         """Full-space multi-start: polish *every* start, then rank.
 
-        The distinction from ``_add_hypercube_modes`` is the ranking, not the
+        The distinction from ``_hypercube_candidates`` is the ranking, not the
         sampling.  That search scores its Latin hypercube points *before*
         polishing and only descends from the best -- which is exactly what hides
         a mode whose basin is shallow where you land but deep where it leads.
@@ -3571,13 +3615,13 @@ class Laplace(Sampler):
         n_starts = self._MULTISTART_NSTARTS if n_starts is None else int(n_starts)
         if n_starts <= 0:
             logger.info("mode_multistart_nstarts <= 0: skipping the full-space multi-start search.")
-            return found_modes
+            return []
 
         starts = self._latin_hypercube_prior(parameter_names, n_starts)
         starts = self._drop_constraint_violations(starts, parameter_names, "Multi-start mode search")
         if len(starts) == 0:
             logger.warning("Multi-start mode search: every start violates a Constraint prior; no modes added")
-            return found_modes
+            return []
 
         logger.info(
             f"Polishing all {len(starts)} full-space prior starts to search for secondary modes "
@@ -3592,32 +3636,23 @@ class Laplace(Sampler):
 
         # Rank *after* polishing -- the whole point of this search.
         candidates.sort(key=lambda c: c[1], reverse=True)
+        # Every finite optimum is proposed, not just the best n_modes: the
+        # pool is deduplicated at selection, and truncating here would hand
+        # back n_modes copies of whichever basin most starts fell into --
+        # burying exactly the rarer mode this search exists to find.
+        return [dict(mean=m, logp=lp, source="multistart") for m, lp in candidates if np.isfinite(lp)]
 
-        for p_mean, p_logp in candidates:
-            if len(found_modes) >= n_modes:
-                break
-            if not np.isfinite(p_logp):
-                continue
-            if any(np.max(np.abs(p_mean - m) / std_scale) < separation for m, _, _ in found_modes):
-                continue
-            found_modes = self._append_mode(
-                estimator,
-                found_modes,
-                p_mean,
-                p_logp,
-                cov_scaling,
-                parameter_names,
-                label=f"Multi-start mode {len(found_modes)}",
-                context="multi-start candidate",
-            )
+    def _append_mode(
+        self, estimator, found_modes, p_mean, p_logp, cov_scaling, parameter_names, label, context, cov=None
+    ):
+        """Validate and scale a candidate's covariance, then append it.
 
-        return found_modes
-
-    def _append_mode(self, estimator, found_modes, p_mean, p_logp, cov_scaling, parameter_names, label, context):
-        """Validate and scale a candidate's covariance, then append it."""
+        *cov*, when given, is reused instead of computing a Hessian -- a pure
+        translation carries the local curvature over unchanged.
+        """
         try:
             p_dict = dict(zip(parameter_names, p_mean))
-            p_covariance = estimator.calculate_posterior_covariance(p_dict)
+            p_covariance = estimator.calculate_posterior_covariance(p_dict) if cov is None else cov
             # Validate first, then scale last (see run_sampler for rationale).
             p_cov = self._validate_covariance(estimator, p_mean, p_covariance)
             p_cov = self._apply_cov_scaling(p_cov, cov_scaling)
@@ -3654,7 +3689,7 @@ class Laplace(Sampler):
     # mode; only a fictitious one should be rejected.
     _SYMMETRY_LOGP_TOL = -np.log(_MIN_MODE_WEIGHT_FOR_SYMMETRY)
 
-    def _add_symmetric_modes(self, estimator, found_modes, std_scale, separation):
+    def _symmetry_candidates(self, estimator, found_modes, candidates):
         """Seed the modes implied by an exact symmetry, rather than hunting them.
 
         Some posteriors are exactly periodic in one coordinate: on the
@@ -3676,10 +3711,16 @@ class Laplace(Sampler):
 
         The log-posterior is still evaluated at the mirrored point and compared
         with its source: the symmetry is verified, never assumed.
+
+        Mirrors are proposed for the primary *and* for every candidate the
+        other searches turned up, then compete for a slot like any other
+        candidate.  Each carries its source's covariance: a pure translation
+        leaves the local curvature unchanged, so the mirror reuses it rather
+        than paying for a second Hessian.
         """
         symmetries = self.kwargs.get("mode_symmetries") or []
         if not symmetries:
-            return found_modes
+            return []
 
         tol = self.kwargs.get("mode_symmetry_tol")
         tol = self._SYMMETRY_LOGP_TOL if tol is None else float(tol)
@@ -3689,14 +3730,18 @@ class Laplace(Sampler):
         names = list(estimator.parameter_names)
         lows = np.asarray(estimator.prior_bounds_min, dtype=float)
         highs = np.asarray(estimator.prior_bounds_max, dtype=float)
-        out = list(found_modes)
+
+        sources = [(m, c, lp) for m, c, lp in found_modes]
+        sources += [(c["mean"], None, c["logp"]) for c in candidates]
+
+        proposed = []
         for param, shift in symmetries:
             if param not in names:
                 logger.warning(f"mode_symmetries names {param!r}, which is not a sampled parameter; ignoring it.")
                 continue
             index = names.index(param)
             low, period = lows[index], highs[index] - lows[index]
-            for mean, cov, logp in list(out):
+            for mean, cov, logp in sources:
                 mirrored = np.array(mean, dtype=float)
                 mirrored[index] = low + np.mod(mirrored[index] + float(shift) - low, period)
                 mirrored_logp = float(estimator.log_posterior_from_array(mirrored))
@@ -3710,15 +3755,13 @@ class Laplace(Sampler):
                         "not seeding it."
                     )
                     continue
-                if any(np.max(np.abs(mirrored - m) / std_scale) < separation for m, _, _ in out):
-                    continue
-                out.append((mirrored, cov, mirrored_logp))
                 kind = "exact" if offset <= 1e-6 else f"approximate, share ~{np.exp(-offset):.3f}"
                 logger.info(
-                    f"Symmetry mode seeded: {param} {mean[index]:.4f} -> {mirrored[index]:.4f}, "
+                    f"Symmetry mode proposed: {param} {mean[index]:.4f} -> {mirrored[index]:.4f}, "
                     f"log-posterior = {mirrored_logp:.2f} ({kind}, offset {offset:.2e})"
                 )
-        return out
+                proposed.append(dict(mean=mirrored, logp=mirrored_logp, cov=cov, source="symmetry"))
+        return proposed
 
     # Mixture components holding less than this share of the total Laplace mass
     # are dropped rather than seeded.  Keeping them is worse than useless: such a

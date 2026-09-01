@@ -35,6 +35,20 @@ Versions correspond to git tags; version numbers follow
   lobe of two). No re-weighting of the mixture fixed the first problem, because the damage is which
   points enter the mixture, not how they are weighted once they are in it — `mode_searches=['symmetric']`
   removes the harmful search while keeping the essential one.
+- Secondary-mode searches now **pool their candidates and compete on merit** instead of appending
+  directly. Each enabled search proposes; a single selection step ranks the pool by log-posterior,
+  deduplicates, and materialises covariances top-down until `n_modes` is reached. Previously each
+  search appended as it went and stopped at `n_modes`, making the budget first-come-first-served and
+  the order in `mode_searches` silently decisive: on GW150914 `'hypercube'` filled every secondary
+  slot with near-duplicate azimuth modes (log-posteriors within 0.5 of the primary) and
+  `'multistart'`, running second, had all of its candidates discarded — enabling it did nothing at
+  all, with no error and no warning. "Up to `n_modes` modes" now means the best `n_modes` found
+  rather than the first `n_modes` proposed, and listing the searches in either order gives the same
+  result. The Hessian is still paid only on acceptance, so a losing candidate costs nothing, and
+  symmetry mirrors continue to inherit their source's covariance rather than computing one.
+  `mode_symmetries` mirrors are now proposed against the whole candidate pool, not only against
+  already-accepted modes, so a symmetry-implied mode can be seeded from a candidate another search
+  turned up.
 - `'multistart'` entry for `mode_searches`, with `mode_multistart_nstarts` (default 10) — a full-space
   multi-start secondary-mode search that polishes *every* random prior start and ranks only afterwards.
   The distinction from `'hypercube'` is the ranking, not the sampling: that search scores its Latin

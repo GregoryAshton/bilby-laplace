@@ -644,8 +644,14 @@ class _HiddenBasinLikelihood(bilby.core.likelihood.Likelihood):
     the primary MAP leaves that mode 24-51 nats down.
     """
 
-    A_MU, A_SIG, A_AMP = np.array([1.0, 0.0]), 1.2, 12.0
-    B_MU, B_SIG, B_AMP = np.array([-3.0, 3.0]), 0.30, 10.0
+    A_MU, A_SIG, A_AMP = np.array([1.0, 0.0]), 0.8, 12.0  # primary
+    B_MU, B_SIG, B_AMP = np.array([-3.0, 3.0]), 0.30, 10.0  # real secondary, off the subspace line
+    # Decoys on the y = 0 line, so a subspace search over x finds them, well
+    # separated in x so they survive deduplication, and shallower than the real
+    # secondary so merit-based selection prefers it. These stand in for
+    # GW150914's near-duplicate azimuth modes, which filled every slot.
+    D_MU = (np.array([-1.3, 0.0]), np.array([3.7, 0.0]))
+    D_SIG, D_AMP = 0.35, (8.5, 8.3)
 
     def __init__(self):
         super().__init__(parameters=dict(x=None, y=None))
@@ -653,9 +659,13 @@ class _HiddenBasinLikelihood(bilby.core.likelihood.Likelihood):
     def log_likelihood(self, parameters=None):
         p = parameters if parameters is not None else self.parameters
         v = np.array([p["x"], p["y"]], dtype=float)
-        a = self.A_AMP - 0.5 * np.sum(((v - self.A_MU) / self.A_SIG) ** 2)
-        b = self.B_AMP - 0.5 * np.sum(((v - self.B_MU) / self.B_SIG) ** 2)
-        return float(np.logaddexp(a, b))
+        terms = [
+            self.A_AMP - 0.5 * np.sum(((v - self.A_MU) / self.A_SIG) ** 2),
+            self.B_AMP - 0.5 * np.sum(((v - self.B_MU) / self.B_SIG) ** 2),
+        ]
+        for mu, amp in zip(self.D_MU, self.D_AMP):
+            terms.append(amp - 0.5 * np.sum(((v - mu) / self.D_SIG) ** 2))
+        return float(np.logaddexp.reduce(terms))
 
 
 @pytest.fixture
@@ -769,3 +779,81 @@ def test_multistart_composes_with_the_other_searches(sampler, hidden_estimator, 
     )
     assert len(modes) >= 1
     assert modes == sorted(modes, key=lambda r: r[2], reverse=True)
+
+
+# --- Pooled selection ------------------------------------------------------
+#
+# The searches used to append directly, each stopping at n_modes, so the budget
+# was first-come-first-served and the order in `mode_searches` was silently
+# decisive. On GW150914 the hypercube search filled every secondary slot with
+# near-duplicate azimuth modes and multistart, running second, had all of its
+# candidates discarded -- enabling it did nothing, with no error or warning.
+
+
+def test_a_search_that_fills_the_budget_does_not_starve_the_next(
+    sampler, hidden_estimator, hidden_primary, monkeypatch
+):
+    """The regression, tested at the mechanism rather than via geometry.
+
+    'hypercube' is made to return exactly n_modes junk candidates -- distinct
+    enough to survive deduplication, all shallower than the real secondary --
+    which is what it did on GW150914 with near-duplicate azimuth modes. Under
+    the old append-as-you-go code those filled every slot and multistart's
+    candidates were all discarded. Selection on merit must now prefer the
+    deeper mode regardless of which search proposed it.
+    """
+    junk = [
+        dict(mean=np.array([3.5, -2.5]), logp=-40.0, source="hypercube"),
+        dict(mean=np.array([-4.5, -3.5]), logp=-41.0, source="hypercube"),
+    ]
+    monkeypatch.setattr(sampler, "_hypercube_candidates", lambda *a, **k: list(junk))
+
+    modes = _run(
+        sampler,
+        hidden_estimator,
+        hidden_primary,
+        ["hypercube", "multistart"],
+        n_modes=2,
+        mode_multistart_nstarts=40,
+    )
+    assert _found_secondary(modes), (
+        "the budget-filling search starved the next one; " f"modes at {[m[0] for m in modes]}"
+    )
+    assert not any(m[2] < -30 for m in modes), "junk candidates outranked a real mode"
+
+
+def test_search_order_does_not_change_the_result(sampler, hidden_estimator, hidden_primary):
+    """Selection is on merit, so listing the searches either way round agrees."""
+    kw = dict(n_modes=3, mode_search_subspace=["x"], mode_search_nsamples=60, mode_multistart_nstarts=40)
+    a = _run(sampler, hidden_estimator, hidden_primary, ["hypercube", "multistart"], **kw)
+    b = _run(sampler, hidden_estimator, hidden_primary, ["multistart", "hypercube"], **kw)
+    assert _found_secondary(a) == _found_secondary(b) is True
+
+
+def test_selection_keeps_the_best_candidates(sampler, hidden_estimator, hidden_primary):
+    """Accepted modes are the highest-log-posterior ones, sorted descending."""
+    modes = _run(sampler, hidden_estimator, hidden_primary, ["multistart"], n_modes=3, mode_multistart_nstarts=30)
+    logps = [m[2] for m in modes]
+    assert logps == sorted(logps, reverse=True)
+    assert len(modes) <= 3
+
+
+def test_symmetry_mirrors_a_candidate_not_only_the_primary(sampler, periodic_estimator, periodic_mode, monkeypatch):
+    """Mirrors are proposed against the whole pool, so a symmetry mode can be
+    seeded from a candidate another search found rather than only the primary."""
+    mean, cov, logp = periodic_mode
+    offset = np.array([0.0, 0.9])
+    fake = [
+        dict(
+            mean=mean + offset,
+            logp=float(periodic_estimator.log_posterior_from_array(mean + offset)),
+            source="multistart",
+        )
+    ]
+    monkeypatch.setattr(sampler, "_multistart_candidates", lambda *a, **k: fake)
+    sampler.kwargs["mode_searches"] = ["multistart", "symmetric"]
+    sampler.kwargs["mode_symmetries"] = [("phi", np.pi)]
+    sampler.kwargs["mode_separation_sigma"] = 0.5
+    modes = sampler._find_multiple_maps(periodic_estimator, 4, np.ones(2), mean, cov)
+    phis = sorted(round(float(m[0][1]), 3) for m in modes)
+    assert len(modes) >= 3, f"expected the candidate and its mirror alongside the primary; got {phis}"
