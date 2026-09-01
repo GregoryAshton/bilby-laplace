@@ -934,9 +934,17 @@ class LaplacePosteriorEstimator:
 
         return covariance
 
+    # Sentinel accepted by :meth:`sample_array` in place of a parameter dict,
+    # meaning "find the expansion point yourself".  Spelt MAP, not maxL: the
+    # expansion point is the posterior mode, and nothing here computes a
+    # maximum-likelihood point.
+    _MAP_SENTINEL = "MAP"
+
     def sample_array(self, sample, n=1):
-        if sample == "maxL":
-            sample = self.get_maximum_likelihood_sample()
+        if isinstance(sample, str):
+            if sample != self._MAP_SENTINEL:
+                raise ValueError(f"sample must be a parameter dict or {self._MAP_SENTINEL!r}, got {sample!r}.")
+            sample = self.get_MAP_sample()
 
         self.mean = np.array(list(sample.values()))
         self.covariance = self.calculate_posterior_covariance(sample)
@@ -996,11 +1004,6 @@ class LaplacePosteriorEstimator:
             bounds=self.prior_bounds,
             method=local_method,
         )
-
-    def get_maximum_likelihood_sample(self, initial_sample=None):
-        """Alias for :meth:`get_MAP_sample`, used internally by
-        :meth:`sample_array` for ``sample='maxL'``."""
-        return self.get_MAP_sample(initial_sample)
 
     def get_MAP_sample(self, initial_sample=None):
         """Find the maximum a posteriori (MAP) estimate.

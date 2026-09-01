@@ -183,10 +183,17 @@ def test_get_map_multistart_nelder_mead(gaussian_likelihood, gaussian_priors):
     assert m["y"] == pytest.approx(MU[1], abs=1e-2)
 
 
-def test_maximum_likelihood_alias(estimator):
-    """Deprecated alias forwards to get_MAP_sample."""
-    m = estimator.get_maximum_likelihood_sample({"x": 0.9, "y": -0.4})
-    assert m["x"] == pytest.approx(MU[0], abs=1e-3)
+def test_sample_array_map_sentinel(estimator):
+    """'MAP' expands about the posterior mode."""
+    samples = estimator.sample_array("MAP", n=10)
+    assert samples.shape == (10, 2)
+    assert estimator.mean[0] == pytest.approx(MU[0], abs=1e-2)
+
+
+@pytest.mark.parametrize("bad", ["maxL", "maximum_likelihood"])
+def test_sample_array_rejects_unknown_string(estimator, bad):
+    with pytest.raises(ValueError, match="parameter dict"):
+        estimator.sample_array(bad, n=1)
 
 
 # ---------------------------------------------------------------------------

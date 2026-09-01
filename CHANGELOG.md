@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions correspond to git tags; version numbers follow
 [Semantic Versioning](https://semver.org/).
 
+- `get_maximum_likelihood_sample()`, a bare alias for `get_MAP_sample()`. It never computed a
+  maximum-*likelihood* point — like the `'maxL'` sentinel it backed, it maximises `log L + log pi`,
+  so with a non-flat prior it returned the MAP, not the MLE. Nothing in the package computes an
+  MLE: the Laplace expansion is about the posterior mode by construction. No alias (alpha).
+
 ---
 
 ## [Unreleased]
@@ -52,6 +57,10 @@ Versions correspond to git tags; version numbers follow
   `laplace.py`; `FisherMatrixPosteriorEstimator` → `LaplacePosteriorEstimator`; `calculate_FIM` →
   `calculate_posterior_precision`; `calculate_iFIM` → `calculate_posterior_covariance`. No
   backwards-compatible aliases (alpha).
+
+- The `sample_array`/`sample_dataframe` sentinel for "find the expansion point yourself" is now
+  `sample='MAP'` (was `'maxL'`), and any other string raises `ValueError` instead of being silently
+  treated as a parameter dict.
 
 ### Fixed
 
