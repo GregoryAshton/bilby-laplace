@@ -458,7 +458,7 @@ class Laplace(Sampler):
         physical modes -- one, 2.76 nats below the primary MAP and holding
         under 1% of the posterior mass by an independent reference, took 70%
         of the proposal weight under ``mode_weights='laplace'`` -- while the
-        *exact* ``delta_phase`` symmetry on the same problem is essential:
+        ``delta_phase`` symmetry on the same problem is essential:
         without it the run samples one lobe of two.  Neither problem is fixed
         by re-weighting the mixture (measured: every re-weighting scheme tried
         left the stochastic search's damage in place, because the damage is
@@ -513,14 +513,28 @@ class Laplace(Sampler):
         diagonal, which discards the correlation structure a degenerate
         posterior lives in. Use ``"learned"`` until one exists.
     mode_symmetries : list of (str, float) or None
-        Exact symmetries of the posterior, as ``(parameter, shift)`` pairs, used
-        to seed the modes they imply instead of relying on the random
-        multi-start search to rediscover them. For a posterior that is exactly
-        pi-periodic in ``delta_phase``, pass ``[("delta_phase", np.pi)]``. Each
-        implied mode is verified -- its log-posterior must match the one it
-        mirrors -- and skipped if the symmetry does not hold, so declaring a
-        wrong one is safe. Requires ``n_modes > 1``, which is what builds a
-        mixture at all. Default None.
+        Symmetries of the posterior, as ``(parameter, shift)`` pairs, used to
+        seed the modes they imply instead of relying on the random multi-start
+        search to rediscover them. For a posterior that is pi-periodic in
+        ``delta_phase``, pass ``[("delta_phase", np.pi)]``. Requires
+        ``n_modes > 1``, which is what builds a mixture at all. Default None.
+
+        The symmetry need not be *exact*. Each implied mode is verified by
+        evaluating the log-posterior at the mirrored point, and seeded when it
+        comes within ``mode_symmetry_tol`` of the mode it mirrors -- so an
+        approximate symmetry still contributes, weighted by how well it
+        actually holds, while one declared for a problem that does not have it
+        is skipped. Declaring a wrong symmetry remains safe.
+    mode_symmetry_tol : float or None
+        How many nats a symmetry-implied mode's log-posterior may fall below
+        the mode it mirrors and still be seeded. The mirror reuses its source's
+        covariance, so under ``mode_weights="laplace"`` an offset of ``d``
+        means the mirror takes a share ``exp(-d)`` of the pair -- this is
+        therefore a floor on how much posterior mass a symmetry-implied mode
+        must carry to be worth having. ``None`` (default) derives it from the
+        same threshold used to discard negligible mixture components, giving
+        ``-log(1e-3)`` ~ 6.9 nats: anything below that would be dropped by the
+        weighting anyway. Set ``0`` to demand an exact symmetry.
     mode_separation_sigma : float
         How far apart two modes must be, in units of the primary mode's
         per-parameter sigma, to count as distinct.  A candidate closer than this
@@ -710,6 +724,7 @@ class Laplace(Sampler):
         mode_search_subspace=None,
         mode_separation_sigma=3.0,
         mode_symmetries=None,
+        mode_symmetry_tol=None,
         smc_prior_flow="learned",
         mode_weights="equal",
         smc_kwargs=None,
@@ -3480,12 +3495,32 @@ class Laplace(Sampler):
         # The caller logs the summary once the mixture weights are known.
         return found_modes
 
-    # A symmetry-implied mode is seeded only when its log-posterior matches the
-    # one it mirrors to within this many nats.  An exact symmetry reproduces it
-    # to ~1e-9, so the tolerance is not there to be generous: it is what catches
-    # a symmetry declared for a problem that does not actually have it, which is
-    # then skipped rather than seeding the mixture with a fictitious component.
-    _SYMMETRY_LOGP_TOL = 0.5
+    # Shared with _MIN_MODE_WEIGHT below; defined here because the symmetry
+    # tolerance is derived from it and is needed first.
+    _MIN_MODE_WEIGHT_FOR_SYMMETRY = 1e-3
+
+    # How far a symmetry-implied mode's log-posterior may fall below the one it
+    # mirrors and still be seeded.  This is deliberately NOT a test of whether
+    # the symmetry is exact -- it is a test of whether the implied mode is worth
+    # having, and those are different questions.
+    #
+    # The mirror reuses its source's covariance, so under ``mode_weights='laplace'``
+    # the two components' log-determinant terms cancel exactly and the mirror's
+    # share of the mixture is just ``exp(-offset)``.  The right threshold is
+    # therefore the one already used to discard components that are too small to
+    # sample, ``_MIN_MODE_WEIGHT``: above it the mode survives weighting and is
+    # worth seeding, below it ``_drop_negligible_modes`` would throw it away
+    # anyway.  Seeding it costs nothing extra either way -- the covariance is
+    # carried over, not recomputed.
+    #
+    # The previous value here was 0.5 nats, chosen to verify exactness (an exact
+    # symmetry reproduces to ~1e-9).  That rejected modes precisely where they
+    # matter: on the XPHM BBH_HLV example the delta_phase mirror missed by 1.12
+    # nats and was skipped, yet it holds ~27% of the posterior (dynesty and
+    # aspire both put 0.22-0.27 of the mass in that lobe), and dropping it cost
+    # a 468 mbit JSD on delta_phase against dynesty.  A near-symmetry is still a
+    # mode; only a fictitious one should be rejected.
+    _SYMMETRY_LOGP_TOL = -np.log(_MIN_MODE_WEIGHT_FOR_SYMMETRY)
 
     def _add_symmetric_modes(self, estimator, found_modes, std_scale, separation):
         """Seed the modes implied by an exact symmetry, rather than hunting them.
@@ -3514,6 +3549,11 @@ class Laplace(Sampler):
         if not symmetries:
             return found_modes
 
+        tol = self.kwargs.get("mode_symmetry_tol")
+        tol = self._SYMMETRY_LOGP_TOL if tol is None else float(tol)
+        if tol < 0:
+            raise ValueError(f"mode_symmetry_tol must be non-negative, got {tol}")
+
         names = list(estimator.parameter_names)
         lows = np.asarray(estimator.prior_bounds_min, dtype=float)
         highs = np.asarray(estimator.prior_bounds_max, dtype=float)
@@ -3529,18 +3569,22 @@ class Laplace(Sampler):
                 mirrored[index] = low + np.mod(mirrored[index] + float(shift) - low, period)
                 mirrored_logp = float(estimator.log_posterior_from_array(mirrored))
                 offset = abs(mirrored_logp - logp)
-                if not np.isfinite(mirrored_logp) or offset > self._SYMMETRY_LOGP_TOL:
+                if not np.isfinite(mirrored_logp) or offset > tol:
+                    share = np.exp(-offset) if np.isfinite(mirrored_logp) else 0.0
                     logger.info(
                         f"Symmetry {param} + {float(shift):.4f} does not hold at "
-                        f"{mean[index]:.4f} (log-posterior differs by {offset:.2f}); not seeding it."
+                        f"{mean[index]:.4f} (log-posterior differs by {offset:.2f}, "
+                        f"implying a mixture share of {share:.2e} < {np.exp(-tol):.2e}); "
+                        "not seeding it."
                     )
                     continue
                 if any(np.max(np.abs(mirrored - m) / std_scale) < separation for m, _, _ in out):
                     continue
                 out.append((mirrored, cov, mirrored_logp))
+                kind = "exact" if offset <= 1e-6 else f"approximate, share ~{np.exp(-offset):.3f}"
                 logger.info(
                     f"Symmetry mode seeded: {param} {mean[index]:.4f} -> {mirrored[index]:.4f}, "
-                    f"log-posterior = {mirrored_logp:.2f} (matches its mirror to {offset:.2e})"
+                    f"log-posterior = {mirrored_logp:.2f} ({kind}, offset {offset:.2e})"
                 )
         return out
 
@@ -3551,7 +3595,7 @@ class Laplace(Sampler):
     # practice it is a likelihood sidelobe the mode search turned up and the
     # weighting correctly rejected (on the HLV example, one at exactly the
     # primary azimuth plus pi).
-    _MIN_MODE_WEIGHT = 1e-3
+    _MIN_MODE_WEIGHT = _MIN_MODE_WEIGHT_FOR_SYMMETRY
 
     def _drop_negligible_modes(self, found_modes, log_weights):
         """Discard mixture components below ``_MIN_MODE_WEIGHT``.

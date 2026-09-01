@@ -511,3 +511,110 @@ def test_symmetric_only_is_a_real_alternative_to_default(periodic_sampler, perio
     assert phis[0] == pytest.approx(mean[1], abs=1e-3)
     assert phis[-1] == pytest.approx((mean[1] + np.pi) % (2 * np.pi), abs=1e-3)
 
+
+# --- Approximate symmetries -------------------------------------------------
+#
+# `mode_symmetries` used to demand an *exact* mirror (0.5 nats), which rejected
+# modes precisely where they matter: on the XPHM BBH_HLV example the delta_phase
+# mirror missed by 1.12 nats and was skipped, yet dynesty and aspire both put
+# 0.22-0.27 of the posterior in that lobe, and losing it cost a 468 mbit JSD.
+# The tolerance is now a floor on how much mass an implied mode must carry.
+
+
+class _TiltedPeriodicLikelihood(_PeriodicSymmetricLikelihood):
+    """As the exact fixture, but with the pi-mirror tilted by a known offset.
+
+    Adding ``TILT * cos(phi - MU_PHI)`` leaves the pi-periodic structure intact
+    -- there are still two lobes -- but breaks their equality, exactly as
+    higher modes break the delta_phase degeneracy on a real BBH. At the mode
+    the tilt contributes ``+TILT``, at its mirror ``-TILT``, so the two differ
+    by ``2 * TILT`` nats and the mirror's share of the pair is ``exp(-2*TILT)``.
+    """
+
+    TILT = 0.56  # -> offset 1.12 nats, matching what BBH_HLV actually showed
+
+    def log_likelihood(self, parameters=None):
+        p = parameters if parameters is not None else self.parameters
+        base = super().log_likelihood(p)
+        return base + self.TILT * np.cos(p["phi"] - self.MU_PHI)
+
+
+@pytest.fixture
+def tilted_estimator(periodic_priors):
+    from bilby_laplace.laplace import LaplacePosteriorEstimator
+
+    return LaplacePosteriorEstimator(_TiltedPeriodicLikelihood(), periodic_priors)
+
+
+def _seed_symmetry(sampler, estimator, monkeypatch, tol=None):
+    """Run only the symmetric search on *estimator*, returning the modes."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("this test must not run the hypercube search")
+
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", _boom)
+    sampler.kwargs["mode_searches"] = ["symmetric"]
+    sampler.kwargs["mode_symmetries"] = [("phi", np.pi)]
+    sampler.kwargs["mode_symmetry_tol"] = tol
+    # The tilt shifts the peak slightly off MU_PHI; locate it on a fine grid so
+    # the fixture stays analytic rather than depending on the optimiser.
+    L = _TiltedPeriodicLikelihood
+    grid = np.linspace(0.0, 2 * np.pi, 20001)
+    lp = np.array([estimator.log_posterior_from_array(np.array([L.MU_X, g])) for g in grid])
+    mean = np.array([L.MU_X, grid[int(np.argmax(lp))]])
+    cov = np.diag([L.SIGMA_X**2, 1.0 / (4.0 * L.KAPPA)])
+    logp = float(estimator.log_posterior_from_array(mean))
+    modes = sampler._find_multiple_maps(estimator, 2, np.ones(2), mean, cov)
+    return modes, (mean, logp)
+
+
+def test_approximate_symmetry_is_seeded(sampler, tilted_estimator, monkeypatch):
+    """A mirror that misses by ~1.12 nats -- the BBH_HLV case -- is seeded, and
+    carries its own (lower) log-posterior rather than its source's."""
+    modes, (mean, logp) = _seed_symmetry(sampler, tilted_estimator, monkeypatch)
+
+    assert len(modes) == 2, "the approximate mirror should have been seeded"
+    mirror = modes[1] if np.allclose(modes[0][0], mean) else modes[0]
+    offset = abs(mirror[2] - logp)
+    assert 0.5 < offset < 3.0, f"fixture should sit above the old 0.5 tol, got {offset}"
+    assert mirror[2] < logp, "the tilted mirror must be the shallower lobe"
+
+
+def test_exact_tolerance_still_rejects_an_approximate_mirror(sampler, tilted_estimator, monkeypatch):
+    """mode_symmetry_tol=0 restores the old exact-only behaviour."""
+    modes, _ = _seed_symmetry(sampler, tilted_estimator, monkeypatch, tol=0.0)
+    assert len(modes) == 1, "tol=0 must demand an exact symmetry"
+
+
+def test_fictitious_symmetry_is_still_rejected(sampler, periodic_estimator, periodic_mode, monkeypatch):
+    """A symmetry the posterior does not have must still be skipped: the point
+    of widening the tolerance is to admit real modes, not fictitious ones."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("this test must not run the hypercube search")
+
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", _boom)
+    mean, cov, _ = periodic_mode
+    sampler.kwargs["mode_searches"] = ["symmetric"]
+    # phi is pi-periodic, so a pi/2 shift lands on a trough, not a mode.
+    sampler.kwargs["mode_symmetries"] = [("phi", np.pi / 2)]
+    sampler.kwargs["mode_symmetry_tol"] = None
+
+    modes = sampler._find_multiple_maps(periodic_estimator, 2, np.ones(2), mean, cov)
+    assert len(modes) == 1
+
+
+def test_default_tolerance_matches_the_negligible_weight_threshold(sampler):
+    """The default tolerance is tied to _MIN_MODE_WEIGHT, so a symmetry mode is
+    admitted exactly when it would survive _drop_negligible_modes."""
+    assert sampler._SYMMETRY_LOGP_TOL == pytest.approx(-np.log(sampler._MIN_MODE_WEIGHT))
+    assert np.exp(-sampler._SYMMETRY_LOGP_TOL) == pytest.approx(sampler._MIN_MODE_WEIGHT)
+
+
+def test_negative_tolerance_is_rejected(sampler, periodic_estimator, periodic_mode):
+    mean, cov, _ = periodic_mode
+    sampler.kwargs["mode_searches"] = ["symmetric"]
+    sampler.kwargs["mode_symmetries"] = [("phi", np.pi)]
+    sampler.kwargs["mode_symmetry_tol"] = -1.0
+    with pytest.raises(ValueError, match="non-negative"):
+        sampler._find_multiple_maps(periodic_estimator, 2, np.ones(2), mean, cov)

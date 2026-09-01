@@ -6,11 +6,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions correspond to git tags; version numbers follow
 [Semantic Versioning](https://semver.org/).
 
-- `get_maximum_likelihood_sample()`, a bare alias for `get_MAP_sample()`. It never computed a
-  maximum-*likelihood* point — like the `'maxL'` sentinel it backed, it maximises `log L + log pi`,
-  so with a non-flat prior it returned the MAP, not the MLE. Nothing in the package computes an
-  MLE: the Laplace expansion is about the posterior mode by construction. No alias (alpha).
-
 ---
 
 ## [Unreleased]
@@ -40,6 +35,18 @@ Versions correspond to git tags; version numbers follow
   lobe of two). No re-weighting of the mixture fixed the first problem, because the damage is which
   points enter the mixture, not how they are weighted once they are in it — `mode_searches=['symmetric']`
   removes the harmful search while keeping the essential one.
+- `mode_symmetry_tol` parameter — how many nats a `mode_symmetries`-implied mode's log-posterior may
+  fall below the mode it mirrors and still be seeded. The mirror reuses its source's covariance, so
+  under `mode_weights='laplace'` an offset of `d` means the mirror takes a share `exp(-d)` of the
+  pair; the tolerance is therefore a floor on how much posterior mass an implied mode must carry to
+  be worth having, not a test of whether the symmetry is exact. Default `None` derives it from the
+  same threshold used to drop negligible mixture components (`-log(1e-3)` ~ 6.9 nats), so a symmetry
+  mode is admitted exactly when it would survive the weighting. `0` restores exact-only matching.
+  The previous fixed 0.5-nat tolerance rejected modes precisely where they matter: on an
+  IMRPhenomXPHM precessing-BBH example the `delta_phase` mirror missed by 1.12 nats and was skipped,
+  yet dynesty and aspire independently put 0.22-0.27 of the posterior in that lobe, and losing it
+  left the SMC run sampling one lobe of two — a 468 mbit JSD on `delta_phase` against dynesty. A
+  near-symmetry is still a mode; only a fictitious one should be rejected.
 - SMC resampling via aspire (`resample='smc'`), including multi-mode discovery and Gaussian mixture proposals.
 - `inprior` resampling mode — filters proposal samples to prior support without likelihood evaluation.
 - Aligned initial samples for SMC — uses `_draw_inprior_samples()` helper to match rejection/importance sampling.
@@ -68,7 +75,6 @@ Versions correspond to git tags; version numbers follow
   `laplace.py`; `FisherMatrixPosteriorEstimator` → `LaplacePosteriorEstimator`; `calculate_FIM` →
   `calculate_posterior_precision`; `calculate_iFIM` → `calculate_posterior_covariance`. No
   backwards-compatible aliases (alpha).
-
 - The `sample_array`/`sample_dataframe` sentinel for "find the expansion point yourself" is now
   `sample='MAP'` (was `'maxL'`), and any other string raises `ValueError` instead of being silently
   treated as a parameter dict.
@@ -128,6 +134,10 @@ Versions correspond to git tags; version numbers follow
   likelihood. The test it replaced was both duplicated and weaker (box only).
 - Manual finite-difference Hessian fallback and the `fd_eps` parameter — `scipy.differentiate.hessian`
   (scipy ≥ 1.15) is now required and used unconditionally. Dropped the `packaging` dependency.
+- `get_maximum_likelihood_sample()`, a bare alias for `get_MAP_sample()`. It never computed a
+  maximum-*likelihood* point — like the `'maxL'` sentinel it backed, it maximises `log L + log pi`,
+  so with a non-flat prior it returned the MAP, not the MLE. Nothing in the package computes an
+  MLE: the Laplace expansion is about the posterior mode by construction. No alias (alpha).
 
 ---
 
