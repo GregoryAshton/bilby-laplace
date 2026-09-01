@@ -500,6 +500,7 @@ class Laplace(Sampler):
         being split into several.  This is deliberately per-run rather than a
         new default -- the right value depends on how well separated the
         posterior's modes are, which is the thing being discovered.
+    mode_weights : str
         How to weight the mixture components when ``n_modes > 1``.  ``'equal'``
         (default) gives every mode the same weight.  ``'laplace'`` weights each
         by its Laplace local evidence -- log-posterior at the mode plus half the
