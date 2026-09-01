@@ -35,6 +35,16 @@ Versions correspond to git tags; version numbers follow
   lobe of two). No re-weighting of the mixture fixed the first problem, because the damage is which
   points enter the mixture, not how they are weighted once they are in it — `mode_searches=['symmetric']`
   removes the harmful search while keeping the essential one.
+- The finished mode mixture is persisted to `result.meta_data["mode_mixture"]` — per mode: mean,
+  sigma, full covariance, log-posterior, mixture weight, and **which search proposed it** — alongside
+  the parameter names, `n_modes` requested and found, and the `mode_searches`/`mode_weights` used.
+  Previously this existed only in the job log, so a finished result carried the samples but no record
+  of how many modes were found, where, with what weight, or by which search; a campaign over
+  mode-search settings could not be analysed after the fact without re-reading logs. Stored as
+  columns rather than a list of per-mode dicts, because bilby's hdf5 writer silently drops the
+  latter (the group is simply absent on read-back) and columns are what an analysis wants anyway.
+  Provenance is keyed by the mode's mean rather than its position, so it survives the sort by
+  log-posterior and the `_drop_negligible_modes` filter.
 - Secondary-mode searches now **pool their candidates and compete on merit** instead of appending
   directly. Each enabled search proposes; a single selection step ranks the pool by log-posterior,
   deduplicates, and materialises covariances top-down until `n_modes` is reached. Previously each

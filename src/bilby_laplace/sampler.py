@@ -1551,6 +1551,9 @@ class Laplace(Sampler):
             self.result.num_likelihood_evaluations = int(nlikelihood)
         run_stats["sampling_time_s"] = self.sampling_time.total_seconds()
         self.result.meta_data["run_statistics"] = run_stats
+        mode_record = getattr(self, "_mode_record", None)
+        if mode_record is not None:
+            self.result.meta_data["mode_mixture"] = mode_record
 
     def _sample_laplace(self, mean, cov, estimator, target_nsamples):
         """Draw samples directly from the Gaussian approximation without resampling.
@@ -1866,6 +1869,7 @@ class Laplace(Sampler):
         proposal = self._mode_proposal(estimator, modes, log_weights)
         weights = getattr(proposal, "weights", np.array([1.0]))
         self._log_mode_summary(modes, estimator.parameter_names, weights)
+        self._mode_record = self._build_mode_record(modes, weights, estimator.parameter_names)
         return proposal, modes, log_weights
 
     def _run_smc(self, proposal, estimator, modes, log_weights):
@@ -3398,6 +3402,10 @@ class Laplace(Sampler):
         logger.info(f"Primary mode taken from the MAP search: " f"log-posterior = {best_logp:.2f}")
 
         found_modes = [(best_mean, cov, best_logp)]
+        # Which search proposed each mode.  Keyed by the mean's bytes rather
+        # than by index: the list is sorted by log-posterior below and later
+        # filtered by _drop_negligible_modes, and neither preserves position.
+        self._mode_sources = {best_mean.tobytes(): "primary"}
 
         if n_modes <= 1:
             self._log_mode_summary(found_modes, parameter_names)
@@ -3486,6 +3494,7 @@ class Laplace(Sampler):
                 label=f"Mode {len(found_modes)} ({cand['source']})",
                 context=f"{cand['source']} candidate",
                 cov=cand.get("cov"),
+                source=cand["source"],
             )
         return found_modes
 
@@ -3643,7 +3652,17 @@ class Laplace(Sampler):
         return [dict(mean=m, logp=lp, source="multistart") for m, lp in candidates if np.isfinite(lp)]
 
     def _append_mode(
-        self, estimator, found_modes, p_mean, p_logp, cov_scaling, parameter_names, label, context, cov=None
+        self,
+        estimator,
+        found_modes,
+        p_mean,
+        p_logp,
+        cov_scaling,
+        parameter_names,
+        label,
+        context,
+        cov=None,
+        source=None,
     ):
         """Validate and scale a candidate's covariance, then append it.
 
@@ -3657,6 +3676,8 @@ class Laplace(Sampler):
             p_cov = self._validate_covariance(estimator, p_mean, p_covariance)
             p_cov = self._apply_cov_scaling(p_cov, cov_scaling)
             found_modes.append((p_mean, p_cov, p_logp))
+            if source is not None:
+                getattr(self, "_mode_sources", {})[p_mean.tobytes()] = source
             logger.info(f"{label} found: log-posterior = {p_logp:.2f}")
         except Exception as exc:
             logger.warning(f"Could not compute covariance for {context}: {exc}")
@@ -3829,6 +3850,46 @@ class Laplace(Sampler):
             else:
                 log_weights.append(float(logp) + 0.5 * ndim * np.log(2.0 * np.pi) + 0.5 * float(log_det))
         return np.asarray(log_weights, dtype=float)
+
+    def _build_mode_record(self, modes, weights, parameter_names):
+        """A serialisable description of the finished mixture.
+
+        The mixture is the mode search's actual output, and until now it existed
+        only in the job log: a finished result carried the samples but no record
+        of how many modes were found, where, with what weight, or which search
+        proposed them.  That makes a campaign over mode-search settings
+        impossible to analyse after the fact without re-reading logs.
+
+        Plain Python types throughout, so it survives the hdf5/json writers.
+        """
+        names = list(parameter_names)
+        sources = getattr(self, "_mode_sources", {})
+        means, sigmas, covs, logps, ws, srcs = [], [], [], [], [], []
+        for i, (mean, cov, logp) in enumerate(modes):
+            mean = np.asarray(mean, dtype=float)
+            cov = np.asarray(cov, dtype=float)
+            means.append([float(v) for v in mean])
+            sigmas.append([float(v) for v in np.sqrt(np.clip(np.diag(cov), 0, None))])
+            covs.append([[float(v) for v in row] for row in cov])
+            logps.append(float(logp))
+            ws.append(float(weights[i]) if i < len(weights) else float("nan"))
+            srcs.append(sources.get(mean.tobytes(), "unknown"))
+        # Columns, not a list of per-mode dicts: bilby's hdf5 writer silently
+        # drops a list of dicts (the group is simply absent on read-back), and
+        # column arrays are what an analysis wants anyway.
+        return dict(
+            parameter_names=names,
+            n_modes_requested=int(self.kwargs["n_modes"]),
+            n_modes_found=len(modes),
+            mode_searches=list(self.kwargs["mode_searches"]),
+            mode_weights=str(self.kwargs["mode_weights"]),
+            log_posterior=logps,
+            weight=ws,
+            source=srcs,
+            mean=means,
+            sigma=sigmas,
+            covariance=covs,
+        )
 
     @staticmethod
     def _log_mode_summary(found_modes, parameter_names, weights=None):

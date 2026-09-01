@@ -857,3 +857,69 @@ def test_symmetry_mirrors_a_candidate_not_only_the_primary(sampler, periodic_est
     modes = sampler._find_multiple_maps(periodic_estimator, 4, np.ones(2), mean, cov)
     phis = sorted(round(float(m[0][1]), 3) for m in modes)
     assert len(modes) >= 3, f"expected the candidate and its mirror alongside the primary; got {phis}"
+
+
+# --- Mixture persistence ---------------------------------------------------
+#
+# The mixture is the mode search's actual output, and it used to exist only in
+# the job log: a finished result carried samples but no record of how many modes
+# were found, where, with what weight, or which search proposed them. That makes
+# a campaign over mode-search settings unanalysable after the fact.
+
+
+@pytest.fixture
+def recorded(sampler, hidden_estimator, hidden_primary):
+    mean, cov, logp = hidden_primary
+    sampler.kwargs.update(
+        n_modes=3,
+        mode_searches=["multistart"],
+        mode_symmetries=None,
+        mode_separation_sigma=1.0,
+        mode_multistart_nstarts=25,
+        mode_weights="laplace",
+    )
+    modes = sampler._find_multiple_maps(hidden_estimator, 3, np.ones(2), mean, cov)
+    weights = np.full(len(modes), 1.0 / len(modes))
+    return modes, sampler._build_mode_record(modes, weights, hidden_estimator.parameter_names)
+
+
+def test_record_columns_are_consistent(recorded):
+    modes, rec = recorded
+    n, d = len(modes), len(rec["parameter_names"])
+    assert rec["n_modes_found"] == n
+    for key in ("log_posterior", "weight", "source", "mean", "sigma", "covariance"):
+        assert len(rec[key]) == n, f"{key} has {len(rec[key])} entries for {n} modes"
+    assert np.array(rec["mean"]).shape == (n, d)
+    assert np.array(rec["covariance"]).shape == (n, d, d)
+
+
+def test_record_is_plain_python(recorded):
+    """No numpy scalars or arrays: the hdf5/json writers must be able to take it."""
+    _, rec = recorded
+
+    def check(v, path="rec"):
+        assert not isinstance(v, np.ndarray), f"{path} is an ndarray"
+        assert not isinstance(v, np.generic), f"{path} is a numpy scalar"
+        if isinstance(v, dict):
+            for k, x in v.items():
+                check(x, f"{path}.{k}")
+        elif isinstance(v, list):
+            for i, x in enumerate(v):
+                check(x, f"{path}[{i}]")
+
+    check(rec)
+
+
+def test_record_attributes_the_primary_and_the_search(recorded):
+    _, rec = recorded
+    assert rec["source"][0] == "primary"
+    assert set(rec["source"][1:]) <= {"multistart", "hypercube", "symmetry", "unknown"}
+    assert "unknown" not in rec["source"], "a mode lost its provenance"
+
+
+def test_record_survives_sorting_by_log_posterior(recorded):
+    """Provenance is keyed by the mean, not by position, because the mode list
+    is sorted after the searches run and filtered by _drop_negligible_modes."""
+    modes, rec = recorded
+    assert rec["log_posterior"] == sorted(rec["log_posterior"], reverse=True)
+    assert rec["source"][0] == "primary", "the primary should still be the highest"
