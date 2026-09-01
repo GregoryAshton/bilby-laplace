@@ -923,3 +923,16 @@ def test_record_survives_sorting_by_log_posterior(recorded):
     modes, rec = recorded
     assert rec["log_posterior"] == sorted(rec["log_posterior"], reverse=True)
     assert rec["source"][0] == "primary", "the primary should still be the highest"
+
+
+def test_single_mode_still_records_a_mixture(sampler, hidden_estimator, hidden_primary):
+    """n_modes=1 is the control arm of any mode-search comparison; it must be
+    readable like every other cell rather than silently recording nothing."""
+    mean, cov, _ = hidden_primary
+    sampler.kwargs.update(n_modes=1, mode_weights="equal")
+    sampler._build_proposal(hidden_estimator, mean, cov, 1.0)
+    rec = sampler._mode_record
+    assert rec["n_modes_found"] == 1
+    assert rec["source"] == ["primary"]
+    assert np.isfinite(rec["log_posterior"][0])
+    assert len(rec["mean"][0]) == len(rec["parameter_names"])

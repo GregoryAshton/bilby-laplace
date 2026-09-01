@@ -1853,7 +1853,19 @@ class Laplace(Sampler):
         """
         n_modes = self.kwargs["n_modes"]
         if n_modes <= 1:
-            modes = [(np.asarray(mean, dtype=float), np.asarray(cov, dtype=float), None)]
+            mean = np.asarray(mean, dtype=float)
+            cov = np.asarray(cov, dtype=float)
+            modes = [(mean, cov, None)]
+            # Record the one-component mixture too. A single Gaussian is still a
+            # mixture, and a study comparing mode-search settings needs the
+            # n_modes=1 baseline to be readable like any other cell -- without
+            # this the control arm silently produces no mode_mixture at all.
+            self._mode_sources = {mean.tobytes(): "primary"}
+            self._mode_record = self._build_mode_record(
+                [(mean, cov, float(estimator.log_posterior_from_array(mean)))],
+                np.array([1.0]),
+                estimator.parameter_names,
+            )
             return self._mode_proposal(estimator, modes, None), modes, None
 
         modes = self._find_multiple_maps(estimator, n_modes, cov_scaling, mean, cov)
