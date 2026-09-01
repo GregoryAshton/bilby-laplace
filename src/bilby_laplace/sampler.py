@@ -448,7 +448,9 @@ class Laplace(Sampler):
         described under ``n_modes``) and ``'symmetric'`` (seeding the modes
         implied by ``mode_symmetries``, see ``_add_symmetric_modes``).  Default
         ``('hypercube', 'symmetric')`` runs both, matching every prior
-        behaviour.  Unknown entries raise ``SamplerError``.
+        behaviour.  A third, ``'multistart'``, is available but off by default
+        -- see ``mode_multistart_nstarts``.  Unknown entries raise
+        ``SamplerError``.
 
         Exists because the two searches can fail independently in opposite
         directions.  On a precessing-BBH example most of whose parameters are
@@ -535,6 +537,29 @@ class Laplace(Sampler):
         same threshold used to discard negligible mixture components, giving
         ``-log(1e-3)`` ~ 6.9 nats: anything below that would be dropped by the
         weighting anyway. Set ``0`` to demand an exact symmetry.
+    mode_multistart_nstarts : int or None
+        Number of random prior draws used by the ``'multistart'`` entry of
+        ``mode_searches``; ``None`` (default) uses 10, and ``<= 0`` skips the
+        search. Each start is polished by a *full-space* local optimisation and
+        the results are ranked only afterwards.
+
+        That ordering is the whole point, and the difference from
+        ``'hypercube'``: that search ranks its Latin hypercube points by
+        log-posterior *before* polishing, so a mode whose basin is shallow where
+        you land but deep where it leads is discarded before it is ever
+        followed. Measured on GW150914, whose face-on solution needs a
+        correlated move across all thirteen sampled coordinates, that mode is
+        24-51 nats down when reached by freeing any subset of coordinates and
+        37 nats down under a ``theta_jn`` reflection -- unreachable by
+        ``mode_search_subspace`` or ``mode_symmetries`` at any setting -- yet a
+        plain local optimisation from a random prior draw lands in it 30% of
+        the time, within ~1 nat of its peak.
+
+        This only supplies *secondary* modes; the primary still comes from
+        ``minimization_method``'s global optimiser. Differential evolution
+        remains the better optimiser for that (-4969.26 against multi-start's
+        -4971.56 on the same example), so this supplements it rather than
+        replacing it.
     mode_separation_sigma : float
         How far apart two modes must be, in units of the primary mode's
         per-parameter sigma, to count as distinct.  A candidate closer than this
@@ -725,6 +750,7 @@ class Laplace(Sampler):
         mode_separation_sigma=3.0,
         mode_symmetries=None,
         mode_symmetry_tol=None,
+        mode_multistart_nstarts=None,
         smc_prior_flow="learned",
         mode_weights="equal",
         smc_kwargs=None,
@@ -3340,7 +3366,7 @@ class Laplace(Sampler):
         return x[keep]
 
     # Valid entries in ``mode_searches`` -- see its docstring in default_kwargs.
-    _MODE_SEARCHES = {"hypercube", "symmetric"}
+    _MODE_SEARCHES = {"hypercube", "multistart", "symmetric"}
 
     def _find_multiple_maps(self, estimator, n_modes, cov_scaling, primary_mean, primary_cov):
         """Find up to *n_modes* distinct MAP estimates and their covariances.
@@ -3388,18 +3414,39 @@ class Laplace(Sampler):
         if not np.isfinite(separation) or separation <= 0:
             raise SamplerError(f"mode_separation_sigma must be finite and positive, got {separation!r}.")
 
-        # --- 2. Multi-start search for secondary modes ---
-        if "hypercube" not in searches:
+        # --- 2. The searches, in order.  Each only ever *adds* candidates. ---
+        if "hypercube" in searches:
+            found_modes = self._add_hypercube_modes(
+                estimator, found_modes, std_scale, separation, n_modes, cov_scaling, parameter_names, best_mean
+            )
+        else:
             logger.info("mode_searches omits 'hypercube': skipping the stochastic multi-start search.")
-            if "symmetric" in searches:
-                found_modes = self._add_symmetric_modes(estimator, found_modes, std_scale, separation)
-            found_modes.sort(key=lambda r: r[2], reverse=True)
-            return found_modes
 
+        if "multistart" in searches:
+            found_modes = self._add_multistart_modes(
+                estimator, found_modes, std_scale, separation, n_modes, cov_scaling, parameter_names
+            )
+
+        if "symmetric" in searches:
+            found_modes = self._add_symmetric_modes(estimator, found_modes, std_scale, separation)
+
+        # --- 3. Sort and summarise ---
+        found_modes.sort(key=lambda r: r[2], reverse=True)
+        # The caller logs the summary once the mixture weights are known.
+        return found_modes
+
+    def _add_hypercube_modes(
+        self, estimator, found_modes, std_scale, separation, n_modes, cov_scaling, parameter_names, best_mean
+    ):
+        """Stochastic secondary-mode search over a Latin hypercube.
+
+        Candidates are ranked by their log-posterior *before* polishing and only
+        the best are polished, which is what keeps the cost bounded.  See
+        ``_add_multistart_modes`` for the case that ranking cannot serve.
+        """
         n_starts = self.kwargs["mode_search_nsamples"]
         subspace = self.kwargs.get("mode_search_subspace")
 
-        # Latin hypercube in [0,1]^D, then map to prior
         prior_x = self._latin_hypercube_prior(parameter_names, n_starts)
 
         if subspace:
@@ -3436,7 +3483,6 @@ class Laplace(Sampler):
         prior_x = self._drop_constraint_violations(prior_x, parameter_names, "Mode search")
         if len(prior_x) == 0:
             logger.warning("Mode search: every Latin hypercube start violates a Constraint prior; no secondary modes")
-            self._log_mode_summary(found_modes, parameter_names)
             return found_modes
 
         prior_logp = np.array([float(estimator.log_posterior_from_array(x)) for x in prior_x])
@@ -3475,24 +3521,110 @@ class Laplace(Sampler):
                 logger.debug(f"Candidate {n_polished} converged to " f"a known mode; skipping")
                 continue
 
-            try:
-                p_dict = dict(zip(parameter_names, p_mean))
-                p_covariance = estimator.calculate_posterior_covariance(p_dict)
-                # Validate first, then scale last (see run_sampler for rationale).
-                p_cov = self._validate_covariance(estimator, p_mean, p_covariance)
-                p_cov = self._apply_cov_scaling(p_cov, cov_scaling)
-                found_modes.append((p_mean, p_cov, p_logp))
-                logger.info(f"Secondary mode {len(found_modes) - 1} " f"found: log-posterior = {p_logp:.2f}")
-            except Exception as exc:
-                logger.warning(f"Could not compute covariance for " f"candidate {n_polished}: {exc}")
+            found_modes = self._append_mode(
+                estimator,
+                found_modes,
+                p_mean,
+                p_logp,
+                cov_scaling,
+                parameter_names,
+                label=f"Secondary mode {len(found_modes)}",
+                context=f"candidate {n_polished}",
+            )
 
-        # --- 2b. Modes implied by an exact symmetry ---
-        if "symmetric" in searches:
-            found_modes = self._add_symmetric_modes(estimator, found_modes, std_scale, separation)
+        return found_modes
 
-        # --- 3. Sort and summarise ---
-        found_modes.sort(key=lambda r: r[2], reverse=True)
-        # The caller logs the summary once the mixture weights are known.
+    # Random prior starts for the full-space multi-start search.  Ten is chosen
+    # from a measured hit rate rather than picked round: on the GW150914 example
+    # 19 of 64 independent starts (29.7%) landed in the secondary basin, so ten
+    # starts find it with probability 1 - 0.703**10 = 0.97.  Each start costs
+    # ~2.4k likelihood evaluations against ~27M for the sampling stage that
+    # follows, so the default buys that reliability for ~0.1% of a run.
+    _MULTISTART_NSTARTS = 10
+
+    def _add_multistart_modes(
+        self, estimator, found_modes, std_scale, separation, n_modes, cov_scaling, parameter_names
+    ):
+        """Full-space multi-start: polish *every* start, then rank.
+
+        The distinction from ``_add_hypercube_modes`` is the ranking, not the
+        sampling.  That search scores its Latin hypercube points *before*
+        polishing and only descends from the best -- which is exactly what hides
+        a mode whose basin is shallow where you land but deep where it leads.
+
+        Measured on the GW150914 example, whose face-on solution needs a
+        correlated move across all thirteen coordinates: pinned at the primary
+        MAP that mode is 24-51 nats down depending on which coordinates are
+        freed, and its reflection is 37 nats down, so no subspace or symmetry
+        reaches it -- but a plain local optimisation started from a random prior
+        draw lands in it 30% of the time, within ~1 nat of its peak.  A
+        pre-polish ranking discards precisely those starts.
+
+        The primary mode is untouched: this only supplies secondaries, so the
+        global optimiser that found the primary (differential evolution by
+        default) still does that job.  Nelder-Mead from a random draw is the
+        weaker optimiser of the two -- on that example it reached -4971.56
+        against differential evolution's -4969.26 -- which is why this
+        supplements rather than replaces it.
+        """
+        n_starts = self.kwargs.get("mode_multistart_nstarts")
+        n_starts = self._MULTISTART_NSTARTS if n_starts is None else int(n_starts)
+        if n_starts <= 0:
+            logger.info("mode_multistart_nstarts <= 0: skipping the full-space multi-start search.")
+            return found_modes
+
+        starts = self._latin_hypercube_prior(parameter_names, n_starts)
+        starts = self._drop_constraint_violations(starts, parameter_names, "Multi-start mode search")
+        if len(starts) == 0:
+            logger.warning("Multi-start mode search: every start violates a Constraint prior; no modes added")
+            return found_modes
+
+        logger.info(
+            f"Polishing all {len(starts)} full-space prior starts to search for secondary modes "
+            "(no pre-polish ranking)"
+        )
+
+        candidates = []
+        for k, x in enumerate(starts, 1):
+            polished = estimator._maximize_posterior_from_initial_sample(dict(zip(parameter_names, x)))
+            candidates.append((np.array(polished.x), float(-polished.fun)))
+            logger.debug(f"Multi-start {k}/{len(starts)}: log-posterior = {-polished.fun:.2f}")
+
+        # Rank *after* polishing -- the whole point of this search.
+        candidates.sort(key=lambda c: c[1], reverse=True)
+
+        for p_mean, p_logp in candidates:
+            if len(found_modes) >= n_modes:
+                break
+            if not np.isfinite(p_logp):
+                continue
+            if any(np.max(np.abs(p_mean - m) / std_scale) < separation for m, _, _ in found_modes):
+                continue
+            found_modes = self._append_mode(
+                estimator,
+                found_modes,
+                p_mean,
+                p_logp,
+                cov_scaling,
+                parameter_names,
+                label=f"Multi-start mode {len(found_modes)}",
+                context="multi-start candidate",
+            )
+
+        return found_modes
+
+    def _append_mode(self, estimator, found_modes, p_mean, p_logp, cov_scaling, parameter_names, label, context):
+        """Validate and scale a candidate's covariance, then append it."""
+        try:
+            p_dict = dict(zip(parameter_names, p_mean))
+            p_covariance = estimator.calculate_posterior_covariance(p_dict)
+            # Validate first, then scale last (see run_sampler for rationale).
+            p_cov = self._validate_covariance(estimator, p_mean, p_covariance)
+            p_cov = self._apply_cov_scaling(p_cov, cov_scaling)
+            found_modes.append((p_mean, p_cov, p_logp))
+            logger.info(f"{label} found: log-posterior = {p_logp:.2f}")
+        except Exception as exc:
+            logger.warning(f"Could not compute covariance for {context}: {exc}")
         return found_modes
 
     # Shared with _MIN_MODE_WEIGHT below; defined here because the symmetry

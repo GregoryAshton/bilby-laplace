@@ -618,3 +618,154 @@ def test_negative_tolerance_is_rejected(sampler, periodic_estimator, periodic_mo
     sampler.kwargs["mode_symmetry_tol"] = -1.0
     with pytest.raises(ValueError, match="non-negative"):
         sampler._find_multiple_maps(periodic_estimator, 2, np.ones(2), mean, cov)
+
+
+# --- Full-space multi-start ------------------------------------------------
+#
+# 'hypercube' ranks its starts by log-posterior *before* polishing, so a mode
+# whose basin is shallow where you land but deep where it leads is discarded
+# before it is followed. On GW150914 the face-on solution is 24-51 nats down
+# under any coordinate pinning and 37 under a theta_jn reflection, yet a plain
+# local optimisation from a random prior draw reaches it 30% of the time.
+
+
+class _HiddenBasinLikelihood(bilby.core.likelihood.Likelihood):
+    """Two modes separated in a coordinate the subspace search cannot vary.
+
+    The primary sits at ``(1, 0)``; the secondary at ``(-3, 3)`` is narrow in
+    ``y``. With ``mode_search_subspace=['x']`` every hypercube start is pinned
+    at the primary's ``y = 0``, where the secondary term is ``exp(-50)`` and the
+    gradient points back to the primary -- so a start on that line polishes
+    into the mode it already has and is discarded as a duplicate. The full-space
+    multi-start draws ``y`` freely and descends into the secondary directly.
+
+    This is GW150914's geometry in two dimensions: its face-on mode needs
+    ``theta_jn`` to move, ``theta_jn`` is not in the subspace, and pinning it at
+    the primary MAP leaves that mode 24-51 nats down.
+    """
+
+    A_MU, A_SIG, A_AMP = np.array([1.0, 0.0]), 1.2, 12.0
+    B_MU, B_SIG, B_AMP = np.array([-3.0, 3.0]), 0.30, 10.0
+
+    def __init__(self):
+        super().__init__(parameters=dict(x=None, y=None))
+
+    def log_likelihood(self, parameters=None):
+        p = parameters if parameters is not None else self.parameters
+        v = np.array([p["x"], p["y"]], dtype=float)
+        a = self.A_AMP - 0.5 * np.sum(((v - self.A_MU) / self.A_SIG) ** 2)
+        b = self.B_AMP - 0.5 * np.sum(((v - self.B_MU) / self.B_SIG) ** 2)
+        return float(np.logaddexp(a, b))
+
+
+@pytest.fixture
+def hidden_priors():
+    return bilby.core.prior.PriorDict(
+        dict(
+            x=bilby.core.prior.Uniform(-5.0, 5.0, "x"),
+            y=bilby.core.prior.Uniform(-5.0, 5.0, "y"),
+        )
+    )
+
+
+@pytest.fixture
+def hidden_estimator(hidden_priors):
+    from bilby_laplace.laplace import LaplacePosteriorEstimator
+
+    return LaplacePosteriorEstimator(
+        _HiddenBasinLikelihood(), hidden_priors, minimization_method="Nelder-Mead", n_prior_samples=10
+    )
+
+
+@pytest.fixture
+def hidden_primary(hidden_estimator):
+    L = _HiddenBasinLikelihood
+    mean = L.A_MU.astype(float).copy()
+    cov = np.diag([L.A_SIG**2, L.A_SIG**2])
+    return mean, cov, float(hidden_estimator.log_posterior_from_array(mean))
+
+
+def _run(sampler, estimator, primary, searches, n_modes=3, **kw):
+    mean, cov, _ = primary
+    sampler.kwargs["mode_searches"] = searches
+    sampler.kwargs["mode_symmetries"] = None
+    sampler.kwargs["mode_separation_sigma"] = 1.0
+    sampler.kwargs.update(kw)
+    return sampler._find_multiple_maps(estimator, n_modes, np.ones(2), mean, cov)
+
+
+def test_multistart_is_a_valid_mode_search(sampler):
+    assert "multistart" in sampler._MODE_SEARCHES
+
+
+def test_multistart_off_by_default(sampler):
+    assert "multistart" not in sampler.kwargs["mode_searches"]
+
+
+def _found_secondary(modes):
+    return any(np.max(np.abs(m[0] - _HiddenBasinLikelihood.B_MU)) < 0.6 for m in modes)
+
+
+def test_subspace_hypercube_cannot_reach_a_mode_outside_the_subspace(sampler, hidden_estimator, hidden_primary):
+    """The failure this search exists to fix, reproduced."""
+    modes = _run(
+        sampler,
+        hidden_estimator,
+        hidden_primary,
+        ["hypercube"],
+        mode_search_subspace=["x"],
+        mode_search_nsamples=60,
+    )
+    assert not _found_secondary(modes), "fixture is not discriminating: the subspace search found it"
+
+
+def test_multistart_reaches_a_mode_outside_the_subspace(sampler, hidden_estimator, hidden_primary):
+    """The fix: full-space starts find what the pinned subspace cannot."""
+    modes = _run(
+        sampler,
+        hidden_estimator,
+        hidden_primary,
+        ["multistart"],
+        mode_search_subspace=["x"],
+        mode_multistart_nstarts=40,
+    )
+    assert _found_secondary(modes), f"secondary not found; modes at {[m[0] for m in modes]}"
+
+
+def test_multistart_keeps_the_given_primary(sampler, hidden_estimator, hidden_primary):
+    """It only adds secondaries -- the primary is passed in, never recomputed."""
+    mean, _, logp = hidden_primary
+    modes = _run(sampler, hidden_estimator, hidden_primary, ["multistart"], mode_multistart_nstarts=10)
+    assert any(np.allclose(m[0], mean) and m[2] == pytest.approx(logp) for m in modes)
+
+
+def test_multistart_respects_n_modes(sampler, hidden_estimator, hidden_primary):
+    modes = _run(sampler, hidden_estimator, hidden_primary, ["multistart"], n_modes=2, mode_multistart_nstarts=25)
+    assert len(modes) <= 2
+
+
+def test_multistart_zero_starts_is_a_no_op(sampler, hidden_estimator, hidden_primary):
+    modes = _run(sampler, hidden_estimator, hidden_primary, ["multistart"], mode_multistart_nstarts=0)
+    assert len(modes) == 1
+
+
+def test_multistart_runs_without_the_hypercube_search(sampler, hidden_estimator, hidden_primary, monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError("mode_searches=['multistart'] must not run the hypercube search")
+
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior_ranked", _boom, raising=False)
+    modes = _run(sampler, hidden_estimator, hidden_primary, ["multistart"], mode_multistart_nstarts=10)
+    assert len(modes) >= 1
+
+
+def test_multistart_composes_with_the_other_searches(sampler, hidden_estimator, hidden_primary):
+    """All three are peers: enabling every one must not error or lose the primary."""
+    modes = _run(
+        sampler,
+        hidden_estimator,
+        hidden_primary,
+        ["hypercube", "multistart", "symmetric"],
+        mode_multistart_nstarts=8,
+    )
+    assert len(modes) >= 1
+    assert modes == sorted(modes, key=lambda r: r[2], reverse=True)

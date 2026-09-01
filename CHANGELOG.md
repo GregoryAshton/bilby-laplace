@@ -35,6 +35,19 @@ Versions correspond to git tags; version numbers follow
   lobe of two). No re-weighting of the mixture fixed the first problem, because the damage is which
   points enter the mixture, not how they are weighted once they are in it — `mode_searches=['symmetric']`
   removes the harmful search while keeping the essential one.
+- `'multistart'` entry for `mode_searches`, with `mode_multistart_nstarts` (default 10) — a full-space
+  multi-start secondary-mode search that polishes *every* random prior start and ranks only afterwards.
+  The distinction from `'hypercube'` is the ranking, not the sampling: that search scores its Latin
+  hypercube points *before* polishing and descends only from the best, which hides a mode whose basin
+  is shallow where you land but deep where it leads. Measured on GW150914, whose face-on solution needs
+  a correlated move across all thirteen sampled coordinates: it is 24-51 nats down under any coordinate
+  pinning and 37 down under a `theta_jn` reflection — so neither `mode_search_subspace` nor
+  `mode_symmetries` reaches it at any setting — yet a plain local optimisation from a random prior draw
+  lands in it 30% of the time (19/64 starts), within ~1 nat of its peak. Ten starts therefore find it
+  with probability 0.97, for ~2.4k likelihood evaluations each against ~27M for the sampling stage.
+  Off by default, so no existing run changes. It supplies *secondary* modes only: the primary still
+  comes from `minimization_method`'s global optimiser, which remains the better tool for that job
+  (differential evolution reached -4969.26 against multi-start's -4971.56 on the same example).
 - `mode_symmetry_tol` parameter — how many nats a `mode_symmetries`-implied mode's log-posterior may
   fall below the mode it mirrors and still be seeded. The mirror reuses its source's covariance, so
   under `mode_weights='laplace'` an offset of `d` means the mirror takes a share `exp(-d)` of the
