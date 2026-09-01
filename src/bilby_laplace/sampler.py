@@ -435,6 +435,40 @@ class Laplace(Sampler):
         modes were asked for -- which made the cheap methods incomparable with
         SMC on any multi-modal problem.  Results produced before that change
         cannot be read as multi-mode except for ``resample='smc'``.
+
+        ``n_modes <= 1`` skips mode-finding entirely, including
+        ``mode_symmetries`` -- there is no way to keep a symmetry-implied mode
+        while disabling the stochastic search with ``n_modes`` alone. Use
+        ``mode_searches`` for that; ``n_modes`` still has to be at least 2 to
+        reach it, since it is what tells ``_build_proposal`` a mixture is
+        wanted at all.
+    mode_searches : tuple of str
+        Which of the two ways to find secondary modes are used, when
+        ``n_modes > 1``: ``'hypercube'`` (the stochastic multi-start search
+        described under ``n_modes``) and ``'symmetric'`` (seeding the modes
+        implied by ``mode_symmetries``, see ``_add_symmetric_modes``).  Default
+        ``('hypercube', 'symmetric')`` runs both, matching every prior
+        behaviour.  Unknown entries raise ``SamplerError``.
+
+        Exists because the two searches can fail independently in opposite
+        directions.  On a precessing-BBH example most of whose parameters are
+        essentially unconstrained by the data (post/prior sigma ratio above
+        0.7 for 6 of 13 sampled parameters), the *stochastic* search kept
+        finding shallow local maxima that are geometry noise rather than
+        physical modes -- one, 2.76 nats below the primary MAP and holding
+        under 1% of the posterior mass by an independent reference, took 70%
+        of the proposal weight under ``mode_weights='laplace'`` -- while the
+        *exact* ``delta_phase`` symmetry on the same problem is essential:
+        without it the run samples one lobe of two.  Neither problem is fixed
+        by re-weighting the mixture (measured: every re-weighting scheme tried
+        left the stochastic search's damage in place, because the damage is
+        which points enter the mixture, not how they are weighted once they
+        are in it). ``mode_searches=['symmetric']`` is the fix: it removes the
+        harmful search while keeping the essential one. On that example it
+        recovered every parameter distorted by the stochastic search (one
+        thirteen-parameter worst-case JSD-to-reference dropped from 12.4 to
+        3.2 millibits) at lower cost (no Latin-hypercube evaluations), with
+        only the symmetry-covered coordinate (correctly) unaffected.
     mode_search_nsamples : int
         Number of prior draws used when searching for secondary modes
         (``n_modes > 1``).  Higher values make mode discovery more
@@ -671,6 +705,7 @@ class Laplace(Sampler):
         fisher_method="hessian",
         fisher_kwargs=None,
         n_modes=1,
+        mode_searches=("hypercube", "symmetric"),
         mode_search_nsamples=500,
         mode_search_subspace=None,
         mode_separation_sigma=3.0,
@@ -3289,6 +3324,9 @@ class Laplace(Sampler):
         logger.info(f"{context}: dropped {int((~keep).sum())}/{len(x)} candidates violating a Constraint prior")
         return x[keep]
 
+    # Valid entries in ``mode_searches`` -- see its docstring in default_kwargs.
+    _MODE_SEARCHES = {"hypercube", "symmetric"}
+
     def _find_multiple_maps(self, estimator, n_modes, cov_scaling, primary_mean, primary_cov):
         """Find up to *n_modes* distinct MAP estimates and their covariances.
 
@@ -3324,12 +3362,27 @@ class Laplace(Sampler):
             self._log_mode_summary(found_modes, parameter_names)
             return found_modes
 
-        # --- 2. Multi-start search for secondary modes ---
-        n_starts = self.kwargs["mode_search_nsamples"]
-        subspace = self.kwargs.get("mode_search_subspace")
+        searches = self.kwargs["mode_searches"]
+        unknown = set(searches) - self._MODE_SEARCHES
+        if unknown:
+            raise SamplerError(
+                f"mode_searches contains unknown entry/entries {sorted(unknown)}; "
+                f"valid values are {sorted(self._MODE_SEARCHES)}."
+            )
         separation = float(self.kwargs["mode_separation_sigma"])
         if not np.isfinite(separation) or separation <= 0:
             raise SamplerError(f"mode_separation_sigma must be finite and positive, got {separation!r}.")
+
+        # --- 2. Multi-start search for secondary modes ---
+        if "hypercube" not in searches:
+            logger.info("mode_searches omits 'hypercube': skipping the stochastic multi-start search.")
+            if "symmetric" in searches:
+                found_modes = self._add_symmetric_modes(estimator, found_modes, std_scale, separation)
+            found_modes.sort(key=lambda r: r[2], reverse=True)
+            return found_modes
+
+        n_starts = self.kwargs["mode_search_nsamples"]
+        subspace = self.kwargs.get("mode_search_subspace")
 
         # Latin hypercube in [0,1]^D, then map to prior
         prior_x = self._latin_hypercube_prior(parameter_names, n_starts)
@@ -3419,7 +3472,8 @@ class Laplace(Sampler):
                 logger.warning(f"Could not compute covariance for " f"candidate {n_polished}: {exc}")
 
         # --- 2b. Modes implied by an exact symmetry ---
-        found_modes = self._add_symmetric_modes(estimator, found_modes, std_scale, separation)
+        if "symmetric" in searches:
+            found_modes = self._add_symmetric_modes(estimator, found_modes, std_scale, separation)
 
         # --- 3. Sort and summarise ---
         found_modes.sort(key=lambda r: r[2], reverse=True)

@@ -347,3 +347,167 @@ def test_no_global_optimisation_is_run_for_the_primary(sampler, estimator, monke
     sampler.kwargs["n_modes"] = 1
 
     sampler._find_multiple_maps(estimator, 1, np.ones(2), np.zeros(2), np.eye(2))
+
+
+# --------------------------------------------------------------------------
+# mode_searches: choosing which way(s) to look for secondary modes
+# --------------------------------------------------------------------------
+# The stochastic (`'hypercube'`) and exact (`'symmetric'`) searches can fail
+# in opposite directions on the same problem: on a precessing-BBH example the
+# hypercube search kept finding shallow local maxima that are geometry noise
+# -- one held under 1% of the posterior mass by an independent reference yet
+# took 70% of the proposal weight -- while the exact delta_phase symmetry on
+# the same problem is essential (without it the run samples one lobe of two).
+# No re-weighting of the mixture fixed the first problem, because the damage
+# is which points enter the mixture, not how they are weighted once they do.
+# `mode_searches=['symmetric']` runs only the search that helps.
+
+import bilby  # noqa: E402
+from conftest import MU, TRUE_COV  # noqa: E402
+
+
+class _PeriodicSymmetricLikelihood(bilby.core.likelihood.Likelihood):
+    """A 2-D likelihood exactly periodic in ``phi`` with period pi.
+
+    ``log_likelihood(phi + pi) == log_likelihood(phi)`` to machine precision
+    by construction (``cos(2 * theta)`` has period pi), giving two mirror
+    modes of identical height -- the same structure ``mode_symmetries``
+    targets on the precessing-BBH example's ``delta_phase``, in a fixture
+    cheap enough to optimise in a unit test.
+    """
+
+    MU_X, SIGMA_X = 1.0, 0.3
+    MU_PHI, KAPPA = 0.7, 50.0
+
+    def __init__(self):
+        super().__init__(parameters=dict(x=None, phi=None))
+
+    def log_likelihood(self, parameters=None):
+        p = parameters if parameters is not None else self.parameters
+        dx = (p["x"] - self.MU_X) / self.SIGMA_X
+        return -0.5 * dx**2 + self.KAPPA * np.cos(2.0 * (p["phi"] - self.MU_PHI))
+
+
+@pytest.fixture
+def periodic_priors():
+    return bilby.core.prior.PriorDict(
+        dict(
+            x=bilby.core.prior.Uniform(-5.0, 5.0, "x"),
+            phi=bilby.core.prior.Uniform(0.0, 2 * np.pi, "phi", boundary="periodic"),
+        )
+    )
+
+
+@pytest.fixture
+def periodic_estimator(periodic_priors):
+    from bilby_laplace.laplace import LaplacePosteriorEstimator
+
+    return LaplacePosteriorEstimator(_PeriodicSymmetricLikelihood(), periodic_priors)
+
+
+@pytest.fixture
+def periodic_sampler(periodic_priors, tmp_path):
+    """A ``Laplace`` bound to the periodic fixture's own likelihood/priors.
+
+    ``_latin_hypercube_prior`` reads ``self.priors`` on the *sampler*, not on
+    whatever estimator a test happens to pass in -- so exercising the real
+    hypercube path against ``periodic_estimator`` needs a sampler built on
+    the same priors, unlike the plain ``sampler`` fixture (bound to
+    conftest's unrelated x/y Gaussian).
+    """
+    return Laplace(
+        likelihood=_PeriodicSymmetricLikelihood(),
+        priors=periodic_priors,
+        outdir=str(tmp_path),
+        label="test-periodic",
+    )
+
+
+@pytest.fixture
+def periodic_mode(periodic_estimator):
+    """The primary mode at the fixture's construction, no optimiser needed."""
+    L = _PeriodicSymmetricLikelihood
+    mean = np.array([L.MU_X, L.MU_PHI])
+    # Local curvature: -d^2/dx^2 of each term at the peak.
+    cov = np.diag([L.SIGMA_X**2, 1.0 / (4.0 * L.KAPPA)])
+    logp = float(periodic_estimator.log_posterior_from_array(mean))
+    return mean, cov, logp
+
+
+def test_mode_searches_default_runs_both(sampler):
+    assert set(sampler.kwargs["mode_searches"]) == {"hypercube", "symmetric"}
+
+
+def test_unknown_mode_search_is_rejected(sampler, estimator):
+    sampler.kwargs["mode_searches"] = ["hypercube", "nonsense"]
+
+    with pytest.raises(SamplerError, match="mode_searches"):
+        sampler._find_multiple_maps(estimator, 2, np.ones(2), MU.copy(), TRUE_COV.copy())
+
+
+def test_symmetric_only_skips_the_stochastic_search(sampler, estimator, monkeypatch):
+    """No mode_symmetries declared: 'symmetric' alone must add nothing, and
+    must not fall through to the hypercube search it was asked to skip."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("mode_searches=['symmetric'] must not run the hypercube search")
+
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", _boom)
+    sampler.kwargs["mode_searches"] = ["symmetric"]
+    sampler.kwargs["mode_symmetries"] = None
+
+    modes = sampler._find_multiple_maps(estimator, 2, np.ones(2), MU.copy(), TRUE_COV.copy())
+
+    assert len(modes) == 1
+
+
+def test_hypercube_only_does_not_seed_the_symmetry(sampler, periodic_estimator, periodic_mode, monkeypatch):
+    """The mirror-image case: 'hypercube' alone must leave a declared
+    symmetry unseeded, even though it would otherwise be free to add."""
+    mean, cov, logp = periodic_mode
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", lambda *a, **k: np.empty((0, 2)))
+    sampler.kwargs["mode_searches"] = ["hypercube"]
+    sampler.kwargs["mode_symmetries"] = [("phi", np.pi)]
+    sampler.kwargs["mode_search_subspace"] = None
+
+    modes = sampler._find_multiple_maps(periodic_estimator, 2, np.ones(2), mean, cov)
+
+    assert len(modes) == 1
+
+
+def test_symmetric_only_seeds_the_exact_mirror(sampler, periodic_estimator, periodic_mode, monkeypatch):
+    """The fix, end to end: the mirror is found, matches the source mode's
+    log-posterior exactly, and no stochastic evaluation ever ran."""
+    mean, cov, logp = periodic_mode
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("mode_searches=['symmetric'] must not run the hypercube search")
+
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", _boom)
+    sampler.kwargs["mode_searches"] = ["symmetric"]
+    sampler.kwargs["mode_symmetries"] = [("phi", np.pi)]
+
+    modes = sampler._find_multiple_maps(periodic_estimator, 2, np.ones(2), mean, cov)
+
+    assert len(modes) == 2
+    mirror = modes[1] if modes[0][0] is mean or np.allclose(modes[0][0], mean) else modes[0]
+    np.testing.assert_allclose(mirror[0][0], mean[0])  # x untouched by the phi symmetry
+    assert mirror[0][1] == pytest.approx((mean[1] + np.pi) % (2 * np.pi), abs=1e-6)
+    assert mirror[2] == pytest.approx(logp, abs=1e-6)  # exact symmetry: heights match
+
+
+def test_symmetric_only_is_a_real_alternative_to_default(periodic_sampler, periodic_estimator, periodic_mode):
+    """Sanity check on the fixture itself: the default (both searches) finds
+    the same mirror 'symmetric' alone does, so the two are comparable."""
+    mean, cov, _logp = periodic_mode
+    periodic_sampler.kwargs["mode_search_nsamples"] = 200
+    periodic_sampler.kwargs["mode_symmetries"] = [("phi", np.pi)]
+    periodic_sampler.kwargs["mode_search_subspace"] = None
+    periodic_sampler.kwargs["mode_separation_sigma"] = 1.0
+
+    modes = periodic_sampler._find_multiple_maps(periodic_estimator, 2, np.ones(2), mean.copy(), cov.copy())
+
+    phis = sorted(m[0][1] for m in modes)
+    assert phis[0] == pytest.approx(mean[1], abs=1e-3)
+    assert phis[-1] == pytest.approx((mean[1] + np.pi) % (2 * np.pi), abs=1e-3)
+

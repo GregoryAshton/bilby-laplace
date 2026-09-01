@@ -29,6 +29,17 @@ Versions correspond to git tags; version numbers follow
   producing a runaway variance. Detector-based sky frames (`reference_frame`, i.e. zenith/azimuth
   sampling) are supported: the Fisher applies the likelihood's zenith/azimuth-to-ra/dec conversion
   at each finite-difference point so those parameters are constrained rather than appearing null.
+- `mode_searches` parameter — which of `'hypercube'` (the stochastic multi-start secondary-mode
+  search) and `'symmetric'` (seeding modes implied by `mode_symmetries`) run when `n_modes > 1`.
+  Default `('hypercube', 'symmetric')` matches every prior behaviour. Added because the two can fail
+  in opposite directions on the same problem: on a precessing-BBH example most of whose parameters
+  are essentially unconstrained by the data, the hypercube search kept finding shallow local maxima
+  that are geometry noise rather than physical modes (one, holding under 1% of the posterior mass by
+  an independent reference, took 70% of the proposal weight under `mode_weights='laplace'`), while
+  the exact `delta_phase` symmetry on the same problem is essential (without it the run samples one
+  lobe of two). No re-weighting of the mixture fixed the first problem, because the damage is which
+  points enter the mixture, not how they are weighted once they are in it — `mode_searches=['symmetric']`
+  removes the harmful search while keeping the essential one.
 - SMC resampling via aspire (`resample='smc'`), including multi-mode discovery and Gaussian mixture proposals.
 - `inprior` resampling mode — filters proposal samples to prior support without likelihood evaluation.
 - Aligned initial samples for SMC — uses `_draw_inprior_samples()` helper to match rejection/importance sampling.
