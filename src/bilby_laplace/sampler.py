@@ -452,6 +452,20 @@ class Laplace(Sampler):
         -- see ``mode_multistart_nstarts``.  Unknown entries raise
         ``SamplerError``.
 
+        A fourth, ``'symmetric-polish'``, is ``'symmetric'`` plus a rescue for
+        the mirrors it would otherwise discard: one whose log-posterior falls
+        further than ``mode_symmetry_tol`` below its source is used as a
+        *starting point* for a full-space local optimisation instead of being
+        thrown away, and the polished optimum competes for a slot like any
+        other candidate.  Enabling it implies ``'symmetric'`` -- there is no
+        need to list both.  Off by default because it costs an optimisation
+        plus a Hessian per rescued mirror; capped by
+        ``mode_symmetry_polish_max``.  Use it when a declared symmetry is
+        expected to be *approximate*: higher-order waveform content perturbs an
+        exactly-periodic coordinate rather than removing the second lobe, so the
+        mirrored lobe has moved rather than vanished, and the mirror is still
+        the right place to start looking for it.
+
         Exists because the two searches can fail independently in opposite
         directions.  On a precessing-BBH example most of whose parameters are
         essentially unconstrained by the data (post/prior sigma ratio above
@@ -537,6 +551,26 @@ class Laplace(Sampler):
         same threshold used to discard negligible mixture components, giving
         ``-log(1e-3)`` ~ 6.9 nats: anything below that would be dropped by the
         weighting anyway. Set ``0`` to demand an exact symmetry.
+
+        That reasoning holds only because the mirror is *not* polished. Under
+        ``mode_searches`` entry ``'symmetric-polish'`` this stops being a gate
+        and becomes a covariance-reuse switch: within the tolerance a mirror is
+        seeded directly and inherits its source's curvature, outside it the
+        mirror is polished and pays for its own Hessian, so the offset measured
+        at the unpolished point no longer fixes its weight.
+    mode_symmetry_polish_max : int or None
+        Maximum number of broken mirrors ``'symmetric-polish'`` will polish in
+        one mode search; ``None`` (default) uses 4, and ``<= 0`` disables the
+        rescue while leaving plain ``'symmetric'`` seeding intact. Ignored
+        unless ``'symmetric-polish'`` is in ``mode_searches``.
+
+        A cap is needed because mirrors are proposed for the primary *and*
+        every candidate the other searches turned up, so the number of
+        candidates to polish scales with the pool size times the number of
+        declared symmetries, and each costs a full-space optimisation (~1.6k
+        likelihood evaluations on the GW240615 example) plus a Hessian if it
+        wins a slot. Sources are tried in the order the pool holds them, which
+        puts the primary mode's mirror first.
     mode_multistart_nstarts : int or None
         Number of random prior draws used by the ``'multistart'`` entry of
         ``mode_searches``; ``None`` (default) uses 10, and ``<= 0`` skips the
@@ -749,6 +783,7 @@ class Laplace(Sampler):
         mode_search_subspace=None,
         mode_separation_sigma=3.0,
         mode_symmetries=None,
+        mode_symmetry_polish_max=None,
         mode_symmetry_tol=None,
         mode_multistart_nstarts=None,
         smc_prior_flow="learned",
@@ -3382,7 +3417,7 @@ class Laplace(Sampler):
         return x[keep]
 
     # Valid entries in ``mode_searches`` -- see its docstring in default_kwargs.
-    _MODE_SEARCHES = {"hypercube", "multistart", "symmetric"}
+    _MODE_SEARCHES = {"hypercube", "multistart", "symmetric", "symmetric-polish"}
 
     def _find_multiple_maps(self, estimator, n_modes, cov_scaling, primary_mean, primary_cov):
         """Find up to *n_modes* distinct MAP estimates and their covariances.
@@ -3457,8 +3492,11 @@ class Laplace(Sampler):
 
         # Mirrors are proposed against the primary and every candidate, so a
         # symmetry-implied mode competes on the same footing as a found one.
-        if "symmetric" in searches:
-            candidates += self._symmetry_candidates(estimator, found_modes, candidates)
+        polish_broken = "symmetric-polish" in searches
+        if "symmetric" in searches or polish_broken:
+            candidates += self._symmetry_candidates(
+                estimator, found_modes, candidates, polish_broken=polish_broken
+            )
 
         # --- 3. Selection: rank the pool, materialise covariances top-down. ---
         found_modes = self._select_modes(
@@ -3722,7 +3760,15 @@ class Laplace(Sampler):
     # mode; only a fictitious one should be rejected.
     _SYMMETRY_LOGP_TOL = -np.log(_MIN_MODE_WEIGHT_FOR_SYMMETRY)
 
-    def _symmetry_candidates(self, estimator, found_modes, candidates):
+    # Default cap on how many broken mirrors ``'symmetric-polish'`` will polish
+    # in one call.  Mirrors are proposed for the primary *and* every candidate
+    # the other searches turned up, so without a cap the cost scales with the
+    # size of the candidate pool times the number of declared symmetries.  Four
+    # is enough to cover the primary plus a full n_modes=3 pool on the examples
+    # this was measured against, at ~1.6k likelihood evaluations each.
+    _SYMMETRY_POLISH_MAX = 4
+
+    def _symmetry_candidates(self, estimator, found_modes, candidates, polish_broken=False):
         """Seed the modes implied by an exact symmetry, rather than hunting them.
 
         Some posteriors are exactly periodic in one coordinate: on the
@@ -3750,6 +3796,38 @@ class Laplace(Sampler):
         candidate.  Each carries its source's covariance: a pure translation
         leaves the local curvature unchanged, so the mirror reuses it rather
         than paying for a second Hessian.
+
+        ``polish_broken`` (the ``'symmetric-polish'`` entry of
+        ``mode_searches``) changes what happens when the symmetry *fails* its
+        check.  By default such a mirror is discarded, which is correct only
+        under the no-polish economy above: the mirror keeps its source's
+        covariance, so an offset of ``d`` really does pin its weight at
+        ``exp(-d)``, and ``mode_symmetry_tol`` is a floor on that.  Polish it
+        and that reasoning no longer applies -- the optimum sits somewhere else
+        with its own peak and its own curvature -- so the offset measured at the
+        unpolished point stops being the mirror's weight.
+
+        Judging a mirror on its unpolished value is the failure
+        ``_multistart_candidates`` describes: a mode whose basin is shallow
+        where you land but deep where it leads.  A broken symmetry is exactly
+        when that applies, because the lobe has not vanished, it has moved --
+        higher-order waveform content perturbs an exactly-periodic coordinate
+        rather than removing the second lobe.  Measured on GW240615_113620
+        (``IMRPhenomXPHM``, H1L1V1), the ``delta_phase + pi`` mirror of the
+        primary MAP is 12.73 nats down where it lands -- a share of 2.9e-06,
+        340x below the 1e-3 seeding floor, so discarded -- but 1570 evaluations
+        of full-space Nelder-Mead from that point reach an optimum 3.39 nats
+        down, a share of 3.4e-02 and comfortably admissible.  It lands at
+        ``delta_phase`` 4.695, where an independent dynesty run puts its
+        posterior (circular mean 4.682), and it gets there by moving
+        ``chirp_mass`` 1.9 away from the primary -- a correlated move no
+        ``mode_search_subspace`` pinned at the MAP could have made.
+
+        So the tolerance is demoted from a gate to a covariance-reuse switch:
+        within it, seed directly and inherit the curvature; outside it, polish
+        and pay for a Hessian like any other search's candidate.  Opt-in, and
+        capped by ``mode_symmetry_polish_max``, because it costs an
+        optimisation plus a Hessian per rescued mirror.
         """
         symmetries = self.kwargs.get("mode_symmetries") or []
         if not symmetries:
@@ -3763,6 +3841,10 @@ class Laplace(Sampler):
         names = list(estimator.parameter_names)
         lows = np.asarray(estimator.prior_bounds_min, dtype=float)
         highs = np.asarray(estimator.prior_bounds_max, dtype=float)
+
+        polish_max = self.kwargs.get("mode_symmetry_polish_max")
+        polish_max = self._SYMMETRY_POLISH_MAX if polish_max is None else int(polish_max)
+        polished_used = 0
 
         sources = [(m, c, lp) for m, c, lp in found_modes]
         sources += [(c["mean"], None, c["logp"]) for c in candidates]
@@ -3781,11 +3863,52 @@ class Laplace(Sampler):
                 offset = abs(mirrored_logp - logp)
                 if not np.isfinite(mirrored_logp) or offset > tol:
                     share = np.exp(-offset) if np.isfinite(mirrored_logp) else 0.0
+                    # A non-finite mirror gives a local optimiser nothing to
+                    # descend from, so it is dropped whether or not polishing is
+                    # enabled.
+                    can_polish = polish_broken and np.isfinite(mirrored_logp)
+                    if can_polish and polished_used >= polish_max:
+                        logger.info(
+                            f"Symmetry {param} + {float(shift):.4f} does not hold at "
+                            f"{mean[index]:.4f} (log-posterior differs by {offset:.2f}); "
+                            f"mode_symmetry_polish_max ({polish_max}) is spent, not polishing it."
+                        )
+                        can_polish = False
+                    if not can_polish:
+                        logger.info(
+                            f"Symmetry {param} + {float(shift):.4f} does not hold at "
+                            f"{mean[index]:.4f} (log-posterior differs by {offset:.2f}, "
+                            f"implying a mixture share of {share:.2e} < {np.exp(-tol):.2e}); "
+                            "not seeding it."
+                        )
+                        continue
+
                     logger.info(
                         f"Symmetry {param} + {float(shift):.4f} does not hold at "
-                        f"{mean[index]:.4f} (log-posterior differs by {offset:.2f}, "
-                        f"implying a mixture share of {share:.2e} < {np.exp(-tol):.2e}); "
-                        "not seeding it."
+                        f"{mean[index]:.4f} (log-posterior differs by {offset:.2f}); "
+                        "polishing from the mirrored point rather than discarding it."
+                    )
+                    polished_used += 1
+                    result = estimator._maximize_posterior_from_initial_sample(dict(zip(names, mirrored)))
+                    polished_mean = np.asarray(result.x, dtype=float)
+                    polished_logp = float(-result.fun)
+                    if not np.isfinite(polished_logp):
+                        logger.info("  polish reached a non-finite log-posterior; discarding the mirror.")
+                        continue
+                    polished_offset = abs(polished_logp - logp)
+                    logger.info(
+                        f"  polished to {param} = {polished_mean[index]:.4f}, log-posterior = "
+                        f"{polished_logp:.2f} (offset {offset:.2f} -> {polished_offset:.2f}, "
+                        f"share {share:.2e} -> {np.exp(-polished_offset):.2e}, nfev = {result.nfev})"
+                    )
+                    # cov=None deliberately: the polish moved the point, so the
+                    # source's curvature no longer describes it and _select_modes
+                    # must pay for a Hessian here, exactly as it does for every
+                    # other search's candidates.  Whether this is a genuinely
+                    # distinct mode or a walk back onto its own source is left to
+                    # the mode_separation_sigma dedup there.
+                    proposed.append(
+                        dict(mean=polished_mean, logp=polished_logp, cov=None, source="symmetry-polish")
                     )
                     continue
                 kind = "exact" if offset <= 1e-6 else f"approximate, share ~{np.exp(-offset):.3f}"

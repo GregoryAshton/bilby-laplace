@@ -586,6 +586,96 @@ def test_exact_tolerance_still_rejects_an_approximate_mirror(sampler, tilted_est
     assert len(modes) == 1, "tol=0 must demand an exact symmetry"
 
 
+class _DisplacedMirrorLikelihood(bilby.core.likelihood.Likelihood):
+    """Two lobes a pi-mirror apart, the second *displaced* in ``x``.
+
+    Lobe A peaks at ``(MU_X, MU_PHI)``, lobe B at ``(MU_X + DX, MU_PHI + pi)``
+    and ``GAP`` nats lower. Mirroring A's mode at fixed ``x`` therefore lands on
+    B's flank, ``DX**2 / (2 * SIGMA_X**2) + GAP`` = 9 nats down -- past the
+    ~6.9-nat default tolerance, so plain ``'symmetric'`` discards it -- while
+    B's actual peak is only ``GAP`` = 1 nat down and belongs in the mixture.
+
+    This is the GW240615_113620 geometry in two dimensions: the mirrored lobe
+    has not vanished, it has moved, and reaching it needs a correlated move in a
+    coordinate the mirror itself does not touch. Distinguishes a search that
+    judges the mirror where it lands from one that judges it where it leads.
+    """
+
+    MU_X, SIGMA_X = 1.0, 0.3
+    MU_PHI, KAPPA = 0.7, 50.0
+    DX = 1.2  # 4 sigma_x, so the mirror lands 8 nats down the flank
+    GAP = 1.0  # ... plus this, clearing the 6.9-nat tolerance
+
+    def __init__(self):
+        super().__init__(parameters=dict(x=None, phi=None))
+
+    def log_likelihood(self, parameters=None):
+        p = parameters if parameters is not None else self.parameters
+        a = -0.5 * ((p["x"] - self.MU_X) / self.SIGMA_X) ** 2 + self.KAPPA * np.cos(p["phi"] - self.MU_PHI)
+        b = (
+            -0.5 * ((p["x"] - self.MU_X - self.DX) / self.SIGMA_X) ** 2
+            + self.KAPPA * np.cos(p["phi"] - self.MU_PHI - np.pi)
+            - self.GAP
+        )
+        return float(np.logaddexp(a, b))
+
+
+@pytest.fixture
+def displaced_estimator(periodic_priors):
+    from bilby_laplace.laplace import LaplacePosteriorEstimator
+
+    return LaplacePosteriorEstimator(_DisplacedMirrorLikelihood(), periodic_priors)
+
+
+def _search_displaced(sampler, estimator, monkeypatch, searches, polish_max=None):
+    """Run only the symmetric search(es) from lobe A's known mode."""
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("this test must not run the hypercube search")
+
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", _boom)
+    sampler.kwargs["mode_searches"] = list(searches)
+    sampler.kwargs["mode_symmetries"] = [("phi", np.pi)]
+    sampler.kwargs["mode_symmetry_tol"] = None
+    sampler.kwargs["mode_symmetry_polish_max"] = polish_max
+
+    L = _DisplacedMirrorLikelihood
+    mean = np.array([L.MU_X, L.MU_PHI])
+    cov = np.diag([L.SIGMA_X**2, 1.0 / L.KAPPA])
+    logp = float(estimator.log_posterior_from_array(mean))
+    modes = sampler._find_multiple_maps(estimator, 2, np.ones(2), mean, cov)
+    return modes, logp
+
+
+def test_displaced_mirror_is_discarded_without_polishing(sampler, displaced_estimator, monkeypatch):
+    """Plain 'symmetric' judges the mirror where it lands: 9 nats down, rejected."""
+    modes, _ = _search_displaced(sampler, displaced_estimator, monkeypatch, ["symmetric"])
+    assert len(modes) == 1, "the displaced mirror lands past the tolerance and must be skipped"
+
+
+def test_symmetric_polish_rescues_a_displaced_mirror(sampler, displaced_estimator, monkeypatch):
+    """'symmetric-polish' uses the mirror as a start, and finds the moved lobe."""
+    modes, logp = _search_displaced(sampler, displaced_estimator, monkeypatch, ["symmetric-polish"])
+
+    assert len(modes) == 2, "polishing from the mirrored point should recover lobe B"
+    L = _DisplacedMirrorLikelihood
+    mirror = modes[1] if np.allclose(modes[0][0], [L.MU_X, L.MU_PHI], atol=1e-3) else modes[0]
+
+    # It found the *moved* lobe, not the point it started from.
+    assert mirror[0][0] == pytest.approx(L.MU_X + L.DX, abs=0.05), "x should have moved to lobe B's centre"
+    assert np.cos(mirror[0][1] - L.MU_PHI - np.pi) == pytest.approx(1.0, abs=1e-3)
+
+    # And it is admissible where the unpolished mirror was not.
+    offset = abs(mirror[2] - logp)
+    assert offset < 2.0, f"polished mirror should sit ~{L.GAP} nat down, got {offset}"
+
+
+def test_symmetry_polish_max_zero_disables_the_rescue(sampler, displaced_estimator, monkeypatch):
+    """The cap is honoured: 0 leaves plain symmetric seeding and nothing else."""
+    modes, _ = _search_displaced(sampler, displaced_estimator, monkeypatch, ["symmetric-polish"], polish_max=0)
+    assert len(modes) == 1, "mode_symmetry_polish_max=0 must not polish anything"
+
+
 def test_fictitious_symmetry_is_still_rejected(sampler, periodic_estimator, periodic_mode, monkeypatch):
     """A symmetry the posterior does not have must still be skipped: the point
     of widening the tolerance is to admit real modes, not fictitious ones."""
