@@ -1026,3 +1026,66 @@ def test_single_mode_still_records_a_mixture(sampler, hidden_estimator, hidden_p
     assert rec["source"] == ["primary"]
     assert np.isfinite(rec["log_posterior"][0])
     assert len(rec["mean"][0]) == len(rec["parameter_names"])
+
+
+# --- smc_prior_fraction ----------------------------------------------------
+#
+# The Laplace mixture can only seed SMC where the mode search looked. Prior
+# draws cover what it missed, and survive because SMC starts at beta ~ 0 where
+# the target is the prior -- unlike covariance inflation, whose draws are
+# resampled away immediately at full weight.
+
+
+class _FractionSampler(Laplace):
+    """Bare Laplace exposing just the seeding helpers, with a real PriorDict."""
+
+    def __init__(self, priors, fraction):
+        self.kwargs = dict(Laplace.default_kwargs)
+        self.kwargs["smc_prior_fraction"] = fraction
+        self.priors = priors
+
+
+@pytest.fixture
+def frac_priors():
+    return bilby.core.prior.PriorDict(
+        dict(x=bilby.core.prior.Uniform(-5.0, 5.0, "x"), y=bilby.core.prior.Uniform(-5.0, 5.0, "y"))
+    )
+
+
+def test_prior_fraction_defaults_to_off(sampler):
+    assert sampler.kwargs["smc_prior_fraction"] == 0.0
+
+
+@pytest.mark.parametrize("fraction,n,expected", [(0.0, 100, 0), (0.1, 100, 10), (0.25, 80, 20), (0.5, 7, 4)])
+def test_prior_fraction_count(frac_priors, fraction, n, expected):
+    assert _FractionSampler(frac_priors, fraction)._n_prior_seeded(n) == expected
+
+
+@pytest.mark.parametrize("bad", [-0.1, 1.0, 1.5])
+def test_prior_fraction_out_of_range_is_rejected(frac_priors, bad):
+    with pytest.raises(SamplerError, match="smc_prior_fraction"):
+        _FractionSampler(frac_priors, bad)._n_prior_seeded(100)
+
+
+def test_prior_seed_preserves_total_and_dimension(frac_priors):
+    s = _FractionSampler(frac_priors, 0.2)
+    x = np.zeros((80, 2))
+    out = s._append_prior_seed(x, 20, ["x", "y"])
+    assert out.shape == (100, 2), "prior draws must add to the cloud, not replace it"
+
+
+def test_prior_seed_draws_are_inside_the_prior(frac_priors):
+    s = _FractionSampler(frac_priors, 0.5)
+    out = s._append_prior_seed(np.zeros((0, 2)), 200, ["x", "y"])
+    assert out.shape == (200, 2)
+    assert np.all((out >= -5.0) & (out <= 5.0))
+    # a prior draw must actually spread, not sit on the mixture's point
+    assert out.std(axis=0).min() > 1.0
+
+
+def test_zero_prior_seed_is_a_no_op(frac_priors):
+    s = _FractionSampler(frac_priors, 0.0)
+    x = np.arange(20, dtype=float).reshape(10, 2)
+    out = s._append_prior_seed(x.copy(), 0, ["x", "y"])
+    assert out.shape == x.shape
+    assert np.array_equal(np.sort(out, axis=0), np.sort(x, axis=0)), "content must be unchanged (order may differ)"

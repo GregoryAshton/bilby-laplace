@@ -723,6 +723,35 @@ class Laplace(Sampler):
         ``gaussian_kde`` per parameter per iteration, so re-rendering it every
         iteration grows quadratically over a run. Ignored unless
         ``plot_diagnostic=True``, which is also what gates the final render.
+    smc_prior_fraction : float
+        Fraction of SMC's *initial cloud* drawn straight from the prior rather
+        than from the Laplace mixture, in ``[0, 1)``. Default ``0.0`` (off), so
+        no existing run changes.
+
+        The mixture can only seed SMC where the mode search looked. A mode
+        requiring a *correlated* move across many coordinates is unreachable by
+        a search built on coordinate-pinned candidates, and covariance inflation
+        does not substitute for finding it: widening marginals independently
+        scatters draws across each axis instead of along the ridge. Measured on
+        GW150914, inflating ``theta_jn``/``a_2``/``phi_jl`` enough to cover an
+        8.2-sigma offset put 12 of 3000 draws in the right region, none with
+        usable weight (18 nats below its peak), and cut the cloud's effective
+        sample size to 2.4 of 3000.
+
+        Prior draws sidestep that because SMC begins at ``beta ~ 0``, where the
+        target is the prior: such a particle carries ordinary weight at the
+        first iteration and need only survive until the tempering schedule
+        reaches a ``beta`` that resolves the mode. It is how aspire cold-starts,
+        and aspire recovers the GW150914 mode this sampler's own SMC misses.
+
+        Unlike ``prior_parameters``, which substitutes named *coordinates* in
+        every particle, this reserves whole particles: the correlations between
+        coordinates within a prior-drawn particle are the prior's, not a
+        mixture of Laplace marginals and prior marginals.
+
+        The cost is proposal quality -- a prior draw is a poor sample of a
+        peaked posterior, so a large fraction wastes particles and slows the
+        early tempering iterations.
     prior_parameters : list or None
         List of parameter names for which initial proposal samples should be
         replaced with independent draws from the prior. Use this for parameters
@@ -787,6 +816,7 @@ class Laplace(Sampler):
         mode_symmetry_tol=None,
         mode_multistart_nstarts=None,
         smc_prior_flow="learned",
+        smc_prior_fraction=0.0,
         mode_weights="equal",
         smc_kwargs=None,
         emcee_kwargs=None,
@@ -1696,8 +1726,13 @@ class Laplace(Sampler):
         matches the mixture used as the proposal flow) and is even otherwise.
         Returns an ``(n, ndim)`` float array.
         """
+        n_prior = self._n_prior_seeded(n)
+        if n_prior:
+            n = n - n_prior
+
         if len(proposals) == 1:
-            return self._draw_inprior_samples(proposals[0], n, parameter_names)
+            drawn = self._draw_inprior_samples(proposals[0], n, parameter_names)
+            return self._append_prior_seed(drawn, n_prior, parameter_names)
 
         k = len(proposals)
         if weights is None:
@@ -1713,12 +1748,55 @@ class Laplace(Sampler):
             chunks.append(x_i)
 
         x_out = np.vstack(chunks)
-        # Shuffle so the cloud is not ordered by mode: aspire's flow training
-        # splits it into train/validation sets by position.
-        random.rng.shuffle(x_out)
         logger.info(
             f"Initial SMC cloud: {len(x_out)} samples over {k} modes " f"({', '.join(str(len(c)) for c in chunks)})"
         )
+        return self._append_prior_seed(x_out, n_prior, parameter_names)
+
+    def _n_prior_seeded(self, n):
+        """How many of *n* initial SMC particles come straight from the prior."""
+        fraction = self.kwargs.get("smc_prior_fraction") or 0.0
+        fraction = float(fraction)
+        if not 0.0 <= fraction < 1.0:
+            raise SamplerError(f"smc_prior_fraction must be in [0, 1), got {fraction!r}.")
+        return int(round(fraction * n))
+
+    def _append_prior_seed(self, x, n_prior, parameter_names):
+        """Add *n_prior* prior draws to an initial SMC cloud, then shuffle.
+
+        The Laplace mixture can only seed SMC in places the mode search found.
+        A mode needing a *correlated* move across many coordinates is invisible
+        to a search built on coordinate-pinned candidates, and no amount of
+        covariance inflation substitutes: widening marginals independently
+        scatters draws across each axis rather than along the ridge, so the few
+        that reach the region score far below its peak and are resampled away
+        immediately (measured on GW150914: inflating theta_jn/a_2/phi_jl to
+        cover an 8.2-sigma offset put 12 of 3000 draws in the region, none with
+        usable weight, and collapsed the cloud's effective sample size to 2.4).
+
+        Prior draws avoid that because SMC starts at beta ~ 0, where the target
+        *is* the prior: such a particle carries ordinary weight at the first
+        iteration and only has to survive until the schedule reaches a beta that
+        resolves the mode. This is how aspire cold-starts, and aspire recovers
+        the mode bilby_laplace's own SMC misses on that example.
+
+        The cost is proposal efficiency: a prior draw is a poor sample of a
+        peaked posterior, so a large fraction wastes particles. Off by default.
+        """
+        if not n_prior:
+            if x.ndim == 2 and len(x):
+                random.rng.shuffle(x)
+            return x
+        prior_draws = self.priors.sample_subset_constrained(list(parameter_names), size=n_prior)
+        x_prior = np.column_stack([np.atleast_1d(prior_draws[name]) for name in parameter_names])
+        x_out = np.vstack([x, x_prior]) if len(x) else x_prior
+        logger.info(
+            f"Initial SMC cloud seeded with {n_prior} prior draw(s) "
+            f"({n_prior / max(len(x_out), 1):.0%} of {len(x_out)}) via smc_prior_fraction"
+        )
+        # Shuffle so the cloud is not ordered by origin: aspire's flow training
+        # splits it into train/validation sets by position.
+        random.rng.shuffle(x_out)
         return x_out
 
     def _check_iteration_limit(self, method_name, n_proposed, n_accepted):
