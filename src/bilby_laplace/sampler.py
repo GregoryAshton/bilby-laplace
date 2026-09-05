@@ -3307,15 +3307,26 @@ class Laplace(Sampler):
         )
         plt.close(fig)
 
-    # Smallest log-likelihood drop at 1 sigma that _validate_covariance will
-    # treat as measured rather than as numerical noise. Also caps that method's
-    # inflation at 0.5 / 0.01 = 50 in variance, ~7x in sigma.
+    # Smallest log-likelihood drop that _validate_covariance will treat as
+    # measured rather than as numerical noise.
     _MIN_VALIDATION_DROP = 0.01
 
-    # Bounded widening applied to a direction whose probe could not resolve a
-    # drop -- 4x in variance, 2x in sigma. Used for a flat likelihood and for a
-    # sub-threshold drop alike, because the two are indistinguishable.
-    _UNRESOLVED_INFLATION = 4.0
+    # In prior-scaled coordinates a sigma of 1 is "as wide as the prior". A
+    # direction at or above this fraction of that is treated as genuinely
+    # unconstrained when its probe resolves no drop, and is left alone. Below
+    # it, an unresolved drop is a *contradiction* -- the covariance asserts a
+    # tight constraint the likelihood does not show -- so the probe steps
+    # outward rather than giving up. This is also the ceiling the probe steps
+    # out to, so nothing is widened past it on probe evidence alone.
+    _PROBE_UNCONSTRAINED_SIGMA = 0.5
+
+    # Cap on how many times the probe halves (to get inside the prior) or
+    # doubles (to resolve a drop). Bounds the extra likelihood calls at ~4x
+    # this per axis, but only for axes that do not resolve at once -- the loop
+    # exits as soon as the drop clears _MIN_VALIDATION_DROP, so in practice
+    # most axes cost nothing extra. 12 doublings covers 4096x in sigma, well
+    # beyond the ~30-50x under-estimates measured on a precessing BBH.
+    _MAX_PROBE_STEPS = 12
 
     def _validate_covariance(self, estimator, mean, cov):
         """Validate the covariance by checking likelihood along each principal axis.
@@ -3324,6 +3335,38 @@ class Laplace(Sampler):
         drop by 0.5 for a Gaussian. A smaller drop means the posterior is wider
         than the Gaussian predicts, and that eigenvalue is inflated to match.
         Directions are never shrunk.
+
+        The probe step is *adaptive* rather than fixed at 1 sigma, because a
+        fixed step fails in two ways that were both measured on a 13-parameter
+        precessing-BBH posterior:
+
+        * **It can land outside the prior.** Then neither side of the probe is
+          finite, and the axis used to be skipped entirely -- five of thirteen
+          axes went unvalidated on that problem, including two that were
+          already wider than the prior. The step now halves until it is inside
+          the support. The width inferred below does not care which step it was
+          measured at, so a shorter probe is just as informative.
+        * **It can be far too short to resolve anything.** A direction whose
+          sigma is ~1e-4 of the prior width cannot produce a measurable drop at
+          1 sigma no matter how wrong it is, so it fell into the "unresolved,
+          leave alone" branch -- which is exactly where a spuriously narrow
+          direction hides. On that problem the tightest axis was ~10^3 too
+          narrow in variance and this is what let it through. The step now
+          doubles until the drop resolves.
+
+        The disambiguator between "unresolved because unconstrained" and
+        "unresolved because wrongly narrow" is the direction's own width:
+        a genuinely unconstrained direction has already been carried to prior
+        width by ``_floor_precision_at_prior``, so it sits near sigma = 1 in
+        scaled units, while a wrongly narrow one claims a sigma far below it.
+        ``_PROBE_UNCONSTRAINED_SIGMA`` is that dividing line.
+
+        Note this corrects the covariance, not the Fisher that produced it. The
+        underlying cause is that ``F = (dh|dh)`` is the expected information
+        under the linear-signal approximation, which breaks down first along
+        the best-measured directions; the Fisher itself is computed correctly
+        (its finite differences agree with automatic differentiation to within
+        3% across five orders of magnitude in step size).
 
         Two things keep that from running away.
 
@@ -3354,21 +3397,52 @@ class Laplace(Sampler):
             # Unit vector in scaled space, expressed as a parameter-space step.
             direction = prior_sd * eigvecs[:, i]
 
-            # Evaluate at +/- 1 sigma
-            logl_plus = float(estimator.log_likelihood_from_array(mean + sigma_i * direction))
-            logl_minus = float(estimator.log_likelihood_from_array(mean - sigma_i * direction))
+            def probe(step, _direction=direction):
+                """Smaller (wider-side) of the two finite drops at +/- *step*.
 
-            # Collect finite drops only (skip out-of-bounds)
-            drops = []
-            if np.isfinite(logl_plus):
-                drops.append(logl_peak - logl_plus)
-            if np.isfinite(logl_minus):
-                drops.append(logl_peak - logl_minus)
-            if not drops:
+                ``None`` when neither side is finite, i.e. the whole probe is
+                outside the prior support.
+                """
+                drops = []
+                for sign in (+1.0, -1.0):
+                    value = float(estimator.log_likelihood_from_array(mean + sign * step * _direction))
+                    if np.isfinite(value):
+                        drops.append(logl_peak - value)
+                return min(drops) if drops else None
+
+            step = sigma_i
+            actual_drop = probe(step)
+
+            # Out of bounds: halve until the probe is inside the prior, rather
+            # than skipping the axis.
+            shrinks = 0
+            while actual_drop is None and shrinks < self._MAX_PROBE_STEPS:
+                step *= 0.5
+                actual_drop = probe(step)
+                shrinks += 1
+            if actual_drop is None:
+                logger.debug(
+                    f"Leaving axis {i} unchanged: no probe step inside the prior "
+                    f"support after {self._MAX_PROBE_STEPS} halvings."
+                )
                 continue
 
-            # Use the smaller drop (the wider side)
-            actual_drop = min(drops)
+            # Unresolved *and* claiming to be much narrower than the prior:
+            # step outward until the drop resolves. Stops early if the larger
+            # step leaves the support, keeping the last measurement.
+            grows = 0
+            while (
+                actual_drop < self._MIN_VALIDATION_DROP
+                and step < self._PROBE_UNCONSTRAINED_SIGMA
+                and grows < self._MAX_PROBE_STEPS
+            ):
+                bigger = min(step * 2.0, self._PROBE_UNCONSTRAINED_SIGMA)
+                grown = probe(bigger)
+                if grown is None:
+                    break
+                step, actual_drop = bigger, grown
+                grows += 1
+
             expected_drop = 0.5
 
             # A drop too small to resolve is not evidence of a wide posterior.
@@ -3394,33 +3468,61 @@ class Laplace(Sampler):
             # the resolved branch, since expected/actual <= 0.5/0.01 = 50 in
             # variance, i.e. ~7x in sigma.
             if actual_drop < self._MIN_VALIDATION_DROP:
-                # No evidence, so no change. A drop this small -- often
-                # negative, i.e. the likelihood rising into numerical noise --
-                # says the probe could not resolve the direction, not that the
-                # posterior is wide along it. Widening anyway, even by a
-                # "safe" bounded factor, is unsound: a near-null direction can
-                # already sit close to prior width, so even a modest widening
-                # factor pushes it (and any parameter with a component along
-                # it) out to the prior on noise alone.
-                #
-                # Directions the data genuinely does not constrain are not
-                # lost: they already carry large variance from the Fisher, and
-                # `_floor_precision_at_prior` bounds them at the prior.
-                logger.debug(
-                    f"Leaving axis {i} unchanged: log-likelihood drop at 1 "
-                    f"sigma ({actual_drop:.2e}) is below the "
-                    f"{self._MIN_VALIDATION_DROP:g} needed to distinguish a "
-                    f"wide posterior from an unresolved probe."
-                )
+                # Having had to shrink is itself evidence the direction is at
+                # prior scale: a 1-sigma step only leaves the support when
+                # sigma is comparable to the prior width. Without this a
+                # direction just under _PROBE_UNCONSTRAINED_SIGMA whose probe
+                # was driven far inward by the boundary is misread as wrongly
+                # narrow, and "widened" to the shrunken step -- which is much
+                # narrower than it already claims.
+                if sigma_i >= self._PROBE_UNCONSTRAINED_SIGMA or shrinks:
+                    # Genuinely unconstrained: already at prior width, and a
+                    # flat likelihood along it is true but uninformative.
+                    # Widening anyway, even by a "safe" bounded factor, would
+                    # push it (and every parameter with a component along it)
+                    # past the prior on noise alone.
+                    logger.debug(
+                        f"Leaving axis {i} unchanged: unresolved drop "
+                        f"({actual_drop:.2e}) on a direction at {sigma_i:.2f} of "
+                        f"prior width"
+                        + (" whose probe hit the prior boundary" if shrinks else "")
+                        + ", so it is unconstrained rather than wrongly narrow."
+                    )
+                elif step**2 <= eigvals[i]:
+                    # Flat, but the probe never reached beyond what the
+                    # direction already claims, so there is nothing to conclude.
+                    logger.debug(
+                        f"Leaving axis {i} unchanged: probe reached only "
+                        f"{step:.2e} against a claimed sigma of {sigma_i:.2e}."
+                    )
+                else:
+                    # Flat all the way out to the probe ceiling while claiming
+                    # a sigma far below the prior. The claim is unsupported by
+                    # the likelihood, so take the ceiling as a lower bound on
+                    # the width rather than keeping a constraint that is not
+                    # there.
+                    eigvals[i] = min(step**2, 1.0)
+                    any_inflated = True
+                    logger.info(
+                        f"Widening proposal along axis {i} to {step:.2g} of prior width: "
+                        f"claimed sigma {sigma_i:.2e} but the log-likelihood is flat "
+                        f"({actual_drop:.2e} at {step:.2g}) out to the probe ceiling."
+                    )
             elif actual_drop < expected_drop * 0.5:
-                inflation = expected_drop / actual_drop
-                eigvals[i] = min(eigvals[i] * inflation, 1.0)
-                any_inflated = True
-                logger.info(
-                    f"Widening proposal along axis {i}: "
-                    f"posterior is {inflation:.1f}x wider "
-                    f"than Gaussian approximation"
-                )
+                # Local quadratic: drop(s) = 0.5 * (s / sigma_true)^2. With
+                # step == sigma_i this is exactly the old
+                # `eigval *= 0.5 / drop`, so directions the fixed-step probe
+                # already handled are unaffected; only the step differs.
+                sigma_true = step / np.sqrt(2.0 * actual_drop)
+                if sigma_true > sigma_i:
+                    eigvals[i] = min(sigma_true**2, 1.0)
+                    any_inflated = True
+                    logger.info(
+                        f"Widening proposal along axis {i}: "
+                        f"posterior is {(sigma_true / sigma_i) ** 2:.1f}x wider "
+                        f"than Gaussian approximation "
+                        f"(drop {actual_drop:.2e} measured at {step:.2e})"
+                    )
 
         if any_inflated:
             scaled = eigvecs @ np.diag(eigvals) @ eigvecs.T
