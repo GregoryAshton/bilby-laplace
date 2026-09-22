@@ -350,3 +350,29 @@ def test_ill_formed_prior_width_raises(gaussian_likelihood):
     priors = bilby.core.prior.PriorDict(dict(x=bilby.core.prior.Uniform(-5, 5, "x"), y=bad_y))
     with pytest.raises(ValueError, match="Prior width"):
         LaplacePosteriorEstimator(gaussian_likelihood, priors)
+
+
+def test_log_posterior_from_array_batches_without_changing_values(gaussian_likelihood, gaussian_priors):
+    """A column-stacked batch must equal the same points evaluated one at a time.
+
+    The batched path exists so the MAP search can use the pool; it must not be
+    a different calculation. Also covers the trailing-shape contract that
+    ``scipy.differentiate.hessian`` relies on: it evaluates on an
+    ``(N_params, m, n)`` grid and expects ``(m, n)`` back, which an earlier
+    version of this batching broke.
+    """
+    est = LaplacePosteriorEstimator(gaussian_likelihood, gaussian_priors, use_unit_cube=False)
+    rng = np.random.default_rng(0)
+
+    columns = rng.uniform(-4, 4, size=(len(est.parameter_names), 25))
+    one_at_a_time = np.array([est.log_posterior_from_array(columns[:, j]) for j in range(columns.shape[1])])
+    np.testing.assert_allclose(est.log_posterior_from_array(columns), one_at_a_time, rtol=0, atol=0)
+
+    grid = rng.uniform(-4, 4, size=(len(est.parameter_names), 3, 4))
+    out = est.log_posterior_from_array(grid)
+    assert out.shape == (3, 4)
+    expected = np.array([[est.log_posterior_from_array(grid[:, i, j]) for j in range(4)] for i in range(3)])
+    np.testing.assert_allclose(out, expected, rtol=0, atol=0)
+
+    # A single vector still comes back as a scalar, not a length-1 array.
+    assert isinstance(est.log_posterior_from_array(columns[:, 0]), float)

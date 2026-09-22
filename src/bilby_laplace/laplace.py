@@ -26,6 +26,30 @@ from scipy.optimize import OptimizeResult, differential_evolution, minimize
 # log-posterior spread itself is below a nat, independent of the offset.
 DE_ATOL = 1.0
 
+# Independent differential-evolution restarts per MAP search, the best kept.
+#
+# ``differential_evolution`` is not reliable on a GW log-posterior at this
+# dimension.  Measured on GW150914 over 100 seeds (bilby-laplace-paper,
+# ``map_study``): 25 of them returned a MAP in the face-on ``theta_jn ~ 0.35``
+# mode rather than the true one, 2.1-7.0 nats down.  Downstream that is not a
+# small error -- ``mode_search_subspace`` pins every secondary candidate at the
+# primary, so the whole mixture inherits it and SMC starts entirely inside the
+# wrong mode, giving a posterior 70-99% wrong.
+#
+# Restarts work here because the two outcomes are cleanly separated in
+# log-posterior (a 2.14 nat gap, with no overlap over 100 seeds), so simply
+# keeping the best restart cannot pick the wrong one unless *every* restart
+# failed.  Measured over those seeds: 25.2% -> 6.3% -> 1.6% -> 0.4% for k =
+# 1, 2, 3, 4.
+#
+# 4 is chosen because it is the point at which the failure rate drops below the
+# other error sources in the pipeline, and because at matched cost restarts beat
+# every other knob tried by a wide margin: the same evaluation budget spent on
+# ``popsize=60`` instead leaves 15% failures, and on ``atol=0.1`` leaves 24%.
+# The cost is nominally 4x the MAP search, but the MAP search now runs on the
+# pool (see ``map_vectorized``), which more than repays it whenever ``npool > 1``.
+MAP_RESTARTS = 4
+
 
 def array_to_dict(keys, array):
     return dict(zip(keys, array))
@@ -70,6 +94,8 @@ class LaplacePosteriorEstimator:
         fisher_kwargs=None,
         marginalized_reference=None,
         seed=None,
+        map_restarts=MAP_RESTARTS,
+        map_vectorized=True,
     ):
         """Estimate posteriors using the Laplace approximation.
 
@@ -176,6 +202,8 @@ class LaplacePosteriorEstimator:
         self.minimization_method = minimization_method
         self.n_prior_samples = n_prior_samples
         self.seed = seed
+        self.map_restarts = max(1, int(map_restarts))
+        self.map_vectorized = bool(map_vectorized)
         self.use_unit_cube = use_unit_cube
         self.jacobian_cap_scale = jacobian_cap_scale
         self.hessian_kwargs = hessian_kwargs if hessian_kwargs is not None else {}
@@ -374,17 +402,44 @@ class LaplacePosteriorEstimator:
     def log_posterior_from_array(self, x_array):
         """Evaluate log-posterior from a parameter array (or column-stacked arrays).
 
-        No explicit bounds test: ``log_posterior`` -> ``log_prior`` ->
-        ``PriorDict.ln_prob`` already returns ``-inf`` outside a parameter's
-        range *and* on a constraint violation, and ``log_posterior``
-        short-circuits before touching the likelihood.  The box test this used
-        to carry was both redundant and weaker than what it guarded.
+        Accepts ``(N_params,)`` or ``(N_params, N_samples)`` and returns a
+        scalar or ``(N_samples,)`` respectively.
+
+        No explicit bounds test: ``log_prior`` -> ``PriorDict.ln_prob`` already
+        returns ``-inf`` outside a parameter's range *and* on a constraint
+        violation, and the likelihood is never reached for such a column.  The
+        box test this used to carry was both redundant and weaker than what it
+        guarded.
+
+        A batch is routed through ``_log_likelihood_for_columns``, so it uses
+        the pool when one is attached.  This used to be ``apply_along_axis``
+        over a scalar ``log_posterior``, which was serial *whatever* ``npool``
+        said -- and since the MAP search is the heaviest consumer of this
+        method, that alone kept the global optimiser single-threaded.  The
+        numbers are unchanged either way: the pool only splits the same
+        independent likelihood calls across processes.
         """
+        x = np.asarray(x_array, dtype=float)
+        # Any trailing shape is allowed, not just a single batch axis:
+        # ``scipy.differentiate.hessian`` evaluates on a ``(N_params, m, n)``
+        # grid and expects ``(m, n)`` back. Flatten the trailing axes, evaluate
+        # as one batch, and restore the shape -- which is what the
+        # ``apply_along_axis`` this replaced did implicitly.
+        single = x.ndim == 1
+        x2 = x[:, None] if single else x.reshape(x.shape[0], -1)
 
-        def wrapped(x_array):
-            return self.log_posterior(array_to_dict(self.parameter_names, x_array))
-
-        return np.apply_along_axis(wrapped, 0, x_array)
+        # The prior first, and on its own: it is cheap, it screens the box and
+        # the Constraint priors in one call, and a column it rejects must never
+        # reach the likelihood (which can be undefined there, not merely wrong).
+        lp = np.array(
+            [self.log_prior(array_to_dict(self.parameter_names, x2[:, j])) for j in range(x2.shape[1])],
+            dtype=float,
+        )
+        out = np.full(x2.shape[1], -np.inf)
+        keep = np.isfinite(lp)
+        if keep.any():
+            out[keep] = lp[keep] + self._log_likelihood_for_columns(x2[:, keep])
+        return float(out[0]) if single else out.reshape(x.shape[1:])
 
     def _to_unit_cube(self, x_array):
         return np.array([self.priors_dict[k].cdf(float(x_array[i])) for i, k in enumerate(self.parameter_names)])
@@ -954,37 +1009,94 @@ class LaplacePosteriorEstimator:
         samples = self.sample_array(sample, n)
         return pd.DataFrame(samples, columns=self.parameter_names)
 
-    def _maximize_posterior_differential_evolution(self):
-        """Global MAP search: differential evolution, then a local polish.
+    def _restart_seeds(self):
+        """One decorrelated seed per MAP restart, derived from ``self.seed``.
 
-        Both departures from scipy's defaults are load-bearing; see
-        :data:`DE_ATOL` for the measurements behind them.
+        Derived rather than ``seed + i``: consecutive integer seeds are a known
+        way to get correlated streams out of some generators, and the whole
+        point of a restart is that it is an *independent* attempt.  ``None``
+        stays ``None`` throughout, so an unseeded run keeps every restart
+        unseeded rather than silently acquiring reproducibility.
         """
+        if self.map_restarts == 1:
+            return [self.seed]
+        if self.seed is None:
+            return [None] * self.map_restarts
+        rng = np.random.default_rng(int(self.seed))
+        return [int(v) for v in rng.integers(2**32, size=self.map_restarts)]
+
+    def _maximize_posterior_differential_evolution(self):
+        """Global MAP search: ``map_restarts`` differential evolutions, best kept.
+
+        Each restart is scipy's ``differential_evolution`` followed by a local
+        Nelder-Mead polish, and the restart with the highest log-posterior wins.
+        Three departures from scipy's defaults are load-bearing; see
+        :data:`DE_ATOL`, :data:`MAP_RESTARTS` and ``map_vectorized``.
+
+        Selecting on the log-posterior needs no threshold and no tuning, and it
+        cannot do worse than a single search: the winner is by construction at
+        least as good as restart 1, which is what the old single-shot path
+        returned.
+        """
+        # Counted here rather than taken from scipy's ``nfev``, which means
+        # "calls to func" and so undercounts by the batch size as soon as
+        # ``vectorized=True``.  ``run_statistics`` quotes this as the MAP's
+        # cost, so it has to be the true number of likelihood evaluations,
+        # summed over every restart and its polish.
+        nfev = [0]
 
         def neg_log_post(x):
+            x = np.asarray(x, dtype=float)
+            nfev[0] += 1 if x.ndim == 1 else x.shape[1]
             return -self.log_posterior_from_array(x)
 
-        out = differential_evolution(
-            neg_log_post,
-            bounds=self.prior_bounds,
-            seed=self.seed,
-            # Absolute, not relative: see DE_ATOL.
-            tol=0,
-            atol=DE_ATOL,
-            # scipy's own polish is L-BFGS-B, whose finite-difference gradients
-            # are useless on a likelihood whose parameters span 1e-2 to 5e3 (it
-            # returned the input unchanged after 36 evaluations, and scipy's
-            # numdiff warned of invalid subtractions). Nelder-Mead below does
-            # the job, and is the local method this class uses everywhere else.
-            polish=False,
-        )
-        polished = minimize(neg_log_post, out.x, bounds=self.prior_bounds, method="Nelder-Mead")
+        seeds = self._restart_seeds()
+        best = None
+        for i, seed in enumerate(seeds, 1):
+            out = differential_evolution(
+                neg_log_post,
+                bounds=self.prior_bounds,
+                seed=seed,
+                # Absolute, not relative: see DE_ATOL.
+                tol=0,
+                atol=DE_ATOL,
+                # Hand the population to the objective in one array, so the
+                # estimator's batched path (and therefore the pool) does the
+                # work.  scipy switches to ``updating='deferred'`` when this is
+                # set, which is *why* the population can be evaluated at once.
+                # Deliberately not conditioned on whether a pool is attached:
+                # that would make a pooled run and a serial run take different
+                # search trajectories, breaking the invariant that the two are
+                # numerically identical.
+                vectorized=self.map_vectorized,
+                # Stated rather than left to scipy to override, which it does
+                # with a UserWarning on every single call when ``vectorized``
+                # is set. Deferred updating is the point: it is what lets the
+                # whole population be evaluated in one batch.
+                updating="deferred" if self.map_vectorized else "immediate",
+                # scipy's own polish is L-BFGS-B, whose finite-difference
+                # gradients are useless on a likelihood whose parameters span
+                # 1e-2 to 5e3 (it returned the input unchanged after 36
+                # evaluations, and scipy's numdiff warned of invalid
+                # subtractions). Nelder-Mead below does the job, and is the
+                # local method this class uses everywhere else.
+                polish=False,
+            )
+            polished = minimize(neg_log_post, out.x, bounds=self.prior_bounds, method="Nelder-Mead")
+            candidate = OptimizeResult(**(polished if polished.fun <= out.fun else out))
+            if len(seeds) > 1:
+                logger.info(f"MAP restart {i}/{len(seeds)}: log-posterior = {-candidate.fun:.4f}")
+            if best is None or candidate.fun < best.fun:
+                best = candidate
+
+        if len(seeds) > 1:
+            logger.info(f"Best of {len(seeds)} MAP restarts: log-posterior = {-best.fun:.4f}")
         # A fresh result rather than a mutated leg: `nfev` has to price the
         # whole search (`run_statistics` quotes it as the MAP's cost), and
         # editing scipy's return value in place would leave the caller holding
         # an object whose own count no longer means what it says.
-        best = OptimizeResult(**(polished if polished.fun <= out.fun else out))
-        best.nfev = out.nfev + polished.nfev
+        best = OptimizeResult(**best)
+        best.nfev = nfev[0]
         return best
 
     def _maximize_posterior_from_initial_sample(self, initial_sample):

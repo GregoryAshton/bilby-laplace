@@ -53,9 +53,10 @@ def offset_priors():
     )
 
 
-def _estimator(likelihood, priors):
+def _estimator(likelihood, priors, **kwargs):
+    kwargs.setdefault("map_restarts", 1)
     return LaplacePosteriorEstimator(
-        likelihood, priors, minimization_method="differential_evolution", use_unit_cube=False
+        likelihood, priors, minimization_method="differential_evolution", use_unit_cube=False, **kwargs
     )
 
 
@@ -129,18 +130,70 @@ def test_the_search_polishes_with_nelder_mead(offset_priors, spied_optimisers):
     assert polish_kwargs["method"] == "Nelder-Mead"
 
 
-def test_reported_cost_covers_both_legs_of_the_search(offset_priors, spied_optimisers):
-    """``nfev`` prices the whole MAP search, DE plus the polish.
+def test_reported_cost_covers_every_restart_and_its_polish(offset_priors):
+    """``nfev`` prices the whole MAP search: every restart's DE *and* polish.
 
-    ``run_statistics`` quotes it, so dropping either leg's share would
-    understate the cost of the stage this fix made expensive.
+    ``run_statistics`` quotes it, so dropping a leg -- or, now, a restart --
+    would understate the cost of the stage this is the expensive part of.
+
+    Checked against the likelihood's own call counter rather than against
+    scipy's ``nfev``, which counts *calls to func* and so undercounts by the
+    batch size as soon as ``map_vectorized`` hands it a whole population at
+    once. The prior here is a plain box with no constraints, so every point the
+    optimiser proposes is in support and reaches the likelihood exactly once.
     """
-    estimator = _estimator(_OffsetGaussianLikelihood(), offset_priors)
+    likelihood = _OffsetGaussianLikelihood()
+    estimator = _estimator(likelihood, offset_priors, map_restarts=3)
 
-    estimator.get_MAP_sample()
+    result = estimator._maximize_posterior_differential_evolution()
 
-    (_, de_result), (_, polish_result) = spied_optimisers["de"][0], spied_optimisers["minimize"][-1]
-    assert estimator.minimization_metadata.nfev == de_result.nfev + polish_result.nfev
+    assert result.nfev == likelihood.n_calls
+
+
+def test_every_restart_runs_and_the_best_is_kept(offset_priors, spied_optimisers):
+    """``map_restarts`` independent searches, and the winner is the best of them.
+
+    The selection needs no threshold: taking the maximum log-posterior cannot
+    do worse than a single search, because restart 1 is one of the candidates.
+    """
+    estimator = _estimator(_OffsetGaussianLikelihood(), offset_priors, map_restarts=3)
+
+    result = estimator._maximize_posterior_differential_evolution()
+
+    assert len(spied_optimisers["de"]) == 3
+    assert result.fun == pytest.approx(min(r.fun for _, r in spied_optimisers["de"] + spied_optimisers["minimize"]))
+
+
+def test_restarts_are_independent_but_reproducible(offset_priors):
+    """Each restart gets its own seed, derived rather than incremented.
+
+    Consecutive integer seeds are a known way to get correlated streams, and a
+    restart is only worth running if it is an independent attempt.
+    """
+    estimator = _estimator(_OffsetGaussianLikelihood(), offset_priors, map_restarts=4, seed=11)
+
+    seeds = estimator._restart_seeds()
+
+    assert len(set(seeds)) == 4
+    assert seeds == estimator._restart_seeds()
+    assert seeds != list(range(11, 15))
+
+
+def test_an_unseeded_run_keeps_every_restart_unseeded(offset_priors):
+    """``seed=None`` must not silently acquire reproducibility per restart."""
+    estimator = _estimator(_OffsetGaussianLikelihood(), offset_priors, map_restarts=3, seed=None)
+
+    assert estimator._restart_seeds() == [None, None, None]
+
+
+def test_a_single_restart_is_the_old_single_shot_search(offset_priors, spied_optimisers):
+    """``map_restarts=1`` must run exactly one search, on the estimator's own seed."""
+    estimator = _estimator(_OffsetGaussianLikelihood(), offset_priors, map_restarts=1, seed=5)
+
+    estimator._maximize_posterior_differential_evolution()
+
+    assert len(spied_optimisers["de"]) == 1
+    assert spied_optimisers["de"][0][0]["seed"] == 5
 
 
 def test_the_threshold_is_absolute_and_in_nats():

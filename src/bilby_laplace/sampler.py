@@ -13,7 +13,7 @@ from bilby.core.utils import logger, random
 from scipy.special import logsumexp
 from scipy.stats import multivariate_normal, norm, truncnorm
 
-from .laplace import LaplacePosteriorEstimator
+from .laplace import MAP_RESTARTS, LaplacePosteriorEstimator
 
 try:
     from bilby.core.sampler.base_sampler import SamplerError
@@ -349,6 +349,26 @@ class Laplace(Sampler):
         Optimization method. Default is ``'differential_evolution'`` (global
         optimizer; recommended for real data). Set to ``'Nelder-Mead'`` to use
         a multi-start local optimizer instead.
+    map_restarts : int
+        Independent ``differential_evolution`` restarts in the MAP search, the
+        highest-log-posterior one kept. Default 4; 1 restores the single-shot
+        behaviour. ``differential_evolution`` is not reliable on a GW
+        log-posterior at this dimension -- on GW150914 it returned a MAP in the
+        wrong mode on 25 of 100 seeds -- and because ``mode_search_subspace``
+        pins secondary candidates at the primary, a wrong primary is inherited
+        by the whole mixture. Restarts are the cheapest repair measured: 25% ->
+        0.4% failures at k=4, which at matched cost beats raising ``popsize``
+        (15%) or tightening the tolerance (24%). Ignored unless
+        ``minimization_method='differential_evolution'`` and no
+        ``use_injection_for_map`` seed is given.
+    map_vectorized : bool
+        If True (default), hand ``differential_evolution`` its whole population
+        at once so the MAP search uses ``npool``. The MAP search was previously
+        serial regardless of ``npool``, which is what made restarts look
+        expensive. scipy switches to deferred population updating when this is
+        set, so the search trajectory differs from a non-vectorized run; it does
+        *not* differ between a pooled and a serial run, which is the invariant
+        that matters. Set False to reproduce pre-restart MAP results exactly.
     plot_diagnostic : bool
         If True, produce a corner diagnostic plot after resampling.
     cov_scaling : float or dict
@@ -586,8 +606,20 @@ class Laplace(Sampler):
         24-51 nats down when reached by freeing any subset of coordinates and
         37 nats down under a ``theta_jn`` reflection -- unreachable by
         ``mode_search_subspace`` or ``mode_symmetries`` at any setting -- yet a
-        plain local optimisation from a random prior draw lands in it 30% of
-        the time, within ~1 nat of its peak.
+        plain local optimisation from a random prior draw lands in that *region*
+        23% of the time (17 of 73 constraint-satisfying starts).
+
+        **The candidates it produces are not usable, however**, and the "within
+        ~1 nat of its peak" this docstring used to claim does not survive
+        measurement. Over those 73 starts the best result sits 2.7 nats below
+        the face-on peak and the median sits ~130 nats below anything; 1 of 73
+        comes within 5 nats of the best point known. Neither more budget nor a
+        better-conditioned parameterisation repairs it: lifting scipy's
+        ``200 * ndim`` cap by 19x moved the median result 0.02 nats, and
+        polishing in unit-cube coordinates was 39 better against 34 worse.
+        Nelder-Mead from a random prior draw in 13 dimensions converges a long
+        way short of any optimum on this surface. See `bilby-laplace-paper`'s
+        ``map_study``.
 
         This only supplies *secondary* modes; the primary still comes from
         ``minimization_method``'s global optimiser. Differential evolution
@@ -796,6 +828,8 @@ class Laplace(Sampler):
         batch_nsamples=1000,
         prior_nsamples=100,
         minimization_method="differential_evolution",
+        map_restarts=MAP_RESTARTS,
+        map_vectorized=True,
         plot_diagnostic=False,
         cov_scaling=1,
         sampling_cov=None,
@@ -1348,6 +1382,8 @@ class Laplace(Sampler):
             fisher_method=self.kwargs["fisher_method"],
             fisher_kwargs=self.kwargs["fisher_kwargs"],
             marginalized_reference=self.injection_parameters,
+            map_restarts=self.kwargs["map_restarts"],
+            map_vectorized=self.kwargs["map_vectorized"],
             # Drawn from the same `random.rng` bilby seeds everywhere else
             # (via `sampling_seed_key = "seed"`, see below), rather than left
             # to scipy's own default -- differential_evolution's default seed
@@ -1388,127 +1424,132 @@ class Laplace(Sampler):
         map_nfev = None
         hessian_nfev = None
 
-        if resumed:
-            mean = np.asarray(self._checkpoint_state["mean"])
-            cov = np.asarray(self._checkpoint_state["cov"])
-            map_sample_dict = dict(zip(estimator.parameter_names, mean))
-            logger.info("Skipping MAP and covariance estimation (resumed from checkpoint).")
-        else:
-            # Choose starting point for MAP search
-            if self.injection_parameters and self.kwargs["use_injection_for_map"]:
-                fallback = self.priors.sample_subset(estimator.parameter_names)
-                missing = [k for k in estimator.parameter_names if k not in self.injection_parameters]
-                if missing:
-                    logger.warning(
-                        f"use_injection_for_map=True but the following parameters are not in "
-                        f"injection_parameters (using prior samples as fallback): {missing}"
-                    )
-                initial_sample = {
-                    key: self.injection_parameters.get(key, fallback[key]) for key in estimator.parameter_names
-                }
-            else:
-                initial_sample = None
-
-            map_sample_dict = estimator.get_MAP_sample(initial_sample)
-            minimization_metadata = getattr(estimator, "minimization_metadata", None)
-            if minimization_metadata is not None:
-                map_nfev = int(getattr(minimization_metadata, "nfev", 0) or 0)
-            mean = np.array(list(map_sample_dict.values()))
-            if user_cov is not None:
-                logger.info("Using user-provided sampling covariance (skipping Laplace estimate)")
-                covariance = user_cov
-            else:
-                covariance = estimator.calculate_posterior_covariance(map_sample_dict)
-                hessian_metadata = getattr(estimator, "hessian_metadata", None)
-                if hessian_metadata is not None:
-                    # nfev is per-Hessian-entry (an (N, N) array from
-                    # scipy.differentiate.hessian), so this sums scipy's own
-                    # per-entry bookkeeping rather than counting distinct
-                    # calls -- an upper bound if entries share cached
-                    # evaluations, but consistent and comparable across runs.
-                    hessian_nfev = int(np.sum(hessian_metadata.nfev))
-            # Validate (repair) the *estimated* covariance first, then apply the
-            # user's cov_scaling last so it is authoritative.  Validation
-            # re-derives widths from the likelihood curvature, so scaling before
-            # it lets validation silently override the requested scale for
-            # poorly-estimated parameters.
-            cov = self._validate_covariance(estimator, mean, covariance)
-            cov = self._apply_cov_scaling(cov, cov_scaling)
-
-        msg = "Gaussian proposal (MAP +/- 1-sigma):\n " + "\n ".join(
-            f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}" for (key, val), var in zip(map_sample_dict.items(), np.diag(cov))
-        )
-        logger.info(msg)
-
-        # Build the proposal distribution.  For rejection and importance
-        # sampling we use a truncated Gaussian (per-marginal independent
-        # truncated normals) so that every draw lands within the prior support.
-        # This eliminates wasted likelihood evaluations on out-of-bounds
-        # samples and is especially important when the Laplace-derived sigma is
-        # much larger than the prior width.
-        # With ``n_modes > 1`` this also runs the mode search and returns a
-        # mixture, which every resampling method below then draws from.  On a
-        # resume the modes come back from the checkpoint instead: repeating the
-        # search would cost a second multi-start optimisation and could hand
-        # the second half of the run a different proposal from the first.
-        if resumed:
-            modes = self._checkpoint_state.get("modes")
-            mode_log_weights = self._checkpoint_state.get("mode_log_weights")
-            if modes is None:
-                logger.warning(
-                    "Checkpoint predates multi-mode proposals and carries no modes; "
-                    "resuming from the single Gaussian about the stored MAP."
-                )
-                modes = [(mean, cov, None)]
-            proposal = self._mode_proposal(estimator, modes, mode_log_weights)
-        else:
-            proposal, modes, mode_log_weights = self._build_proposal(estimator, mean, cov, cov_scaling)
-
-        if self.kwargs["plot_diagnostic"] and not resumed:
-            init_samples = self._draw_inprior_samples(proposal, 5000, estimator.parameter_names)
-            self.create_proposal_diagnostic(mean, cov, estimator.parameter_names, init_samples)
-
-        target_nsamples = self.kwargs["target_nsamples"]
-        resample = self.kwargs["resample"]
-        if resample == "None":
-            resample = None
-
-        # Laplace evidence (always available).  Compute fresh, or restore from
-        # the checkpoint if we're resuming (we no longer have `covariance`).
-        if resumed:
-            log_evidence_laplace = self._checkpoint_state["log_evidence_laplace"]
-        else:
-            log_evidence_laplace = estimator.log_evidence_laplace(map_sample_dict, covariance)
-            # Initialise the checkpoint payload for resumable modes.  Other
-            # modes (`None`, `'smc'`) are not yet checkpointable; leave
-            # _checkpoint_state as None so no file is written.
-            if resample in ("rejection", "importance", "inprior"):
-                self._init_checkpoint_state(mode=resample, mean=mean, cov=cov)
-                self._checkpoint_state["log_evidence_laplace"] = log_evidence_laplace
-                # The modes as well as the primary MAP: a resumed run has to
-                # rebuild the *same* proposal, and re-running the mode search
-                # would neither be free nor guaranteed to find the same modes.
-                self._checkpoint_state["modes"] = modes
-                self._checkpoint_state["mode_log_weights"] = mode_log_weights
-
-        log_evidence = log_evidence_laplace
-        log_evidence_err = np.nan
-
         # Set up the multiprocessing pool (bilby handles npool / a user-supplied
-        # ``pool`` kwarg and stashes the likelihood in each worker once).  The
-        # estimator uses it to evaluate batches of proposal likelihoods in
-        # parallel; all resampling modes route through
-        # ``log_likelihood_from_array`` so they all benefit.
+        # ``pool`` kwarg and stashes the likelihood in each worker once), *before*
+        # the MAP search rather than after the covariance stage.  It used to be
+        # created down by the resampling loops, which meant the single heaviest
+        # consumer of the log-posterior -- the global MAP search -- ran serially no
+        # matter what ``npool`` said.  Every stage from here on routes through
+        # ``log_likelihood_from_array``/``log_posterior_from_array``, so they all
+        # benefit, and the numbers are unchanged: the pool only splits the same
+        # independent likelihood calls across processes.
         self._setup_pool()
         estimator.pool = self.pool
         estimator.npool = self.npool or 1
 
-        # For most modes the number of likelihood evaluations equals the number
-        # of proposal draws (``len(g_samples)``).  SMC is different: the real
-        # work happens inside aspire's iterations, invisible to ``g_samples``,
-        # so ``_run_smc`` returns the true count explicitly.
-        nlikelihood = None
         try:
+            if resumed:
+                mean = np.asarray(self._checkpoint_state["mean"])
+                cov = np.asarray(self._checkpoint_state["cov"])
+                map_sample_dict = dict(zip(estimator.parameter_names, mean))
+                logger.info("Skipping MAP and covariance estimation (resumed from checkpoint).")
+            else:
+                # Choose starting point for MAP search
+                if self.injection_parameters and self.kwargs["use_injection_for_map"]:
+                    fallback = self.priors.sample_subset(estimator.parameter_names)
+                    missing = [k for k in estimator.parameter_names if k not in self.injection_parameters]
+                    if missing:
+                        logger.warning(
+                            f"use_injection_for_map=True but the following parameters are not in "
+                            f"injection_parameters (using prior samples as fallback): {missing}"
+                        )
+                    initial_sample = {
+                        key: self.injection_parameters.get(key, fallback[key]) for key in estimator.parameter_names
+                    }
+                else:
+                    initial_sample = None
+
+                map_sample_dict = estimator.get_MAP_sample(initial_sample)
+                minimization_metadata = getattr(estimator, "minimization_metadata", None)
+                if minimization_metadata is not None:
+                    map_nfev = int(getattr(minimization_metadata, "nfev", 0) or 0)
+                mean = np.array(list(map_sample_dict.values()))
+                if user_cov is not None:
+                    logger.info("Using user-provided sampling covariance (skipping Laplace estimate)")
+                    covariance = user_cov
+                else:
+                    covariance = estimator.calculate_posterior_covariance(map_sample_dict)
+                    hessian_metadata = getattr(estimator, "hessian_metadata", None)
+                    if hessian_metadata is not None:
+                        # nfev is per-Hessian-entry (an (N, N) array from
+                        # scipy.differentiate.hessian), so this sums scipy's own
+                        # per-entry bookkeeping rather than counting distinct
+                        # calls -- an upper bound if entries share cached
+                        # evaluations, but consistent and comparable across runs.
+                        hessian_nfev = int(np.sum(hessian_metadata.nfev))
+                # Validate (repair) the *estimated* covariance first, then apply the
+                # user's cov_scaling last so it is authoritative.  Validation
+                # re-derives widths from the likelihood curvature, so scaling before
+                # it lets validation silently override the requested scale for
+                # poorly-estimated parameters.
+                cov = self._validate_covariance(estimator, mean, covariance)
+                cov = self._apply_cov_scaling(cov, cov_scaling)
+
+            msg = "Gaussian proposal (MAP +/- 1-sigma):\n " + "\n ".join(
+                f"{key}: {val:.5f} +/- {np.sqrt(var):.5f}"
+                for (key, val), var in zip(map_sample_dict.items(), np.diag(cov))
+            )
+            logger.info(msg)
+
+            # Build the proposal distribution.  For rejection and importance
+            # sampling we use a truncated Gaussian (per-marginal independent
+            # truncated normals) so that every draw lands within the prior support.
+            # This eliminates wasted likelihood evaluations on out-of-bounds
+            # samples and is especially important when the Laplace-derived sigma is
+            # much larger than the prior width.
+            # With ``n_modes > 1`` this also runs the mode search and returns a
+            # mixture, which every resampling method below then draws from.  On a
+            # resume the modes come back from the checkpoint instead: repeating the
+            # search would cost a second multi-start optimisation and could hand
+            # the second half of the run a different proposal from the first.
+            if resumed:
+                modes = self._checkpoint_state.get("modes")
+                mode_log_weights = self._checkpoint_state.get("mode_log_weights")
+                if modes is None:
+                    logger.warning(
+                        "Checkpoint predates multi-mode proposals and carries no modes; "
+                        "resuming from the single Gaussian about the stored MAP."
+                    )
+                    modes = [(mean, cov, None)]
+                proposal = self._mode_proposal(estimator, modes, mode_log_weights)
+            else:
+                proposal, modes, mode_log_weights = self._build_proposal(estimator, mean, cov, cov_scaling)
+
+            if self.kwargs["plot_diagnostic"] and not resumed:
+                init_samples = self._draw_inprior_samples(proposal, 5000, estimator.parameter_names)
+                self.create_proposal_diagnostic(mean, cov, estimator.parameter_names, init_samples)
+
+            target_nsamples = self.kwargs["target_nsamples"]
+            resample = self.kwargs["resample"]
+            if resample == "None":
+                resample = None
+
+            # Laplace evidence (always available).  Compute fresh, or restore from
+            # the checkpoint if we're resuming (we no longer have `covariance`).
+            if resumed:
+                log_evidence_laplace = self._checkpoint_state["log_evidence_laplace"]
+            else:
+                log_evidence_laplace = estimator.log_evidence_laplace(map_sample_dict, covariance)
+                # Initialise the checkpoint payload for resumable modes.  Other
+                # modes (`None`, `'smc'`) are not yet checkpointable; leave
+                # _checkpoint_state as None so no file is written.
+                if resample in ("rejection", "importance", "inprior"):
+                    self._init_checkpoint_state(mode=resample, mean=mean, cov=cov)
+                    self._checkpoint_state["log_evidence_laplace"] = log_evidence_laplace
+                    # The modes as well as the primary MAP: a resumed run has to
+                    # rebuild the *same* proposal, and re-running the mode search
+                    # would neither be free nor guaranteed to find the same modes.
+                    self._checkpoint_state["modes"] = modes
+                    self._checkpoint_state["mode_log_weights"] = mode_log_weights
+
+            log_evidence = log_evidence_laplace
+            log_evidence_err = np.nan
+
+            # For most modes the number of likelihood evaluations equals the number
+            # of proposal draws (``len(g_samples)``).  SMC is different: the real
+            # work happens inside aspire's iterations, invisible to ``g_samples``,
+            # so ``_run_smc`` returns the true count explicitly.
+            nlikelihood = None
             if resample is None:
                 samples, logl, g_samples, efficiency = self._sample_laplace(mean, cov, estimator, target_nsamples)
             elif resample == "smc":
@@ -3674,9 +3715,7 @@ class Laplace(Sampler):
         # symmetry-implied mode competes on the same footing as a found one.
         polish_broken = "symmetric-polish" in searches
         if "symmetric" in searches or polish_broken:
-            candidates += self._symmetry_candidates(
-                estimator, found_modes, candidates, polish_broken=polish_broken
-            )
+            candidates += self._symmetry_candidates(estimator, found_modes, candidates, polish_broken=polish_broken)
 
         # --- 3. Selection: rank the pool, materialise covariances top-down. ---
         found_modes = self._select_modes(
@@ -3685,6 +3724,36 @@ class Laplace(Sampler):
 
         # --- 4. Sort and summarise ---
         found_modes.sort(key=lambda r: r[2], reverse=True)
+
+        # A secondary out-scoring the primary means the global MAP search did
+        # not return the global maximum: these candidates are local polishes
+        # from perturbed starts, so beating them is the weakest bar the primary
+        # has to clear.  Worth saying out loud because nothing downstream will.
+        # ``mode_search_subspace`` pins every candidate at the primary, so a
+        # wrong primary is inherited by the entire mixture, and the resulting
+        # posterior can be almost entirely in the wrong mode without any
+        # warning (bilby-laplace-paper, ``prior_frac``).  Measured over
+        # ``mode_study``'s 100-injection campaign, a distinct secondary
+        # out-scored the primary in 32 of 97 runs, by a median 2.71 nats.
+        #
+        # Detection only: the primary is not re-designated here.  The searches
+        # above have already pinned their candidates at it, so swapping the
+        # label afterwards would leave a mixture built around a point it no
+        # longer contains.  ``map_restarts`` is the repair -- it fixes the
+        # primary before anything is pinned to it.
+        best_other = max(
+            (r for r in found_modes if self._mode_sources.get(r[0].tobytes()) != "primary"),
+            key=lambda r: r[2],
+            default=None,
+        )
+        if best_other is not None and best_other[2] > best_logp:
+            logger.warning(
+                f"A secondary mode out-scores the primary MAP by "
+                f"{best_other[2] - best_logp:.2f} nats "
+                f"({best_other[2]:.2f} vs {best_logp:.2f}), so the MAP search did not find the "
+                f"global maximum. Raise map_restarts (currently "
+                f"{self.kwargs['map_restarts']}) if this recurs."
+            )
         # The caller logs the summary once the mixture weights are known.
         return found_modes
 
@@ -3840,8 +3909,18 @@ class Laplace(Sampler):
         MAP that mode is 24-51 nats down depending on which coordinates are
         freed, and its reflection is 37 nats down, so no subspace or symmetry
         reaches it -- but a plain local optimisation started from a random prior
-        draw lands in it 30% of the time, within ~1 nat of its peak.  A
-        pre-polish ranking discards precisely those starts.
+        draw lands in that region 23% of the time, and a pre-polish ranking
+        discards precisely those starts.
+
+        That reaching rate is the whole of the case for this search, and it is
+        not enough on its own: the starts that reach the region arrive far from
+        its peak (best of 73 is 2.7 nats below it, median ~130 nats below
+        anything), so the candidates rank poorly and are usually not seeded.
+        This is why a 100-injection ablation found the search indistinguishable
+        from running none at all. It is kept as an option rather than removed
+        because the failure is one of candidate *quality*, which a stronger
+        local optimiser here would fix; it should not be enabled expecting the
+        old "within ~1 nat" behaviour, which was never measured and is wrong.
 
         The primary mode is untouched: this only supplies secondaries, so the
         global optimiser that found the primary (differential evolution by
@@ -4087,9 +4166,7 @@ class Laplace(Sampler):
                     # other search's candidates.  Whether this is a genuinely
                     # distinct mode or a walk back onto its own source is left to
                     # the mode_separation_sigma dedup there.
-                    proposed.append(
-                        dict(mean=polished_mean, logp=polished_logp, cov=None, source="symmetry-polish")
-                    )
+                    proposed.append(dict(mean=polished_mean, logp=polished_logp, cov=None, source="symmetry-polish"))
                     continue
                 kind = "exact" if offset <= 1e-6 else f"approximate, share ~{np.exp(-offset):.3f}"
                 logger.info(

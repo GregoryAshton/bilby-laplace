@@ -12,6 +12,47 @@ Versions correspond to git tags; version numbers follow
 
 ### Added
 
+- `map_restarts` (default **4**) — the MAP search now runs that many independent
+  `differential_evolution` restarts and keeps the highest-log-posterior result. `differential_evolution`
+  is not reliable on a GW log-posterior at this dimension: measured on GW150914 over 100 seeds, 25 of
+  them returned a MAP in the face-on `theta_jn ~ 0.35` mode rather than the true one, 2.1–7.0 nats
+  down. That is not a small error downstream — `mode_search_subspace` pins every secondary candidate
+  at the primary, so the whole mixture inherits the wrong mode and SMC starts entirely inside it,
+  giving a posterior 70–99% wrong with nothing in the run's own output flagging it. Restarts work
+  because the two outcomes are separated by a 2.14 nat gap with no overlap over 100 seeds, so keeping
+  the best restart cannot pick wrong unless every restart failed: the failure rate goes
+  25.2% → 6.3% → 1.6% → 0.4% for k = 1, 2, 3, 4. At *matched* evaluation budget this beats every
+  other knob tried — the same spend on `popsize=60` leaves 15% failures and on `atol=0.1` leaves 24%.
+  Set `map_restarts=1` for the previous single-shot behaviour. The failure is not specific to
+  GW150914: over a 100-injection precessing-BBH campaign the returned MAP was provably not the global
+  maximum in 38% of runs.
+- `map_vectorized` (default **True**) — `differential_evolution` is handed its whole population in one
+  array, so the MAP search goes through the estimator's batched log-posterior path and therefore uses
+  `npool`. Set False to reproduce pre-restart MAP results exactly.
+
+### Changed
+
+- **The multiprocessing pool is now created before the MAP search**, not after the covariance stage.
+  It was previously set up immediately before the resampling loops, which meant the single heaviest
+  consumer of the log-posterior — the global MAP search — ran serially no matter what `npool` said
+  (on a 64-core GW150914 run the MAP stage spent 4–6 minutes using one core). This is what makes
+  `map_restarts=4` affordable rather than a 4x cost.
+- `LaplacePosteriorEstimator.log_posterior_from_array` evaluates a column-stacked batch through
+  `_log_likelihood_for_columns` — and so through the pool — instead of `apply_along_axis` over a
+  scalar log-posterior. Values are unchanged; only the work distribution differs.
+- A secondary mode out-scoring the primary MAP now logs a warning. Those candidates are local
+  polishes from perturbed starts, so beating them is the weakest bar the primary has to clear, and
+  nothing downstream would otherwise report it (measured: a distinct secondary out-scored the primary
+  in 32 of 97 runs of a 100-injection campaign, by a median 2.71 nats). Detection only — the primary
+  is not re-designated, because the secondary searches have already pinned their candidates at it.
+
+**Result-changing.** `map_vectorized=True` makes scipy use deferred population updating, so MAP
+results move even at `map_restarts=1` and fixed seed. Pooled and serial runs remain numerically
+identical to each other, which is the invariant that matters. Set `map_vectorized=False` and
+`map_restarts=1` to reproduce earlier campaigns.
+
+### Added (earlier, unreleased)
+
 - `fisher_method='waveform'` now supports phase/time/distance-marginalised likelihoods: the
   marginalised parameters are reinstated in the Fisher (evaluated at the injection, or reconstructed
   from the likelihood at the MAP) and marginalised out via the Schur complement of that block —
