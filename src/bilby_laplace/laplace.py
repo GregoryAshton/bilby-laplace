@@ -50,6 +50,57 @@ DE_ATOL = 1.0
 # pool (see ``map_vectorized``), which more than repays it whenever ``npool > 1``.
 MAP_RESTARTS = 4
 
+# The MAP-search spike guard (``map_spike_guard``).
+#
+# IMRPhenomXPHM's SpinTaylor precession angles (``PhenomXPrecVersion`` 310-321)
+# leave needle spikes on a GW log-posterior: points standing 2-7 nats above
+# everything within 1e-9 to 1e-4 of the unit cube around them.  Measured on
+# GW150914 (bilby-laplace-paper, ``spike_study``): 3 of 400 single MAP restarts
+# ended on one, and the highest stood 1.36 nats above the best smooth point any
+# search found, so best-of-restarts selection *prefers* them.  A sampler never
+# sees one -- it weights by volume, and a spike has none (0 of 1000 dynesty
+# points tested) -- but an optimiser keeps any higher point it touches, and the
+# Nelder-Mead polish probes ~1e-6 scales right at the top of the posterior.
+# The Laplace covariance taken at a spike measures the spike, not the posterior.
+#
+# The test, per unit-cube axis: e(d) is how far the point stands above the
+# *higher* of its two neighbours at +-d.  "Higher" keeps the high side of a
+# genuine step (a feature with volume) from being flagged.  Testing every axis
+# and keeping the worst catches the spikes seen so far, which are sheets:
+# narrow in the masses and spins, unchanged along the extrinsic parameters,
+# which the precession integration does not depend on.
+#
+# e(d) alone cannot be thresholded: at a smooth peak of conditional width sigma
+# it is d^2 / 2 sigma^2, and a loud signal is narrow -- BNS_3G's chirp mass is
+# 1.7e-4 of the unit cube, so e(1e-4) = 0.18 there and e(1e-3) = 17.  So the
+# test measures e at d and 2d and removes the quadratic by Richardson
+# extrapolation: (4 e(d) - e(2d)) / 3 is exactly zero on a quadratic surface
+# however narrow, about the spike's height for a spike narrower than d, and
+# negative on a slope.
+#
+# The correction assumes the surface is smooth out to 2d, and a step inside
+# that range breaks it: on a slope rising at s nats per d to a step of D nats,
+# with both +d and +2d beyond the step, e(d) = D - s but the correction gives
+# D - 2s/3 -- a nat and more beside GW150914's largest spike, where a ~1.5-nat
+# step lies within d of a smooth slope, at points standing above nothing.  So
+# a point is a spike on an axis only when *both* e(d) and the corrected value
+# exceed MAP_SPIKE_DROP: it must stand above both neighbours by more than a
+# nat, and that must not be the peak's curvature.  A spike passes both; a
+# narrow smooth peak fails the second, and a point beside a step the first.
+#
+# MAP_SPIKE_DELTA has only to exceed the spikes' widths, not to stay below the
+# posterior's.  It is 1e-3 rather than 1e-4 because the spikes come in rough
+# patches whose features run from 1e-9 up to ~2e-4 wide (in ``phi_12``, next
+# to GW150914's largest spike); at 1e-4 the test cannot see the wider ones.  At
+# 1e-3 the curvature-free excess stays below 0.22 nats at 400 posterior points
+# of each of seven examples, BNS_3G's 1.7e-4-wide chirp mass included
+# (bilby-laplace-paper, ``spike_study/false_positive``).
+#
+# A spike is dropped, not repaired: a re-polish from beside it climbed onto
+# the wider features of the same patch, 0.4-0.9 nats *above* the smooth top.
+MAP_SPIKE_DELTA = 1e-3
+MAP_SPIKE_DROP = 1.0
+
 
 def array_to_dict(keys, array):
     return dict(zip(keys, array))
@@ -96,6 +147,8 @@ class LaplacePosteriorEstimator:
         seed=None,
         map_restarts=MAP_RESTARTS,
         map_vectorized=True,
+        map_spike_guard=True,
+        map_spike_delta=MAP_SPIKE_DELTA,
     ):
         """Estimate posteriors using the Laplace approximation.
 
@@ -184,6 +237,18 @@ class LaplacePosteriorEstimator:
             Other minimisation paths are unaffected: the multi-start
             Nelder-Mead starting points are drawn via ``priors.sample_subset``,
             which already goes through ``random.rng``.
+        map_spike_guard: bool
+            If True (default), test every MAP candidate for a needle spike
+            (see :data:`MAP_SPIKE_DELTA`) and select among the candidates that
+            are not spikes.  If every candidate is one, fall back to the
+            off-spike neighbour of the best.  Where nothing is flagged the
+            selection is exactly the unguarded one, so the guard alters a result
+            only where it fires; it costs ``4 * N`` evaluations per candidate,
+            and draws no random numbers.
+        map_spike_delta: float
+            The spike test's neighbour offset, in the unit cube.  Must exceed
+            the spikes' own widths.  The test removes the peak's curvature, so
+            it need not be small against the posterior's width.
         """
         self.likelihood = likelihood
 
@@ -204,6 +269,8 @@ class LaplacePosteriorEstimator:
         self.seed = seed
         self.map_restarts = max(1, int(map_restarts))
         self.map_vectorized = bool(map_vectorized)
+        self.map_spike_guard = bool(map_spike_guard)
+        self.map_spike_delta = float(map_spike_delta)
         self.use_unit_cube = use_unit_cube
         self.jacobian_cap_scale = jacobian_cap_scale
         self.hessian_kwargs = hessian_kwargs if hessian_kwargs is not None else {}
@@ -230,6 +297,10 @@ class LaplacePosteriorEstimator:
         # per-parameter precision).  Constraint priors are absent by
         # construction: `non_fixed_keys` excludes them.
         self.priors_dict = {key: priors[key] for key in self.parameter_names}
+        # Periodic parameters wrap in the spike test instead of clipping.
+        self._periodic_mask = np.array(
+            [getattr(self.priors_dict[k], "boundary", None) == "periodic" for k in self.parameter_names], dtype=bool
+        )
         # Per-prior bound on the precision it may contribute; see
         # ``_prior_precision_cap``.  Depends only on the prior, so it is cached
         # across the repeated precision evaluations of a multi-mode search.
@@ -1025,6 +1096,88 @@ class LaplacePosteriorEstimator:
         rng = np.random.default_rng(int(self.seed))
         return [int(v) for v in rng.integers(2**32, size=self.map_restarts)]
 
+    def _spike_test(self, x, neg_log_post, fun=None):
+        """The spike height at *x*, on the worst unit-cube axis; see :data:`MAP_SPIKE_DELTA`.
+
+        Returns ``(excess, x_off, fun_off)``: the excess in nats -- the smaller
+        of the plain and the curvature-free one --
+        (``-inf`` if no axis could be tested), and the higher of that axis's two
+        neighbours at +-delta, in parameter space, with its negative
+        log-posterior -- the point to step to if *x* is a spike.  One batch of
+        ``4 * N`` evaluations (+-delta and +-2 delta on each axis) through
+        *neg_log_post*, so it is counted and uses the pool like any other.
+
+        Periodic parameters wrap.  Others are clipped at the prior bounds,
+        where a clipped neighbour equals *x* and so can never make it a spike.
+        An axis whose two neighbours are both out of support is skipped rather
+        than read as an infinite excess.
+        """
+        x = np.asarray(x, dtype=float)
+        f0 = -float(neg_log_post(x)) if fun is None else -float(fun)
+        u0 = self._to_unit_cube(x)
+        d = self.map_spike_delta
+        # Rows 4j .. 4j+3: axis j at -d, +d, -2d, +2d.
+        U = np.repeat(u0[None, :], 4 * self.N, axis=0)
+        for j in range(self.N):
+            for r, off in enumerate((-d, d, -2 * d, 2 * d)):
+                U[4 * j + r, j] += off
+        U[:, self._periodic_mask] %= 1.0
+        X = np.column_stack([self._from_unit_cube(u) for u in U])
+        f = -np.asarray(neg_log_post(X), dtype=float).reshape(self.N, 4)
+        e1 = f0 - f[:, :2].max(axis=1)
+        e2 = f0 - f[:, 2:].max(axis=1)
+        with np.errstate(invalid="ignore"):
+            # Both must exceed the threshold (see MAP_SPIKE_DELTA), so the
+            # smaller of the two is what is compared with it.
+            excess = np.where(np.isfinite(e1) & np.isfinite(e2), np.minimum(e1, (4 * e1 - e2) / 3), -np.inf)
+        j = int(np.argmax(excess))
+        k = int(np.argmax(f[j, :2]))
+        return float(excess[j]), X[:, 4 * j + k], -float(f[j, k])
+
+    def _select_map(self, candidates, neg_log_post):
+        """The best candidate that is not a spike; see :data:`MAP_SPIKE_DELTA`.
+
+        *candidates* are compared in order and the first of equal values kept,
+        as the unguarded search does, so where no candidate is flagged the
+        result is identical to it.  A spike is dropped rather than repaired.  If
+        every candidate is one, the best is replaced by its off-spike neighbour
+        on the worst axis -- a point on the surface beside the spike, not a
+        polished one, since a polish there climbs onto the patch's wider
+        features.  Returns ``(best, n_spikes)``.
+        """
+        best = best_raw = None
+        n_spikes = 0
+        for i, candidate in enumerate(candidates, 1):
+            if best_raw is None or candidate.fun < best_raw[0].fun:
+                best_raw = (candidate, None)
+            if self.map_spike_guard and np.isfinite(candidate.fun):
+                excess, x_off, fun_off = self._spike_test(candidate.x, neg_log_post, fun=candidate.fun)
+                if excess > MAP_SPIKE_DROP:
+                    n_spikes += 1
+                    if best_raw[0] is candidate:
+                        best_raw = (candidate, (excess, x_off, fun_off))
+                    label = f"MAP candidate {i}/{len(candidates)}" if len(candidates) > 1 else "The MAP"
+                    logger.warning(
+                        f"{label} landed on a likelihood spike: {excess:.2f} nats above its neighbours "
+                        f"{self.map_spike_delta:g} away in the unit cube (log-posterior "
+                        f"{-candidate.fun:.4f}); it is not used. See map_spike_guard."
+                    )
+                    continue
+            if best is None or candidate.fun < best.fun:
+                best = candidate
+        if best is not None:
+            return best, n_spikes
+        # Every candidate was a spike: step off the best one.
+        candidate, (excess, x_off, fun_off) = best_raw
+        logger.warning(
+            f"Every MAP candidate was a likelihood spike; using the point beside the best one "
+            f"(log-posterior {-fun_off:.4f} against the spike's {-candidate.fun:.4f}). The MAP is "
+            f"unreliable here: raise map_restarts, or check the likelihood for numerical artefacts."
+        )
+        out = OptimizeResult(**candidate)
+        out.x, out.fun = np.asarray(x_off, dtype=float), float(fun_off)
+        return out, n_spikes
+
     def _maximize_posterior_differential_evolution(self):
         """Global MAP search: ``map_restarts`` differential evolutions, best kept.
 
@@ -1051,7 +1204,7 @@ class LaplacePosteriorEstimator:
             return -self.log_posterior_from_array(x)
 
         seeds = self._restart_seeds()
-        best = None
+        candidates = []
         for i, seed in enumerate(seeds, 1):
             out = differential_evolution(
                 neg_log_post,
@@ -1086,8 +1239,11 @@ class LaplacePosteriorEstimator:
             candidate = OptimizeResult(**(polished if polished.fun <= out.fun else out))
             if len(seeds) > 1:
                 logger.info(f"MAP restart {i}/{len(seeds)}: log-posterior = {-candidate.fun:.4f}")
-            if best is None or candidate.fun < best.fun:
-                best = candidate
+            candidates.append(candidate)
+
+        # The spike guard acts at selection: a spike stands above the smooth
+        # surface, so best-of-restarts would otherwise prefer it.
+        best, n_spikes = self._select_map(candidates, neg_log_post)
 
         if len(seeds) > 1:
             logger.info(f"Best of {len(seeds)} MAP restarts: log-posterior = {-best.fun:.4f}")
@@ -1097,12 +1253,17 @@ class LaplacePosteriorEstimator:
         # an object whose own count no longer means what it says.
         best = OptimizeResult(**best)
         best.nfev = nfev[0]
+        best.n_spikes = n_spikes
         return best
 
     def _maximize_posterior_from_initial_sample(self, initial_sample):
         x0 = list(initial_sample.values())
+        # Counted so that the spike guard's evaluations are priced in ``nfev``.
+        nfev = [0]
 
         def neg_log_post(x):
+            x = np.asarray(x, dtype=float)
+            nfev[0] += 1 if x.ndim == 1 else x.shape[1]
             return -self.log_posterior_from_array(x)
 
         # differential_evolution is not a valid method for scipy.optimize.minimize;
@@ -1110,12 +1271,15 @@ class LaplacePosteriorEstimator:
         local_method = (
             "Nelder-Mead" if self.minimization_method == "differential_evolution" else self.minimization_method
         )
-        return minimize(
+        out = minimize(
             neg_log_post,
             x0,
             bounds=self.prior_bounds,
             method=local_method,
         )
+        out, _ = self._select_map([out], neg_log_post)
+        out.nfev = nfev[0]
+        return out
 
     def get_MAP_sample(self, initial_sample=None):
         """Find the maximum a posteriori (MAP) estimate.

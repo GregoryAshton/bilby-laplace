@@ -13,7 +13,7 @@ from bilby.core.utils import logger, random
 from scipy.special import logsumexp
 from scipy.stats import multivariate_normal, norm, truncnorm
 
-from .laplace import MAP_RESTARTS, LaplacePosteriorEstimator
+from .laplace import MAP_RESTARTS, MAP_SPIKE_DELTA, LaplacePosteriorEstimator
 
 try:
     from bilby.core.sampler.base_sampler import SamplerError
@@ -369,6 +369,23 @@ class Laplace(Sampler):
         set, so the search trajectory differs from a non-vectorized run; it does
         *not* differ between a pooled and a serial run, which is the invariant
         that matters. Set False to reproduce pre-restart MAP results exactly.
+    map_spike_guard : bool
+        If True (default), test every MAP candidate -- each restart, and a
+        ``use_injection_for_map`` polish -- for a needle spike: a point standing
+        more than a nat above its neighbours ``map_spike_delta`` away along some
+        unit-cube axis, both as measured and once the peak's own curvature is
+        removed (by comparing offsets of delta and 2 delta). Spikes are dropped from the best-of-
+        restarts selection, with a warning; if every candidate is one, the point
+        beside the best is used instead. IMRPhenomXPHM's SpinTaylor precession
+        angles leave such spikes (5 of 400 MAP restarts on GW150914 ended on
+        one); a sampler never lands on them, but an optimiser keeps them, and
+        best-of-restarts selection prefers them. Where nothing is flagged the
+        result is unchanged, at a cost of ``4 * N`` evaluations per candidate.
+        The mode search's own polishes are not guarded.
+    map_spike_delta : float
+        Neighbour offset of the spike test, in the unit cube (default 1e-3).
+        It must exceed the spikes' widths (measured up to ~2e-4). The peak's
+        curvature is removed, so a narrow posterior does not trip the test.
     plot_diagnostic : bool
         If True, produce a corner diagnostic plot after resampling.
     cov_scaling : float or dict
@@ -830,6 +847,8 @@ class Laplace(Sampler):
         minimization_method="differential_evolution",
         map_restarts=MAP_RESTARTS,
         map_vectorized=True,
+        map_spike_guard=True,
+        map_spike_delta=MAP_SPIKE_DELTA,
         plot_diagnostic=False,
         cov_scaling=1,
         sampling_cov=None,
@@ -1384,6 +1403,8 @@ class Laplace(Sampler):
             marginalized_reference=self.injection_parameters,
             map_restarts=self.kwargs["map_restarts"],
             map_vectorized=self.kwargs["map_vectorized"],
+            map_spike_guard=self.kwargs["map_spike_guard"],
+            map_spike_delta=self.kwargs["map_spike_delta"],
             # Drawn from the same `random.rng` bilby seeds everywhere else
             # (via `sampling_seed_key = "seed"`, see below), rather than left
             # to scipy's own default -- differential_evolution's default seed

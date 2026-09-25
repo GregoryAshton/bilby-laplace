@@ -26,6 +26,23 @@ Versions correspond to git tags; version numbers follow
   Set `map_restarts=1` for the previous single-shot behaviour. The failure is not specific to
   GW150914: over a 100-injection precessing-BBH campaign the returned MAP was provably not the global
   maximum in 38% of runs.
+- `map_spike_guard` (default **True**) and `map_spike_delta` (default **1e-3**) — every MAP candidate
+  (each `differential_evolution` restart, and a `use_injection_for_map` polish) is tested for a needle
+  spike of the log-posterior, and spikes are dropped from the best-of-restarts selection, with a
+  warning. IMRPhenomXPHM's SpinTaylor precession angles (`PhenomXPrecVersion` 310–321) leave such
+  spikes: on GW150914, 5 of 400 single MAP restarts ended on points standing 1.5–5.5 nats above their
+  surroundings, the highest 1.36 nats above the best smooth point any search found, so best-of-restarts
+  selection *preferred* it — and the Laplace covariance taken there measures the spike, not the
+  posterior. Samplers never land on them (they weight by volume; 0 of 1000 dynesty points tested). The
+  test: along some unit-cube axis, the point stands more than a nat above the higher of its neighbours
+  at ±delta, after the peak's own curvature is removed by comparing ±delta with ±2 delta — so a narrow
+  posterior cannot trip it (BNS_3G's chirp mass is 1.7e-4 of the unit cube wide; at delta = 1e-3 the
+  excess stays below 0.22 nats over 400 posterior points of each of seven examples). Spikes are dropped
+  rather than repaired because they come in rough patches: a re-polish from beside one climbed onto the
+  patch's wider features, 0.4–0.9 nats above the smooth top. If every candidate is a spike, the point
+  beside the best is used and a warning says the MAP is unreliable. Where nothing is flagged the result
+  is unchanged; the cost is `4 * N` evaluations per candidate, and no random numbers are drawn. The mode
+  search's own polishes are not guarded. Set `map_spike_guard=False` for the previous behaviour.
 - `map_vectorized` (default **True**) — `differential_evolution` is handed its whole population in one
   array, so the MAP search goes through the estimator's batched log-posterior path and therefore uses
   `npool`. Set False to reproduce pre-restart MAP results exactly.
