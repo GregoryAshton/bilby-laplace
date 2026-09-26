@@ -523,6 +523,35 @@ class LaplacePosteriorEstimator:
             ]
         )
 
+    def _wrap_periodic(self, x_array):
+        """*x_array* with each periodic parameter wrapped into its prior range.
+
+        Accepts ``(N_params,)`` or ``(N_params, N_samples)``; non-periodic
+        parameters are returned unchanged, including any outside the box.
+        """
+        x = np.array(x_array, dtype=float)
+        m = self._periodic_mask
+        if m.any():
+            lo = self.prior_bounds_min[m]
+            period = self.prior_bounds_max[m] - lo
+            if x.ndim > 1:
+                lo, period = lo[:, None], period[:, None]
+            x[m] = lo + np.mod(x[m] - lo, period)
+        return x
+
+    @property
+    def _local_bounds(self):
+        """Bounds for a local optimiser: the prior box, open on periodic parameters.
+
+        A periodic parameter's prior edges are one point, not walls.  Bounded
+        there, a local optimiser whose peak lies just across the seam gets
+        pinned against the edge instead of crossing it (map_validation found
+        a polish stuck at phi_12 = 0 and psi = pi/2 while the same hill's top
+        was across the wrap).  Pair with an objective that wraps its input,
+        and wrap the result.
+        """
+        return [(-np.inf, np.inf) if p else b for p, b in zip(self._periodic_mask, self.prior_bounds)]
+
     def _jacobian_diag(self, x_array):
         """Diagonal of dθ/du = 1/p(θ) at the given parameter values.
 
@@ -1198,10 +1227,12 @@ class LaplacePosteriorEstimator:
         # summed over every restart and its polish.
         nfev = [0]
 
+        # Wraps periodic parameters, for the local polish (see
+        # ``_local_bounds``); a no-op on DE's own in-box population.
         def neg_log_post(x):
             x = np.asarray(x, dtype=float)
             nfev[0] += 1 if x.ndim == 1 else x.shape[1]
-            return -self.log_posterior_from_array(x)
+            return -self.log_posterior_from_array(self._wrap_periodic(x))
 
         seeds = self._restart_seeds()
         candidates = []
@@ -1235,8 +1266,9 @@ class LaplacePosteriorEstimator:
                 # local method this class uses everywhere else.
                 polish=False,
             )
-            polished = minimize(neg_log_post, out.x, bounds=self.prior_bounds, method="Nelder-Mead")
+            polished = minimize(neg_log_post, out.x, bounds=self._local_bounds, method="Nelder-Mead")
             candidate = OptimizeResult(**(polished if polished.fun <= out.fun else out))
+            candidate.x = self._wrap_periodic(candidate.x)
             if len(seeds) > 1:
                 logger.info(f"MAP restart {i}/{len(seeds)}: log-posterior = {-candidate.fun:.4f}")
             candidates.append(candidate)
@@ -1264,7 +1296,7 @@ class LaplacePosteriorEstimator:
         def neg_log_post(x):
             x = np.asarray(x, dtype=float)
             nfev[0] += 1 if x.ndim == 1 else x.shape[1]
-            return -self.log_posterior_from_array(x)
+            return -self.log_posterior_from_array(self._wrap_periodic(x))
 
         # differential_evolution is not a valid method for scipy.optimize.minimize;
         # fall back to Nelder-Mead when used with an initial starting point.
@@ -1274,9 +1306,10 @@ class LaplacePosteriorEstimator:
         out = minimize(
             neg_log_post,
             x0,
-            bounds=self.prior_bounds,
+            bounds=self._local_bounds,
             method=local_method,
         )
+        out.x = self._wrap_periodic(out.x)
         out, _ = self._select_map([out], neg_log_post)
         out.nfev = nfev[0]
         return out

@@ -68,6 +68,17 @@ results move even at `map_restarts=1` and fixed seed. Pooled and serial runs rem
 identical to each other, which is the invariant that matters. Set `map_vectorized=False` and
 `map_restarts=1` to reproduce earlier campaigns.
 
+### Fixed
+
+- **The MAP search's local steps treated periodic parameters as walls.** The Nelder-Mead polish after
+  each `differential_evolution` restart, and the local search from an initial sample (used by
+  `use_injection_for_map` and the multi-mode restarts), were bounded at every parameter's prior
+  edges, so a peak lying just across a periodic parameter's seam was out of reach: the step pinned
+  against the edge instead. They now wrap periodic parameters (`boundary="periodic"`) and leave them
+  unbounded, and the returned MAP is wrapped back into range. Found in the paper's `map_validation`
+  study, where a polish ended at `phi_12 = 0` and `psi = pi/2` while the same hill's top lay across
+  the wrap. Differential evolution's own population is unaffected (it only samples inside the box).
+
 ### Added (earlier, unreleased)
 
 - `fisher_method='waveform'` now supports phase/time/distance-marginalised likelihoods: the
