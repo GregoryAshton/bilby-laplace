@@ -1067,11 +1067,20 @@ class Laplace(Sampler):
         payload["versions"] = self._checkpoint_versions()
         payload["rng_state"] = random.rng.bit_generator.state
         payload["sampling_time_s"] = sampling_time_s
+        # Cumulative, like the sampling time: a resumed run does not repeat the
+        # MAP search or the Hessian, so their calls have to be carried over.
+        payload["nlikelihood_total"] = self._total_nlikelihood()
         try:
             safe_file_dump(payload, self.resume_file, dill)
             logger.info(f"Wrote checkpoint to {self.resume_file}")
         except Exception as exc:  # never crash the run for a failed checkpoint
             logger.warning(f"Could not write resume file {self.resume_file}: {exc}")
+
+    def _total_nlikelihood(self):
+        """Every likelihood call this run has made, including before a resume."""
+        estimator = getattr(self, "_estimator", None)
+        current = estimator.n_likelihood_evaluations if estimator is not None else 0
+        return int(getattr(self, "_resumed_nlikelihood", 0)) + int(current)
 
     def _read_saved_state(self):
         """Load and validate the resume file, returning True on success.
@@ -1124,12 +1133,21 @@ class Laplace(Sampler):
         prior_s = float(payload.get("sampling_time_s") or 0.0)
         # Shift start_time backwards so end - start = prior + current.
         self.start_time = datetime.datetime.now() - datetime.timedelta(seconds=prior_s)
+        # A resume file written before this was recorded carries no count, so
+        # the calls made before it are lost and the total is a lower bound.
+        if "nlikelihood_total" not in payload:
+            logger.warning(
+                "Resume file predates the likelihood-call count; nlikelihood will "
+                "omit the calls made before the resume."
+            )
+        self._resumed_nlikelihood = int(payload.get("nlikelihood_total") or 0)
         _meta_keys = (
             "kwargs_hash",
             "search_keys",
             "versions",
             "rng_state",
             "sampling_time_s",
+            "nlikelihood_total",
         )
         self._checkpoint_state = {k: payload[k] for k in payload if k not in _meta_keys}
         logger.info(
@@ -1436,6 +1454,12 @@ class Laplace(Sampler):
 
         # Attempt to resume.  If a valid file exists we skip MAP & covariance
         # and restore (mean, cov, accumulators); a mismatched file is fatal.
+        # Reachable from ``write_current_state`` (a signal handler, so it cannot
+        # be handed the estimator), which checkpoints its likelihood count.
+        self._estimator = estimator
+        # Likelihood calls made before a resume, restored by
+        # ``_read_saved_state``; the resumed process's own start from zero.
+        self._resumed_nlikelihood = 0
         resumed = bool(self.kwargs.get("resume", True)) and self._read_saved_state()
 
         # scipy's own function-evaluation counts for MAP finding and the
@@ -1637,8 +1661,14 @@ class Laplace(Sampler):
             logl -= log_noise_evidence
             log_evidence -= log_noise_evidence
 
-        if nlikelihood is None:
-            nlikelihood = len(g_samples)
+        # ``sampling_nfev`` is the resampling stage's own count, the number this
+        # field used to hold: the proposal draws, or the true count SMC and
+        # emcee return.  ``nlikelihood`` is the whole run's, counted by the
+        # estimator: the MAP search, Hessian, covariance validation, mode search
+        # and Laplace evidence as well, which for a GW problem can be most of
+        # the cost of ``inprior`` (a 4.5e5-call MAP search against 5000 draws).
+        sampling_nfev = len(g_samples) if nlikelihood is None else int(nlikelihood)
+        nlikelihood = self._total_nlikelihood()
 
         self._generate_result(
             samples,
@@ -1648,6 +1678,7 @@ class Laplace(Sampler):
             log_evidence_laplace=log_evidence_laplace,
             efficiency=efficiency,
             nlikelihood=nlikelihood,
+            sampling_nfev=sampling_nfev,
             map_nfev=map_nfev,
             hessian_nfev=hessian_nfev,
         )

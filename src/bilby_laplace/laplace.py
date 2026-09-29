@@ -257,6 +257,14 @@ class LaplacePosteriorEstimator:
         self.pool = None
         self.npool = 1
 
+        # Every likelihood call this estimator makes, whatever stage asked for
+        # it: the MAP search, the Hessian, covariance validation, the mode
+        # search, the Laplace evidence and the resampling itself all go through
+        # ``log_likelihood`` or the pooled batch path, and both count here.
+        # ``run_statistics["nlikelihood"]`` is this total, so a method's cost is
+        # quoted in full rather than as its resampling stage alone.
+        self.n_likelihood_evaluations = 0
+
         if not isinstance(priors, PriorDict):
             priors = PriorDict(priors)
 
@@ -352,6 +360,7 @@ class LaplacePosteriorEstimator:
             else:
                 raise ValueError("sample must be a dict or single-row DataFrame")
         # Merge fixed values first so that sampled values always take priority.
+        self.n_likelihood_evaluations += 1
         return self.likelihood.log_likelihood(parameters={**self.fixed_parameters, **sample})
 
     def log_prior(self, sample):
@@ -458,6 +467,9 @@ class LaplacePosteriorEstimator:
         Returns a ``(N_samples,)`` array matching the serial path.
         """
         columns = [x_array[:, j] for j in range(x_array.shape[1])]
+        # The workers call the likelihood directly, not ``log_likelihood``, so
+        # the batch is counted here instead.
+        self.n_likelihood_evaluations += len(columns)
         worker = partial(
             _pool_log_likelihood,
             list(self.parameter_names),
