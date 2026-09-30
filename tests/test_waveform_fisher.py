@@ -340,3 +340,22 @@ def test_reconstruction_fallback_when_no_reference(monkeypatch):
     est = LaplacePosteriorEstimator(like, _sampled_priors(), fisher_method="waveform")
     values = est._resolve_marginalized_values({"x": 0.0, "y": 0.0}, ["luminosity_distance"])
     assert values == {"luminosity_distance": 950.0}
+
+
+def test_stencil_is_central_inside_the_prior():
+    """A stencil that fits inside the bounds is the central one, unchanged."""
+    assert gw_fisher._stencil(10.0, 2.0, (0.0, 100.0)) == (9.0, 11.0)
+    assert gw_fisher._stencil(10.0, 2.0, None) == (9.0, 11.0)
+
+
+def test_stencil_shifts_inside_a_prior_bound():
+    """At a bound the stencil moves inward, keeping its step.
+
+    A tidal deformability's MAP can sit at its prior's lower bound of 0, and
+    the central point value - dp/2 is then negative, which NRTidalv2 refuses
+    (lalsimulation raises; bilby-laplace-paper ``pp``, injection 34). Shifted,
+    it is a one-sided difference of the same step, taken inside the prior.
+    """
+    assert gw_fisher._stencil(0.0, 1e-6, (0.0, 5000.0)) == (0.0, 1e-6)
+    lo, hi = gw_fisher._stencil(5000.0, 2.0, (0.0, 5000.0))
+    assert (lo, hi) == (4998.0, 5000.0)

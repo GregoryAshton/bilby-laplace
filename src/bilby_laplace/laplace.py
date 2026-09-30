@@ -615,6 +615,23 @@ class LaplacePosteriorEstimator:
     # a discrete index, not a continuous direction, and is refused at validation).
     _SUPPORTED_MARGINALIZED = ("geocent_time", "phase", "luminosity_distance")
 
+    def _fisher_bounds(self, names):
+        """``{name: (minimum, maximum)}`` for the waveform Fisher's stencil.
+
+        Non-periodic parameters only: a periodic one wraps, so a step across its
+        bound is still a valid point. Parameters without finite prior bounds
+        (or not in the prior at all) are left out, and keep the central stencil.
+        """
+        bounds = {}
+        for name in names:
+            prior = self.priors_dict.get(name) if hasattr(self.priors_dict, "get") else None
+            lo, hi = getattr(prior, "minimum", None), getattr(prior, "maximum", None)
+            if getattr(prior, "boundary", None) == "periodic" or lo is None or hi is None:
+                continue
+            if np.isfinite(lo) and np.isfinite(hi):
+                bounds[name] = (float(lo), float(hi))
+        return bounds
+
     def _calculate_precision_waveform(self, sample):
         """Posterior precision from the GW waveform Fisher plus prior precision.
 
@@ -641,7 +658,10 @@ class LaplacePosteriorEstimator:
         }
 
         if not marg_names:
-            fisher = waveform_fisher_matrix(self.likelihood, self.parameter_names, base, **self.fisher_kwargs)
+            fisher = waveform_fisher_matrix(
+                self.likelihood, self.parameter_names, base,
+                bounds=self._fisher_bounds(self.parameter_names), **self.fisher_kwargs,
+            )
             precision = fisher + np.diag(self._prior_precision_diag(sample))
             return self._floor_precision_at_prior(precision)
 
@@ -652,7 +672,9 @@ class LaplacePosteriorEstimator:
             f"Waveform Fisher: reinstating marginalised parameter(s) {marg_names}, "
             f"then marginalising them out via the Schur complement."
         )
-        fisher = waveform_fisher_matrix(self.likelihood, full_names, base, **self.fisher_kwargs)
+        fisher = waveform_fisher_matrix(
+            self.likelihood, full_names, base, bounds=self._fisher_bounds(full_names), **self.fisher_kwargs
+        )
         prior_prec = np.concatenate(
             [
                 self._prior_precision_diag(sample),

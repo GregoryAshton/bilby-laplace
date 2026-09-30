@@ -146,6 +146,30 @@ def _step(name, value, eps, eps_mass, eps_time):
     return max(eps, eps * abs(value))
 
 
+def _stencil(value, dp, bounds):
+    """The two points of a difference of step *dp* about *value*, inside *bounds*.
+
+    Central (``value -+ dp/2``) where that fits inside ``bounds = (lo, hi)``;
+    otherwise shifted inward by the overlap, keeping the step, so a MAP on a
+    prior bound gets a one-sided difference rather than a point outside the
+    prior. That matters when the waveform itself refuses the outside point: a
+    tidal deformability at its prior's lower bound of 0 is stepped to a
+    negative value, which NRTidalv2 rejects. *bounds* ``None`` (or a step wider
+    than the interval) leaves the central stencil unchanged.
+    """
+    lo_pt, hi_pt = value - 0.5 * dp, value + 0.5 * dp
+    if bounds is None:
+        return lo_pt, hi_pt
+    lo, hi = bounds
+    if hi_pt - lo_pt > hi - lo:
+        return lo_pt, hi_pt
+    if lo_pt < lo:
+        return lo, lo + dp
+    if hi_pt > hi:
+        return hi - dp, hi
+    return lo_pt, hi_pt
+
+
 def waveform_fisher_matrix(
     likelihood,
     parameter_names,
@@ -153,6 +177,7 @@ def waveform_fisher_matrix(
     eps=DEFAULT_EPS,
     eps_mass=DEFAULT_EPS_MASS,
     eps_time=DEFAULT_EPS_TIME,
+    bounds=None,
 ):
     """Fisher matrix ``F_ij = sum_det Re (d_i h | d_j h)`` via central differences.
 
@@ -171,6 +196,10 @@ def waveform_fisher_matrix(
         Absolute finite-difference step, in seconds, for time parameters
         (``geocent_time`` and per-detector ``{ifo}_time``). A relative step is
         unusable here because the value is a GPS epoch (~1e9 s).
+    bounds : dict, optional
+        ``{name: (lo, hi)}`` prior bounds. A stencil that would leave them is
+        shifted inside (see :func:`_stencil`); one inside is left central, so
+        this changes nothing away from a bound.
 
     Returns
     -------
@@ -209,10 +238,11 @@ def waveform_fisher_matrix(
         for name in names:
             value = float(base_parameters[name])
             dp = _step(name, value, eps, eps_mass, eps_time)
+            lo_pt, hi_pt = _stencil(value, dp, (bounds or {}).get(name))
             plus = dict(base_parameters)
-            plus[name] = value + 0.5 * dp
+            plus[name] = hi_pt
             minus = dict(base_parameters)
-            minus[name] = value - 0.5 * dp
+            minus[name] = lo_pt
             pol_plus = wg.frequency_domain_strain(plus)
             pol_minus = wg.frequency_domain_strain(minus)
             plus_response = response_params(plus)
