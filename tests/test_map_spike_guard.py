@@ -214,3 +214,32 @@ def test_the_guard_is_counted_in_nfev(priors):
 
 def test_the_default_offset_is_in_the_unit_cube():
     assert MAP_SPIKE_DELTA == pytest.approx(1e-3)
+
+
+class _NarrowPeakLikelihood(bilby.core.likelihood.Likelihood):
+    """A smooth Gaussian peak of width 1 at x = 19, as AntiGlitch's amplitude is."""
+
+    def __init__(self):
+        super().__init__(parameters=dict(x=None, y=None))
+
+    def log_likelihood(self, parameters=None):
+        p = parameters if parameters is not None else self.parameters
+        return -0.5 * ((p["x"] - 19.0) ** 2 + (p["y"] - MU[1]) ** 2 / SIGMA**2)
+
+
+def test_a_smooth_peak_by_a_prior_bound_is_not_flagged():
+    """A probe the bound clips is not a neighbour, so it cannot make a peak a spike.
+
+    Under ``Uniform(0, 1e5)`` the peak sits 1.9e-4 of the unit cube from the
+    lower bound, inside +-2 * MAP_SPIKE_DELTA. The low-side probes were clipped
+    to x = 0, both at d and at 2d, so they read the same point: e(d) = e(2d),
+    which is a spike's signature, and a genuine peak ~180 nats above the bound
+    was rejected (bilby-laplace-paper ``prior_volume``, AntiGlitch at
+    ``a_max`` >= 1e4). The high side alone shows the peak's curvature.
+    """
+    priors = bilby.core.prior.PriorDict(
+        dict(x=bilby.core.prior.Uniform(0, 1e5, "x"), y=bilby.core.prior.Uniform(-5, 5, "y"))
+    )
+    est = _estimator(_NarrowPeakLikelihood(), priors)
+    excess, _, _ = est._spike_test(np.array([19.0, MU[1]]), _neg(est))
+    assert excess < MAP_SPIKE_DROP

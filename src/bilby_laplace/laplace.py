@@ -1148,10 +1148,14 @@ class LaplacePosteriorEstimator:
         ``4 * N`` evaluations (+-delta and +-2 delta on each axis) through
         *neg_log_post*, so it is counted and uses the pool like any other.
 
-        Periodic parameters wrap.  Others are clipped at the prior bounds,
-        where a clipped neighbour equals *x* and so can never make it a spike.
-        An axis whose two neighbours are both out of support is skipped rather
-        than read as an infinite excess.
+        Periodic parameters wrap.  Others are clipped at the prior bounds, and
+        a side of an axis whose +-d or +-2d probe had to be clipped is not
+        used: the clipped probe sits on the bound, not beside *x*, and the d
+        and 2d probes then read the same point, which is a spike's signature
+        (e(d) = e(2d)).  Near a bound the axis is tested on its other side
+        alone.  An axis with no usable side, or whose usable neighbours are all
+        out of support, is skipped rather than read as an infinite excess.
+        Where no probe is clipped, this is the two-sided test unchanged.
         """
         x = np.asarray(x, dtype=float)
         f0 = -float(neg_log_post(x)) if fun is None else -float(fun)
@@ -1163,8 +1167,14 @@ class LaplacePosteriorEstimator:
             for r, off in enumerate((-d, d, -2 * d, 2 * d)):
                 U[4 * j + r, j] += off
         U[:, self._periodic_mask] %= 1.0
+        # Which probes leave the unit cube, and so would be clipped onto the bound.
+        clipped = ((U < 0.0) | (U > 1.0)).any(axis=1).reshape(self.N, 4)
         X = np.column_stack([self._from_unit_cube(u) for u in U])
         f = -np.asarray(neg_log_post(X), dtype=float).reshape(self.N, 4)
+        # A side (columns 0 and 2 below x, 1 and 3 above) is usable only if
+        # neither its d nor its 2d probe was clipped.
+        usable = ~(clipped[:, :2] | clipped[:, 2:])
+        f = np.where(np.tile(usable, 2), f, -np.inf)
         e1 = f0 - f[:, :2].max(axis=1)
         e2 = f0 - f[:, 2:].max(axis=1)
         with np.errstate(invalid="ignore"):
