@@ -453,7 +453,10 @@ class Laplace(Sampler):
         ``fisher_method='waveform'`` (recognised keys: ``eps``, ``eps_mass``).
     use_injection_for_map : bool
         If True and injection_parameters are set, use them as the starting
-        point for the MAP search.
+        point for the MAP search, and (with ``fisher_method='waveform'`` on a
+        marginalised likelihood) as the reference values for the marginalised
+        parameters. If False the injection is used nowhere: the marginalised
+        parameters are reconstructed from the likelihood at the MAP.
     fail_on_error : bool
         If True, raise SamplerError when sampling fails; otherwise just log.
     n_modes : int
@@ -1418,7 +1421,15 @@ class Laplace(Sampler):
             hessian_kwargs=self.kwargs["hessian_kwargs"],
             fisher_method=self.kwargs["fisher_method"],
             fisher_kwargs=self.kwargs["fisher_kwargs"],
-            marginalized_reference=self.injection_parameters,
+            # The injection is a reference only when the run is already seeded
+            # with it: otherwise a waveform Fisher over a marginalised
+            # likelihood would evaluate its distance/phase block at the truth,
+            # quietly unblinding a run that set `use_injection_for_map=False`.
+            # Without it the estimator reconstructs them at the MAP, as on real
+            # data.
+            marginalized_reference=(
+                self.injection_parameters if self.kwargs["use_injection_for_map"] else None
+            ),
             map_restarts=self.kwargs["map_restarts"],
             map_vectorized=self.kwargs["map_vectorized"],
             map_spike_guard=self.kwargs["map_spike_guard"],

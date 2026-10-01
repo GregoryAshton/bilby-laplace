@@ -70,6 +70,14 @@ identical to each other, which is the invariant that matters. Set `map_vectorize
 
 ### Fixed
 
+- **The waveform Fisher used the injection even with `use_injection_for_map=False`.** On a
+  phase/distance-marginalised likelihood, `fisher_method='waveform'` reinstates the marginalised
+  parameters at reference values, and the sampler always passed `injection_parameters` as those
+  values -- so a run that deliberately kept the truth out of the MAP search still had its
+  distance/phase Fisher block evaluated at the injected distance and phase. Found in the HLVK BNS
+  P--P campaign, which is meant to use the truth nowhere. The injection is now the reference only
+  under `use_injection_for_map=True` (the default, so seeded runs are unchanged); otherwise the
+  marginalised parameters are reconstructed from the likelihood at the MAP, as on real data.
 - **The MAP search's local steps treated periodic parameters as walls.** The Nelder-Mead polish after
   each `differential_evolution` restart, and the local search from an initial sample (used by
   `use_injection_for_map` and the multi-mode restarts), were bounded at every parameter's prior

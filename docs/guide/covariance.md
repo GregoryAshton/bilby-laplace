@@ -59,7 +59,8 @@ result = bilby.run_sampler(
 Phase, time, and distance marginalisation are supported. Those parameters are
 *reinstated* in the Fisher — built over the augmented set (your sampled parameters
 plus the marginalised ones), evaluated at reference values (the injection where
-available, otherwise reconstructed from the likelihood at the MAP) — and then
+available and `use_injection_for_map=True`, otherwise reconstructed from the
+likelihood at the MAP) — and then
 removed via the **Schur complement** of the marginalised block. This is equivalent
 to inverting the full precision and keeping the sampled-parameter sub-block, i.e.
 it *marginalises* over those parameters (propagating their degeneracies) rather than

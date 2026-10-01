@@ -9,6 +9,7 @@ use a stub likelihood and a monkeypatched Fisher so they are fast, deterministic
 and need no GW waveform stack.
 """
 
+import bilby
 import numpy as np
 import pytest
 from bilby.core.prior import PriorDict, Uniform
@@ -359,3 +360,49 @@ def test_stencil_shifts_inside_a_prior_bound():
     assert gw_fisher._stencil(0.0, 1e-6, (0.0, 5000.0)) == (0.0, 1e-6)
     lo, hi = gw_fisher._stencil(5000.0, 2.0, (0.0, 5000.0))
     assert (lo, hi) == (4998.0, 5000.0)
+
+
+class _EstimatorBuilt(Exception):
+    pass
+
+
+@pytest.mark.parametrize("use_injection_for_map", [True, False])
+def test_injection_is_fisher_reference_only_when_seeding_with_it(
+    use_injection_for_map, gaussian_priors, tmp_path, monkeypatch
+):
+    """The injection reaches `marginalized_reference` only under `use_injection_for_map`.
+
+    Otherwise a blind run (e.g. a P--P campaign) would have its marginalised
+    distance/phase Fisher block evaluated at the truth.
+    """
+    from conftest import CorrelatedGaussianLikelihood
+
+    import bilby_laplace.sampler as sampler_module
+
+    seen = {}
+
+    def _capture(*args, **kwargs):
+        seen.update(kwargs)
+        raise _EstimatorBuilt
+
+    monkeypatch.setattr(sampler_module, "LaplacePosteriorEstimator", _capture)
+    injection = {"x": 1.0, "y": -0.5, "luminosity_distance": 800.0}
+    with pytest.raises(_EstimatorBuilt):
+        bilby.run_sampler(
+            likelihood=CorrelatedGaussianLikelihood(),
+            priors=gaussian_priors,
+            sampler="laplace",
+            outdir=str(tmp_path),
+            label="reference",
+            injection_parameters=injection,
+            use_injection_for_map=use_injection_for_map,
+            fail_on_error=True,
+            plot_diagnostic=False,
+            resume=False,
+            plot=False,
+            save=False,
+        )
+    if use_injection_for_map:
+        assert seen["marginalized_reference"]["luminosity_distance"] == 800.0
+    else:
+        assert seen["marginalized_reference"] is None
