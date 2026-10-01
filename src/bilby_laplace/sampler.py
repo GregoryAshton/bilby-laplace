@@ -116,6 +116,123 @@ class TruncatedMVNProposal:
         return np.sum(terms, axis=0)
 
 
+class CorrelatedTruncatedMVNProposal:
+    """The full correlated Gaussian, restricted to the prior box by discarding.
+
+    The ``proposal_covariance="full"`` alternative to
+    :class:`TruncatedMVNProposal`, with the same ``mean`` / ``cov`` /
+    ``sample`` / ``logpdf`` surface. Draws come from the full multivariate
+    normal, with off-diagonal covariance included. *Periodic* coordinates are
+    folded into their range. A draw outside the box on any non-periodic
+    coordinate is discarded and the batch refilled, which costs no likelihood
+    calls.
+
+    The density is the (wrapped) normal divided by its probability mass inside
+    the box, ``p_box``. That has no closed form for a correlated Gaussian, so
+    it is estimated once, by Monte Carlo, when the proposal is built
+    (``n_box_estimate`` draws). ``p_box`` is a constant: it cancels from
+    rejection acceptance and from normalised importance weights, and enters
+    only the evidence, as an additive ``-log p_box`` with relative error
+    ``sqrt((1 - p_box) / (p_box * n_box_estimate))``, logged at construction.
+
+    Whether this beats the independent default depends on the problem. On a
+    near-Gaussian posterior it keeps the correlations the default throws away.
+    On a strongly curved one, where the Laplace ellipse is a thin sliver along
+    the tangent (Rosenbrock's correlation is 0.998 at the MAP), it covers the
+    target worse than the independent box does. See ``seeding_proposal/`` in
+    the paper repository.
+    """
+
+    # Images either side of the principal range, per periodic coordinate. The
+    # wrapped density sums over every combination, (2 * _N_WRAPS + 1) ** k for
+    # k periodic coordinates, so this is smaller than TruncatedMVNProposal's
+    # per-marginal 3. Two images reach 2 periods out, far past any proposal
+    # sigma that is not already prior-wide.
+    _N_WRAPS = 2
+    # Draws per refill are capped so a box holding almost none of the Gaussian
+    # fails loudly instead of looping forever.
+    _MAX_REFILLS = 1000
+
+    def __init__(self, mean, cov, lower, upper, periodic=None, n_box_estimate=100_000):
+        self.mean = np.asarray(mean, dtype=float)
+        self.cov = np.asarray(cov, dtype=float)
+        self._ndim = len(self.mean)
+        self._lower = np.asarray(lower, dtype=float)
+        self._upper = np.asarray(upper, dtype=float)
+        self._period = self._upper - self._lower
+        if periodic is None:
+            self._periodic = np.zeros(self._ndim, dtype=bool)
+        else:
+            self._periodic = np.asarray(periodic, dtype=bool)
+            if self._periodic.shape != (self._ndim,):
+                raise ValueError(f"periodic must have one entry per parameter; got {self._periodic.shape}")
+
+        # Work with the correlation matrix, as _StandardisedGaussian does, so a
+        # covariance spanning many orders of magnitude in parameter scale (a
+        # GW chirp mass next to a tidal deformability) stays well conditioned.
+        self._sd = np.sqrt(np.diag(self.cov))
+        corr = self.cov / np.outer(self._sd, self._sd)
+        eigvals, eigvecs = np.linalg.eigh(0.5 * (corr + corr.T))
+        # A near-singular correlation (|rho| -> 1 is common: Mc-q on a BNS) is
+        # floored rather than refused, at a variance far below anything the
+        # proposal could resolve.
+        eigvals = np.maximum(eigvals, 1e-12)
+        self._sqrt_corr = eigvecs * np.sqrt(eigvals)
+        self._inv_corr = (eigvecs / eigvals) @ eigvecs.T
+        self._log_norm = -0.5 * (self._ndim * np.log(2 * np.pi) + np.sum(np.log(eigvals))) - np.sum(np.log(self._sd))
+
+        shifts = np.arange(-self._N_WRAPS, self._N_WRAPS + 1)
+        k = int(self._periodic.sum())
+        grid = np.array(np.meshgrid(*[shifts] * k, indexing="ij")).reshape(k, -1).T if k else np.zeros((1, 0))
+        self._image_shifts = np.zeros((len(grid), self._ndim))
+        self._image_shifts[:, self._periodic] = grid * self._period[self._periodic]
+
+        x = self._draw(n_box_estimate)
+        self.p_box = float(self._in_box(x).mean())
+        if self.p_box == 0:
+            raise SamplerError(
+                f"None of {n_box_estimate} draws from the full-covariance proposal landed inside the "
+                "prior box; use proposal_covariance='diagonal', or a smaller cov_scaling."
+            )
+        rel_err = np.sqrt((1 - self.p_box) / (self.p_box * n_box_estimate))
+        logger.info(
+            f"Full-covariance proposal keeps {100 * self.p_box:.2f}% of draws inside the prior box "
+            f"(log p_box uncertainty {rel_err:.2g}, an offset on the evidence only)"
+        )
+
+    def _draw(self, n):
+        z = random.rng.standard_normal((n, self._ndim)) @ self._sqrt_corr.T
+        x = self.mean + z * self._sd
+        x[:, self._periodic] = self._lower[self._periodic] + np.mod(
+            x[:, self._periodic] - self._lower[self._periodic], self._period[self._periodic]
+        )
+        return x
+
+    def _in_box(self, x):
+        bounded = ~self._periodic
+        return np.all((x[:, bounded] >= self._lower[bounded]) & (x[:, bounded] <= self._upper[bounded]), axis=1)
+
+    def sample(self, n):
+        kept, n_kept = [], 0
+        for _ in range(self._MAX_REFILLS):
+            batch = int(np.ceil(1.2 * (n - n_kept) / self.p_box)) + 16
+            x = self._draw(batch)
+            x = x[self._in_box(x)]
+            kept.append(x)
+            n_kept += len(x)
+            if n_kept >= n:
+                return np.vstack(kept)[:n]
+        raise SamplerError(f"Full-covariance proposal could not fill {n} in-box draws in {self._MAX_REFILLS} refills")
+
+    def logpdf(self, x):
+        x = np.atleast_2d(np.asarray(x, dtype=float))
+        images = x[None, :, :] + self._image_shifts[:, None, :]
+        z = (images - self.mean) / self._sd
+        log_p = self._log_norm - 0.5 * np.einsum("kni,ij,knj->kn", z, self._inv_corr, z)
+        out = logsumexp(log_p, axis=0) - np.log(self.p_box)
+        return np.where(self._in_box(x), out, -np.inf)
+
+
 class TruncatedMVNMixtureProposal:
     """Weighted mixture of :class:`TruncatedMVNProposal` components.
 
@@ -439,6 +556,21 @@ class Laplace(Sampler):
             result = bilby.run_sampler(
                 ..., sampler="laplace", sampling_cov=(parameter_names, C)
             )
+    proposal_covariance : str
+        How the Laplace Gaussian is turned into the proposal every resampling
+        method draws from (``inprior``'s output, ``rejection`` and
+        ``importance``'s proposal, ``smc``'s initial cloud, ``emcee``'s
+        walkers). ``'diagonal'`` (default) samples each parameter
+        independently from a truncated normal with its Laplace *marginal*
+        width, ignoring the off-diagonal covariance
+        (:class:`TruncatedMVNProposal`). ``'full'`` samples the full
+        correlated Gaussian and discards draws outside the prior box
+        (:class:`CorrelatedTruncatedMVNProposal`). Correlations survive into
+        ``inprior`` and the SMC start, but a strongly curved posterior can be
+        covered *worse*, since the full ellipse is narrower across the
+        curvature than the independent box. ``'full'`` is incompatible with
+        ``prior_parameters``. The stored covariance (``mode_mixture``) is the
+        same either way.
     fisher_method : str
         How to estimate the posterior precision. ``'hessian'`` (default)
         finite-differences the scalar log-posterior. ``'waveform'`` builds the
@@ -855,6 +987,7 @@ class Laplace(Sampler):
         plot_diagnostic=False,
         cov_scaling=1,
         sampling_cov=None,
+        proposal_covariance="diagonal",
         use_injection_for_map=True,
         fail_on_error=True,
         use_unit_cube=True,
@@ -1427,9 +1560,7 @@ class Laplace(Sampler):
             # quietly unblinding a run that set `use_injection_for_map=False`.
             # Without it the estimator reconstructs them at the MAP, as on real
             # data.
-            marginalized_reference=(
-                self.injection_parameters if self.kwargs["use_injection_for_map"] else None
-            ),
+            marginalized_reference=(self.injection_parameters if self.kwargs["use_injection_for_map"] else None),
             map_restarts=self.kwargs["map_restarts"],
             map_vectorized=self.kwargs["map_vectorized"],
             map_spike_guard=self.kwargs["map_spike_guard"],
@@ -2032,16 +2163,33 @@ class Laplace(Sampler):
 
         return samples, logl_out, samples, efficiency
 
+    def _proposal_class(self):
+        """The per-mode proposal ``proposal_covariance`` selects."""
+        choice = self.kwargs["proposal_covariance"]
+        if choice == "diagonal":
+            return TruncatedMVNProposal
+        if choice == "full":
+            if self.kwargs.get("prior_parameters"):
+                # _effective_log_proposal swaps a replaced parameter's marginal
+                # density for its prior, which needs the per-marginal
+                # factorisation only the diagonal proposal has.
+                raise SamplerError("prior_parameters requires proposal_covariance='diagonal'.")
+            return CorrelatedTruncatedMVNProposal
+        raise SamplerError(f"proposal_covariance must be 'diagonal' or 'full', got {choice!r}.")
+
     def _mode_proposal(self, estimator, modes, log_weights):
         """The proposal for a set of ``(mean, cov, log_posterior)`` modes.
 
-        A single :class:`TruncatedMVNProposal` for one mode, a
-        :class:`TruncatedMVNMixtureProposal` for several.  Shared by the
+        A single component for one mode, a :class:`TruncatedMVNMixtureProposal`
+        of them for several. Each component is a :class:`TruncatedMVNProposal`,
+        or a :class:`CorrelatedTruncatedMVNProposal` under
+        ``proposal_covariance="full"`` (see :meth:`_proposal_class`).  Shared by the
         first-pass build and the resume path so a resumed run cannot quietly
         continue from a different proposal than it started with.
         """
+        proposal_class = self._proposal_class()
         components = [
-            TruncatedMVNProposal(
+            proposal_class(
                 mode_mean,
                 mode_cov,
                 lower=estimator.prior_bounds_min,

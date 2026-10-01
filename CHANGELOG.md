@@ -12,6 +12,15 @@ Versions correspond to git tags; version numbers follow
 
 ### Added
 
+- `proposal_covariance` (default **`"diagonal"`**, the existing behaviour) chooses how the Laplace
+  Gaussian becomes the proposal every resampling method draws from. `"diagonal"` samples each parameter
+  independently with its marginal width and ignores the off-diagonal covariance (`TruncatedMVNProposal`).
+  `"full"` samples the full correlated Gaussian and discards draws outside the prior box
+  (`CorrelatedTruncatedMVNProposal`, with the box mass estimated by Monte Carlo for the normalisation).
+  Neither is better everywhere. On a correlated Gaussian `"full"` makes `inprior` exact and rejection more
+  efficient. On the Rosenbrock banana (Laplace correlation 0.998 at the MAP) it covers the curved
+  posterior worse than the independent box: importance ESS 0.06% against 4.7%. Incompatible with
+  `prior_parameters`.
 - `map_restarts` (default **4**) — the MAP search now runs that many independent
   `differential_evolution` restarts and keeps the highest-log-posterior result. `differential_evolution`
   is not reliable on a GW log-posterior at this dimension: measured on GW150914 over 100 seeds, 25 of
