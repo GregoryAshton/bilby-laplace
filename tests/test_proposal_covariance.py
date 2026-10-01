@@ -77,15 +77,44 @@ def _run(tmp_path, resample, **kwargs):
     )
 
 
-def test_default_is_the_diagonal_proposal(tmp_path, monkeypatch):
+def _record_proposal_class(monkeypatch):
     built = []
     original = sampler_module.Laplace._proposal_class
     monkeypatch.setattr(
         sampler_module.Laplace, "_proposal_class", lambda self: built.append(original(self)) or built[-1]
     )
+    return built
+
+
+def test_inprior_defaults_to_full(tmp_path, monkeypatch):
+    # inprior returns the proposal as the posterior, so it gets the Laplace
+    # approximation itself.
+    built = _record_proposal_class(monkeypatch)
     result = _run(tmp_path, "inprior")
+    assert built == [CorrelatedTruncatedMVNProposal]
+    assert result.meta_data["proposal_covariance"] == "full"
+    assert np.corrcoef(result.posterior[["x", "y"]].to_numpy().T)[0, 1] == pytest.approx(RHO, abs=0.05)
+
+
+def test_seeding_methods_default_to_diagonal(tmp_path, monkeypatch):
+    # Every other method corrects the proposal, where a wider seed is better.
+    built = _record_proposal_class(monkeypatch)
+    result = _run(tmp_path, "rejection")
     assert built == [TruncatedMVNProposal]
+    assert result.meta_data["proposal_covariance"] == "diagonal"
+
+
+def test_explicit_diagonal_inprior_drops_the_correlation(tmp_path):
+    result = _run(tmp_path, "inprior", proposal_covariance="diagonal")
+    assert result.meta_data["proposal_covariance"] == "diagonal"
     assert abs(np.corrcoef(result.posterior[["x", "y"]].to_numpy().T)[0, 1]) < 0.1
+
+
+def test_inprior_default_falls_back_to_diagonal_with_prior_parameters(tmp_path, monkeypatch):
+    built = _record_proposal_class(monkeypatch)
+    result = _run(tmp_path, "inprior", prior_parameters=["y"])
+    assert built == [TruncatedMVNProposal]
+    assert result.meta_data["proposal_covariance"] == "diagonal"
 
 
 def test_full_inprior_recovers_the_gaussian_correlation(tmp_path):

@@ -12,15 +12,13 @@ Versions correspond to git tags; version numbers follow
 
 ### Added
 
-- `proposal_covariance` (default **`"diagonal"`**, the existing behaviour) chooses how the Laplace
-  Gaussian becomes the proposal every resampling method draws from. `"diagonal"` samples each parameter
-  independently with its marginal width and ignores the off-diagonal covariance (`TruncatedMVNProposal`).
-  `"full"` samples the full correlated Gaussian and discards draws outside the prior box
-  (`CorrelatedTruncatedMVNProposal`, with the box mass estimated by Monte Carlo for the normalisation).
-  Neither is better everywhere. On a correlated Gaussian `"full"` makes `inprior` exact and rejection more
-  efficient. On the Rosenbrock banana (Laplace correlation 0.998 at the MAP) it covers the curved
-  posterior worse than the independent box: importance ESS 0.06% against 4.7%. Incompatible with
-  `prior_parameters`.
+- `proposal_covariance` chooses how the Laplace Gaussian becomes the proposal every resampling method
+  draws from. `"diagonal"` samples each parameter independently with its marginal width and ignores the
+  off-diagonal covariance (`TruncatedMVNProposal`, the only behaviour before this). `"full"` samples the
+  full correlated Gaussian and discards draws outside the prior box (`CorrelatedTruncatedMVNProposal`,
+  with the box mass estimated by Monte Carlo for the normalisation). The choice made is recorded in
+  `meta_data["proposal_covariance"]`. Incompatible with `prior_parameters`.
+
 - `map_restarts` (default **4**) — the MAP search now runs that many independent
   `differential_evolution` restarts and keeps the highest-log-posterior result. `differential_evolution`
   is not reliable on a GW log-posterior at this dimension: measured on GW150914 over 100 seeds, 25 of
@@ -58,6 +56,15 @@ Versions correspond to git tags; version numbers follow
 
 ### Changed
 
+- **`resample="inprior"` now draws from the full correlated Gaussian by default.** The default
+  `proposal_covariance=None` picks by what the proposal is for: `"full"` for `inprior`, whose output is
+  the proposal, and `"diagonal"` (unchanged) for `rejection`, `importance`, `smc` and `emcee`, which
+  correct it. Neither is better everywhere. On six BNS injections, `inprior`'s chirp-mass width fell from
+  a median 7.0x the SMC reference to 1.3x, and its correlations returned; `smc` reached the same
+  posterior from either start, but used 1.1-1.9x the likelihood calls from `"full"`. On the Rosenbrock
+  banana (Laplace correlation 0.998 at the MAP), `"full"` covers the curved posterior worse than the
+  independent box: importance ESS 0.06% against 4.7%. Pass `proposal_covariance="diagonal"` to recover
+  the old `inprior`. With `prior_parameters`, `inprior` falls back to `"diagonal"` and logs it.
 - **The multiprocessing pool is now created before the MAP search**, not after the covariance stage.
   It was previously set up immediately before the resampling loops, which meant the single heaviest
   consumer of the log-posterior — the global MAP search — ran serially no matter what `npool` said

@@ -8,7 +8,7 @@ approximately Gaussian, the proposal samples are corrected by reweighting with
 |---|---|---|---|
 | `"rejection"` (default) | Accept each sample with probability \( w/\max w \). Exact reweighting. | ✅ independent estimate | The proposal reasonably covers the posterior; you want unbiased samples. |
 | `"importance"` | Resample indices proportional to \( w \) (effective-sample-size per batch). | ✅ independent estimate | Acceptance is too low for rejection but the proposal still overlaps the posterior. |
-| `"inprior"` | Draw from the proposal, keep only in-prior samples, evaluate the likelihood. No reweighting. | ❌ | A fast filter when the proposal is well-matched to the prior; quick look. |
+| `"inprior"` | Draw from the proposal, keep only in-prior samples, evaluate the likelihood. No reweighting. Draws from the full correlated Gaussian by default (`proposal_covariance`). | ❌ | A fast filter when the proposal is well-matched to the prior; quick look at the Laplace approximation itself. |
 | `"smc"` | Use the Laplace Gaussian as the starting distribution for [aspire](https://github.com/bilby-dev/aspire) SMC, which anneals toward the true posterior. | ✅ SMC estimate | The posterior is strongly non-Gaussian or multimodal. |
 | `None` / `"None"` | Return raw Gaussian samples, no correction. | Laplace only | Debugging, or when you genuinely want the Gaussian approximation. |
 

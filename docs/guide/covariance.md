@@ -120,6 +120,7 @@ bounded at prior width rather than left arbitrarily wide.
 | `sampling_cov` | Bypass estimation entirely and supply a precomputed covariance (see below). |
 | `jacobian_cap_scale` | (Hessian unit-cube path) Caps the Jacobian for prior-dominated parameters; values `<1` widen the proposal for those parameters. |
 | `prior_parameters` | Replace the proposal for listed parameters with independent prior draws — for parameters whose posterior is essentially the prior and which the Hessian constrains poorly. |
+| `proposal_covariance` | How the Gaussian becomes the proposal. `"diagonal"` draws each parameter independently with its Laplace marginal width, dropping the correlations, which makes a wider, defensive seed. `"full"` draws the full correlated Gaussian, discarding draws outside the prior box. The default (`None`) is `"full"` for `resample="inprior"`, whose output *is* the proposal, and `"diagonal"` for every method that corrects it (`rejection`, `importance`, `smc`, `emcee`). `"full"` is incompatible with `prior_parameters`. |
 | `hessian_kwargs` | Forwarded to `scipy.differentiate.hessian` (e.g. `initial_step`). |
 
 Additionally, the Hessian-derived covariance is validated along its principal axes:
