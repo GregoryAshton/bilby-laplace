@@ -4126,10 +4126,27 @@ class Laplace(Sampler):
             logger.debug(f"Candidate {n_polished}: " f"log-posterior = {p_logp:.2f} " f"after local optimisation")
 
             # Re-check after polishing, against accepted modes and earlier proposals
-            known = [m for m, _, _ in found_modes] + [c["mean"] for c in proposed]
-            if any(np.max(np.abs(p_mean - m) / std_scale) < separation for m in known):
+            if any(np.max(np.abs(p_mean - m) / std_scale) < separation for m, _, _ in found_modes):
                 logger.debug(f"Candidate {n_polished} converged to " f"a known mode; skipping")
                 continue
+
+            # A collision with an earlier *proposal* keeps the better of the
+            # two, not the first.  Starts are polished in order of their
+            # pre-polish score, so the first polish into a region is often not
+            # its best.  Discarding the later one made the mixture's
+            # representative of a region depend on visiting order: on
+            # bilby-laplace-paper's mode_study (injection 1) a genuine
+            # delta_phase + pi lobe, at the primary's own log-posterior, was
+            # dropped at mode_separation_sigma=3 because an earlier polish of
+            # the same lobe 9 nats lower sat 1.23 sigma from it -- the worse
+            # copy was kept, and then fell below the weight floor.
+            clashes = [i for i, c in enumerate(proposed) if np.max(np.abs(p_mean - c["mean"]) / std_scale) < separation]
+            if any(proposed[i]["logp"] >= p_logp for i in clashes):
+                logger.debug(f"Candidate {n_polished} converged to " f"a known mode; skipping")
+                continue
+            if clashes:
+                logger.debug(f"Candidate {n_polished} replaces {len(clashes)} worse proposal(s) in its region")
+                proposed = [c for i, c in enumerate(proposed) if i not in clashes]
 
             proposed.append(dict(mean=p_mean, logp=p_logp, source="hypercube"))
 

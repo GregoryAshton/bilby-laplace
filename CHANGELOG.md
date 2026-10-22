@@ -86,6 +86,15 @@ identical to each other, which is the invariant that matters. Set `map_vectorize
 
 ### Fixed
 
+- **The hypercube mode search kept the first polish of a region, not the best.** Its starts are
+  polished in order of their *pre*-polish score, and a polish landing within `mode_separation_sigma`
+  of an earlier proposal was discarded -- so a region was represented by whichever polish reached it
+  first, however much worse. A collision now keeps the higher log-posterior of the two. Found by
+  bilby-laplace-paper's `mode_study` at `mode_separation_sigma=3`: on two of 99 injections a genuine
+  secondary (on one, a `delta_phase + pi` lobe at the primary's own log-posterior, which took 94% of
+  the weight at σ=1) was lost because an earlier polish of the same lobe, 9 nats lower, sat inside the
+  gate and then fell below the weight floor. Every increase in `mode_separation_sigma` made the
+  collision more likely.
 - **The waveform Fisher used the injection even with `use_injection_for_map=False`.** On a
   phase/distance-marginalised likelihood, `fisher_method='waveform'` reinstates the marginalised
   parameters at reference values, and the sampler always passed `injection_parameters` as those

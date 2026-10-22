@@ -1089,3 +1089,79 @@ def test_zero_prior_seed_is_a_no_op(frac_priors):
     out = s._append_prior_seed(x.copy(), 0, ["x", "y"])
     assert out.shape == x.shape
     assert np.array_equal(np.sort(out, axis=0), np.sort(x, axis=0)), "content must be unchanged (order may differ)"
+
+
+# --- hypercube dedup keeps the best polish of a region, not the first -------
+#
+# Starts are polished in order of their *pre*-polish score, so the first polish
+# into a region need not be its best. Discarding later collisions kept the
+# worse copy: on bilby-laplace-paper's mode_study a genuine delta_phase + pi
+# lobe at the primary's own log-posterior was lost at mode_separation_sigma=3
+# because an earlier polish of the same lobe, 9 nats lower, sat inside the gate.
+
+
+class _ScriptedEstimator:
+    """Pre-polish scores and polish results fixed per start, keyed by x[0]."""
+
+    def __init__(self, script):
+        self.script = script  # x[0] of start -> (pre-polish logp, polished mean, polished logp)
+
+    def log_posterior_from_array(self, x):
+        return self.script[float(x[0])][0]
+
+    def _maximize_posterior_from_initial_sample(self, sample):
+        from types import SimpleNamespace
+
+        _, mean, logp = self.script[float(sample["x"])]
+        return SimpleNamespace(x=np.asarray(mean, dtype=float), fun=-logp)
+
+
+def test_hypercube_keeps_the_best_polish_of_a_region(sampler, monkeypatch):
+    primary = np.array([0.0, 0.0])
+    # Start 1 ranks first pre-polish but lands 9 nats below the lobe's peak;
+    # start 2 reaches the peak 1.2 sigma away -- one region at separation 3.
+    script = {
+        1.0: (-1.0, [4.0, 0.0], -19.0),
+        2.0: (-2.0, [5.2, 0.0], -10.0),
+    }
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", lambda *a, **k: np.array([[1.0, 9.0], [2.0, 9.0]]))
+    sampler.kwargs["mode_search_nsamples"] = 2
+    sampler.kwargs["mode_search_subspace"] = None
+
+    proposed = sampler._hypercube_candidates(
+        _ScriptedEstimator(script),
+        std_scale=np.ones(2),
+        separation=3.0,
+        n_modes=3,
+        parameter_names=["x", "y"],
+        best_mean=primary,
+        found_modes=[(primary, np.eye(2), 0.0)],
+    )
+
+    assert len(proposed) == 1
+    np.testing.assert_allclose(proposed[0]["mean"], [5.2, 0.0])
+    assert proposed[0]["logp"] == -10.0
+
+
+def test_hypercube_still_drops_a_worse_later_polish(sampler, monkeypatch):
+    """The other order: the better polish arrives first and is kept."""
+    primary = np.array([0.0, 0.0])
+    script = {
+        1.0: (-1.0, [5.2, 0.0], -10.0),
+        2.0: (-2.0, [4.0, 0.0], -19.0),
+    }
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", lambda *a, **k: np.array([[1.0, 9.0], [2.0, 9.0]]))
+    sampler.kwargs["mode_search_nsamples"] = 2
+    sampler.kwargs["mode_search_subspace"] = None
+
+    proposed = sampler._hypercube_candidates(
+        _ScriptedEstimator(script),
+        std_scale=np.ones(2),
+        separation=3.0,
+        n_modes=3,
+        parameter_names=["x", "y"],
+        best_mean=primary,
+        found_modes=[(primary, np.eye(2), 0.0)],
+    )
+
+    assert [c["logp"] for c in proposed] == [-10.0]
