@@ -95,6 +95,16 @@ identical to each other, which is the invariant that matters. Set `map_vectorize
   the weight at σ=1) was lost because an earlier polish of the same lobe, 9 nats lower, sat inside the
   gate and then fell below the weight floor. Every increase in `mode_separation_sigma` made the
   collision more likely.
+- **The separation gate could reject a declared symmetry mirror as a copy of its own source.** The
+  gate is measured in the primary's sigma, and an exact mirror sits exactly `shift` from its source,
+  so whenever the primary's sigma in the symmetric coordinate exceeded
+  `shift / mode_separation_sigma` the mirror was dropped as a duplicate -- a declared mode silently
+  lost, the same kind of failure `mode_symmetries` exists to prevent. Found by bilby-laplace-paper's
+  `mode_study`: on one of 99 injections a `delta_phase` sigma of 1.34 rad put the pi mirror 2.34 sigma
+  out, inside the gate at `mode_separation_sigma=3` (at σ=1 it was admitted and took 58% of the weight).
+  An exact mirror is now exempt from the gate against its own source only; it is still gated against
+  every other mode, so a mirror landing on a mode the mixture already holds is still a duplicate.
+  Polished mirrors (`'symmetry-polish'`) are unchanged.
 - **The waveform Fisher used the injection even with `use_injection_for_map=False`.** On a
   phase/distance-marginalised likelihood, `fisher_method='waveform'` reinstates the marginalised
   parameters at reference values, and the sampler always passed `injection_parameters` as those

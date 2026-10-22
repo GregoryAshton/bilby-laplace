@@ -1165,3 +1165,55 @@ def test_hypercube_still_drops_a_worse_later_polish(sampler, monkeypatch):
     )
 
     assert [c["logp"] for c in proposed] == [-10.0]
+
+
+# --- a declared mirror is not a copy of its own source ------------------------
+#
+# The separation gate is measured in the primary's sigma, so an exact mirror
+# offset by `shift` was rejected as a duplicate of its own source whenever that
+# sigma exceeded shift / mode_separation_sigma. On bilby-laplace-paper's
+# mode_study a delta_phase sigma of 1.34 rad put the pi mirror 2.34 sigma out,
+# and at separation 3 the declared mode was silently dropped.
+
+
+def _wide_primary(estimator):
+    L = _PeriodicSymmetricLikelihood
+    mean = np.array([L.MU_X, L.MU_PHI])
+    cov = np.diag([L.SIGMA_X**2, 1.34**2])  # pi / 1.34 = 2.34 sigma < 3
+    return mean, cov
+
+
+def test_mirror_survives_a_primary_wide_in_the_symmetric_coordinate(sampler, periodic_estimator, monkeypatch):
+    monkeypatch.setattr(sampler, "_latin_hypercube_prior", lambda *a, **k: np.empty((0, 2)))
+    sampler.kwargs["mode_searches"] = ["symmetric"]
+    sampler.kwargs["mode_symmetries"] = [("phi", np.pi)]
+    sampler.kwargs["mode_separation_sigma"] = 3.0
+    mean, cov = _wide_primary(periodic_estimator)
+
+    modes = sampler._find_multiple_maps(periodic_estimator, 2, np.ones(2), mean, cov)
+
+    assert len(modes) == 2, "the exact mirror was rejected as a copy of its own source"
+    phis = sorted(m[0][1] for m in modes)
+    assert phis[1] - phis[0] == pytest.approx(np.pi)
+
+
+def test_mirror_is_still_gated_against_other_modes(sampler, periodic_estimator):
+    """The exemption covers the mirror's own source only: a mirror landing on a
+    mode the mixture already holds is still a duplicate."""
+    mean, cov = _wide_primary(periodic_estimator)
+    mirror_of_other = dict(
+        mean=mean.copy(), logp=0.0, cov=cov, source="symmetry", mirror_of=mean + np.array([0.0, np.pi])
+    )
+
+    modes = sampler._select_modes(
+        periodic_estimator,
+        [(mean, cov, 0.0)],
+        [mirror_of_other],
+        np.sqrt(np.diag(cov)),
+        3.0,
+        3,
+        np.ones(2),
+        ["x", "phi"],
+    )
+
+    assert len(modes) == 1

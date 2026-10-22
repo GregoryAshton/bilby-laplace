@@ -4028,7 +4028,18 @@ class Laplace(Sampler):
             mean, logp = cand["mean"], cand["logp"]
             if not np.isfinite(logp):
                 continue
-            if any(np.max(np.abs(mean - m) / std_scale) < separation for m, _, _ in found_modes):
+            # An exact mirror is never a copy of the mode it mirrors: it is offset
+            # from it by the declared shift, by construction.  The gate measures
+            # that offset in the primary's sigma, so it rejected the mirror
+            # whenever that sigma exceeded shift / mode_separation_sigma -- on
+            # bilby-laplace-paper's mode_study (injection 25) a delta_phase
+            # sigma of 1.34 rad put the pi mirror 2.34 sigma out, and at
+            # separation 3 a declared mode was silently dropped.  The gate still
+            # applies against every *other* mode, so a mirror landing on a mode
+            # the mixture already has is still a duplicate.
+            source_mean = cand.get("mirror_of")
+            others = [m for m, _, _ in found_modes if source_mean is None or not np.array_equal(m, source_mean)]
+            if any(np.max(np.abs(mean - m) / std_scale) < separation for m in others):
                 continue
             found_modes = self._append_mode(
                 estimator,
@@ -4437,7 +4448,17 @@ class Laplace(Sampler):
                     f"Symmetry mode proposed: {param} {mean[index]:.4f} -> {mirrored[index]:.4f}, "
                     f"log-posterior = {mirrored_logp:.2f} ({kind}, offset {offset:.2e})"
                 )
-                proposed.append(dict(mean=mirrored, logp=mirrored_logp, cov=cov, source="symmetry"))
+                # mirror_of exempts the mirror from _select_modes' separation
+                # gate against its own source, and only that: see there.
+                proposed.append(
+                    dict(
+                        mean=mirrored,
+                        logp=mirrored_logp,
+                        cov=cov,
+                        source="symmetry",
+                        mirror_of=np.asarray(mean, dtype=float),
+                    )
+                )
         return proposed
 
     # Mixture components holding less than this share of the total Laplace mass
