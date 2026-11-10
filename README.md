@@ -12,8 +12,7 @@ useful as a cheap cross-check against nested sampling results.
 > **Documentation:** full guides, the configuration/API reference, and background on
 > the method are at **<https://gregoryashton.github.io/bilby-laplace/>**.
 
-NOTE: This is currently in development and derived from
-[bilby PR #933](https://github.com/bilby-dev/bilby/pull/933) (Gregory Ashton).
+Originally derived from [bilby PR #933](https://github.com/bilby-dev/bilby/pull/933).
 
 ## Installation
 
@@ -66,7 +65,7 @@ of options and guidance on choosing between them.
 
 ## Examples
 
-Runnable examples are in [`examples/`](examples/) (gaussian, rosenbrock, BBH, BNS).
+Runnable examples are in [`examples/`](https://github.com/GregoryAshton/bilby-laplace/tree/main/examples) (gaussian, rosenbrock, BBH, BNS).
 Each has a `Makefile`:
 
 ```bash
@@ -74,6 +73,16 @@ cd examples/gaussian
 make laplace
 make compare
 ```
+
+## Citing
+
+If you use `bilby-laplace`, please cite the software release; citation metadata
+is in [`CITATION.cff`](https://github.com/GregoryAshton/bilby-laplace/blob/main/CITATION.cff) (GitHub's "Cite this repository" button
+reads it).
+
+## License
+
+MIT; see [`LICENSE`](https://github.com/GregoryAshton/bilby-laplace/blob/main/LICENSE).
 
 ## Documentation development
 

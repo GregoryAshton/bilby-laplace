@@ -91,3 +91,19 @@ def sampler(gaussian_likelihood, gaussian_priors, tmp_path):
         outdir=str(tmp_path),
         label="test",
     )
+
+
+@pytest.fixture(autouse=True)
+def _propagate_bilby_logger():
+    """Let ``caplog`` see bilby's log records.
+
+    Some bilby versions set ``propagate = False`` on the ``bilby`` logger, which
+    hides every warning the sampler emits from pytest's root-logger capture.
+    """
+    import logging
+
+    bilby_logger = logging.getLogger("bilby")
+    previous = bilby_logger.propagate
+    bilby_logger.propagate = True
+    yield
+    bilby_logger.propagate = previous

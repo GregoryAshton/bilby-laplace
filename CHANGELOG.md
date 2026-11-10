@@ -10,6 +10,10 @@ Versions correspond to git tags; version numbers follow
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-10
+
+The version used for the results in the accompanying paper.
+
 ### Added
 
 - `proposal_covariance` chooses how the Laplace Gaussian becomes the proposal every resampling method
@@ -311,5 +315,6 @@ Initial release.
 - `examples/gaussian_example.py` — minimal runnable demo on a 2-D Gaussian likelihood.
 - Version managed by `setuptools-scm` from git tags.
 
-[Unreleased]: https://github.com/GregoryAshton/bilby-laplace/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/GregoryAshton/bilby-laplace/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/GregoryAshton/bilby-laplace/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/GregoryAshton/bilby-laplace/releases/tag/v0.1.0

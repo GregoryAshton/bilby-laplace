@@ -1,0 +1,6 @@
+# setuptools-scm includes every tracked file in the sdist; keep it to the
+# package, tests and docs. The examples (with multi-MB figures) stay in the
+# repository and the Zenodo archive.
+prune examples
+prune .github
+exclude .pre-commit-config.yaml .flake8 mkdocs.yml

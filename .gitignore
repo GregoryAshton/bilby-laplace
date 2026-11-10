@@ -43,3 +43,6 @@ CLAUDE.md
 
 # Run logs from `make <sampler> > x.log`
 examples/**/*.log
+
+# Editor settings
+.vscode/
