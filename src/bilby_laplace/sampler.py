@@ -699,14 +699,18 @@ class Laplace(Sampler):
         trained flow, on both divergence-from-reference and tempering-schedule
         length. The reason is not that the mixture is Gaussian: it is that
         :class:`GaussianMixtureFlow` is built on plain ``multivariate_normal``
-        and so is *unbounded and non-periodic*, while the trained flow inherits
-        aspire's logit transform on bounded coordinates and angular treatment
-        of periodic ones. On an example declaring five periodic parameters and
-        a mode sitting on the ``phi_12`` boundary, that makes ``log q`` wrong
-        exactly where ``(1 - beta) log q`` dominates.
+        and so is *unbounded*, while the trained flow inherits aspire's logit
+        transform on bounded coordinates and so puts no mass outside the prior
+        box. Periodicity is not what separates them: aspire builds the flow's
+        input transform without the periodic parameters, so the trained flow
+        treats a periodic coordinate as bounded (logit) rather than wrapped,
+        and only the SMC preconditioning treats it as an angle. On an example
+        with a mode sitting on the ``phi_12`` boundary, the unbounded mixture
+        makes ``log q`` wrong exactly where ``(1 - beta) log q`` dominates.
 
         A useful analytic prior flow would need a correlated mixture that is
-        also truncated and wrapped. Neither existing class is that:
+        also truncated (and, ideally, wrapped on periodic coordinates).
+        Neither existing class is that:
         :class:`GaussianMixtureFlow` keeps correlations but ignores the
         boundaries, and :class:`TruncatedMVNProposal` respects them but is
         diagonal, which discards the correlation structure a degenerate
@@ -3071,13 +3075,16 @@ class Laplace(Sampler):
 
         parameter_names = estimator.parameter_names
 
-        # Per-parameter box, which is all aspire's logit preconditioning can
-        # express -- a Constraint bounds a derived quantity and has no
-        # rectangular form.  Constraints still bind, via the log-prior below:
-        # aspire_bilby's `log_prior` is `priors.ln_prob(...)`, which returns
-        # -inf on a violation, and `_make_aspire_log_likelihood` masks on that
-        # before evaluating anything.  So the constrained region is enforced in
-        # the target, not in the preconditioner.
+        # Per-parameter box, which is all aspire's bounds can express -- a
+        # Constraint bounds a derived quantity and has no rectangular form.
+        # Aspire uses these bounds twice: the flow's input transform logit-maps
+        # each bounded coordinate, while the default SMC preconditioning
+        # (``bounded_to_unbounded=False``) applies no logit, so the mutations
+        # step in prior coordinates.  Constraints still bind, via the log-prior
+        # below: aspire_bilby's `log_prior` is `priors.ln_prob(...)`, which
+        # returns -inf on a violation, and `_make_aspire_log_likelihood` masks
+        # on that before evaluating anything.  So the constrained region is
+        # enforced in the target, not in the preconditioner.
         prior_bounds = {key: (self.priors[key].minimum, self.priors[key].maximum) for key in parameter_names}
 
         # Only the log-prior is taken from aspire_bilby; the likelihood is our
@@ -3087,10 +3094,11 @@ class Laplace(Sampler):
         n_likelihood_evaluations = [0]
         batched_log_likelihood = self._make_aspire_log_likelihood(estimator, n_likelihood_evaluations)
 
-        # Aspire has to be told which coordinates wrap.  Without this a
-        # periodic parameter gets the bounded->logit preconditioning instead of
-        # angular treatment and the pCN kernel cannot step across the boundary
-        # -- on the HLV example that affects psi and azimuth, and psi was
+        # Aspire has to be told which coordinates wrap.  Without this the SMC
+        # preconditioning treats a periodic parameter as an ordinary bounded
+        # coordinate rather than an angle, and the pCN kernel cannot step
+        # across the boundary -- on the HLV example that affects psi and
+        # azimuth, and psi was
         # consistently the worst-recovered parameter.  Derived from the priors
         # the same way ``aspire_bilby`` derives it (``boundary == "periodic"``),
         # then restricted to sampled parameters: a marginalised periodic
