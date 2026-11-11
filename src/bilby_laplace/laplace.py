@@ -172,18 +172,20 @@ class LaplacePosteriorEstimator:
             for the MAP search (multi-start mode).
         use_unit_cube: bool
             If True (default), compute the Hessian in unit-cube space via the
-            prior CDFs. This avoids boundary clipping when the MAP is near a
-            prior edge, giving unbiased curvature estimates. In this space the
-            precision is floored at the prior precision (the variance of a
+            prior CDFs, which normalises parameter scales. Points of the
+            finite-difference stencil that fall outside the cube are clipped to
+            its edge. In this space the precision is floored at the prior precision (the variance of a
             uniform prior is 1/12) before inversion, so a noisy, indefinite, or
             non-finite curvature estimate can never yield a posterior broader
             than the prior; unconstrained directions default to prior width.
         jacobian_cap_scale: float
             Scales the Jacobian cap applied when transforming the unit-cube
-            Hessian back to parameter space. The cap is
-            ``jacobian_cap_scale / prior_width``. The default of 1.0 caps at
-            the uniform-prior Jacobian. Values < 1 apply a tighter cap,
-            widening the proposal for prior-dominated parameters.
+            Hessian back to parameter space: each parameter's Jacobian
+            ``p(theta)`` is capped at ``jacobian_cap_scale / prior_width``. The
+            default of 1.0 caps at the uniform-prior value. The cap applies to
+            any parameter whose prior density at the MAP exceeds it, whether or
+            not the likelihood constrains that parameter, and widens its
+            covariance. Values < 1 apply a tighter cap.
         hessian_kwargs: dict, optional
             Keyword arguments forwarded to ``scipy.differentiate.hessian``.
             Defaults are ``{"initial_step": 0.5}`` in parameter space and
@@ -659,8 +661,11 @@ class LaplacePosteriorEstimator:
 
         if not marg_names:
             fisher = waveform_fisher_matrix(
-                self.likelihood, self.parameter_names, base,
-                bounds=self._fisher_bounds(self.parameter_names), **self.fisher_kwargs,
+                self.likelihood,
+                self.parameter_names,
+                base,
+                bounds=self._fisher_bounds(self.parameter_names),
+                **self.fisher_kwargs,
             )
             precision = fisher + np.diag(self._prior_precision_diag(sample))
             return self._floor_precision_at_prior(precision)
@@ -1361,8 +1366,9 @@ class LaplacePosteriorEstimator:
     def get_MAP_sample(self, initial_sample=None):
         """Find the maximum a posteriori (MAP) estimate.
 
-        Maximizes log-likelihood + log-prior. By default uses differential
-        evolution, a global optimizer that searches the full prior-bounded
+        Maximizes log-likelihood + log-prior. With
+        ``minimization_method='differential_evolution'`` (the sampler's
+        default), uses that global optimizer over the full prior-bounded
         space. If ``initial_sample`` is provided, a single local minimization
         is run from that starting point.
 

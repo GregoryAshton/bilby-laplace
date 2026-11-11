@@ -28,9 +28,13 @@ samples have been drawn with acceptance below 1%.
 
 ## SMC
 
-`resample="smc"` hands the Laplace Gaussian to aspire as a `prior_flow` and runs an
-SMC sampler that iteratively refines samples toward the true posterior. This is the
-most robust choice for non-Gaussian posteriors. Configuration is passed through
+`resample="smc"` seeds [aspire](https://github.com/bilby-dev/aspire) from the
+Laplace proposal: a normalising flow is trained on proposal draws (or, with
+`smc_prior_flow="laplace"`, the Laplace mixture is used directly) and aspire's
+posterior sampler anneals from it toward the true posterior. Choose the sampler
+with `smc_kwargs["sampler"]`; the default is aspire's `"importance"`, and an
+SMC-family sampler such as `"smc"` or `"minipcn_smc"` is needed for annealing,
+checkpointing and progress reporting. Configuration is passed through
 `smc_kwargs`:
 
 ```python
@@ -38,7 +42,7 @@ result = bilby.run_sampler(
     likelihood=likelihood, priors=priors, sampler="laplace",
     resample="smc",
     smc_kwargs=dict(
-        sampler="importance",      # aspire posterior sampler
+        sampler="smc",             # aspire posterior sampler (default "importance")
         n_initial_samples=1000,    # drawn from the Laplace proposal, passed to fit()
         n_samples=5000,            # SMC particle count (drives cost; = size of final posterior)
     ),
@@ -50,15 +54,23 @@ Any additional keys in `smc_kwargs` are forwarded directly to
 
 ### Multimodal posteriors
 
-With `resample="smc"` and `n_modes > 1`, the optimiser restarts from multiple prior
-draws (Latin hypercube), distinct MAP estimates are deduplicated by a 3-sigma
-separation, and they are combined into an equal-weight Gaussian mixture used as the
-SMC starting distribution. `mode_search_nsamples` controls how many prior draws are
-evaluated when searching for secondary modes.
+With `n_modes > 1`, secondary modes are searched for after the MAP and combined
+with it into a mixture proposal, which every resampling method then draws from
+(`resample=None` returns draws from the primary mode only):
 
-The mixture reaches aspire through the initial particle cloud, which is drawn in
-equal shares from a truncated Gaussian per mode. Aspire has no argument for a
-proposal distribution: `sample_posterior()` uses whichever flow `fit()` trained as
-its `prior_flow`, and `fit()` is trained on that cloud. Seed the cloud from one
-mode and the annealing path starts unimodal regardless of how many modes were
-found, so the stratification is what makes `n_modes > 1` do anything at all.
+- `mode_searches` chooses the searches: `"hypercube"` (Latin hypercube prior
+  draws, `mode_search_nsamples` of them, optionally restricted to
+  `mode_search_subspace`, ranked and then polished by a local optimiser),
+  `"symmetric"` (the modes implied by `mode_symmetries`, e.g.
+  `[("delta_phase", np.pi)]`), `"symmetric-polish"` and `"multistart"`.
+  The default is `("hypercube", "symmetric")`.
+- Candidates closer than `mode_separation_sigma` (default 3) primary-mode
+  sigmas to a known mode in every parameter are treated as duplicates.
+- `mode_weights` sets the component weights: `"equal"` (default) or
+  `"laplace"`, the Laplace evidence of each mode.
+
+For SMC, the mixture reaches aspire through the initial particle cloud, which
+is drawn from each mode in proportion to its weight (every mode gets at least
+one particle); with the default `smc_prior_flow="learned"`, aspire's flow is
+trained on that cloud. `smc_prior_fraction` reserves a fraction of the cloud
+for draws from the prior.

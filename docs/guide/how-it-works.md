@@ -17,8 +17,8 @@ they seed the search.
 The default route (`fisher_method="hessian"`) finite-differences the
 log-posterior with `scipy.differentiate.hessian` (scipy ≥ 1.15) and inverts the
 result to obtain the proposal covariance. With `use_unit_cube=True` (default) the
-Hessian is computed in unit-cube space via the prior CDFs, which avoids boundary
-clipping when the MAP sits near a prior edge.
+Hessian is computed in unit-cube space via the prior CDFs, which normalises the
+parameter scales.
 
 Before inversion the precision matrix is **diagonally preconditioned** (rescaled to
 near-unit diagonal), which removes scale-driven ill-conditioning, and small or
@@ -34,11 +34,17 @@ genuine Fisher matrix from waveform derivatives. See
 
 ## 3. Proposal construction
 
-A per-marginal **truncated Gaussian** proposal is built and clipped to the prior
-bounds. Every draw therefore lands inside the prior support, even when the Gaussian
-is much wider than the prior — eliminating wasted likelihood evaluations on
-out-of-bounds samples. Off-diagonal correlations are recovered through the
-likelihood during resampling.
+The Gaussian is turned into a proposal restricted to the prior bounds, so every
+draw lands inside the prior support. `proposal_covariance` selects how:
+`"diagonal"` draws each parameter independently from a truncated normal with its
+marginal width (off-diagonal correlations are recovered through the likelihood
+during resampling); `"full"` draws the full correlated Gaussian and discards draws
+outside the prior box. The default is `"full"` for `resample="inprior"` and
+`"diagonal"` otherwise.
+
+With `n_modes > 1`, secondary modes are searched for and the proposal is a
+mixture with one such component per mode (see
+[Multimodal posteriors](resampling.md#multimodal-posteriors)).
 
 ## 4. Batched sampling
 
@@ -61,5 +67,5 @@ The Laplace log-evidence
               + \tfrac{d}{2}\log(2\pi) + \tfrac{1}{2}\log\det\Sigma
 \]
 
-is always available. Rejection sampling and SMC additionally provide independent
-evidence estimates with uncertainties.
+is always available. Rejection, importance sampling and SMC additionally provide
+independent evidence estimates with uncertainties.

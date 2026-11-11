@@ -23,8 +23,8 @@ print(result.meta_data["run_statistics"])
 
 - `result.posterior` — a `pandas.DataFrame` of posterior samples.
 - `result.log_evidence` / `result.log_evidence_err` — the evidence estimate. The
-  Laplace evidence is always computed; `resample="rejection"` and `resample="smc"`
-  add independent estimates.
+  Laplace evidence is always computed; `resample="rejection"`, `"importance"` and
+  `"smc"` add independent estimates.
 - `result.meta_data["run_statistics"]` — efficiency, number of likelihood
   evaluations, sampling time, and the Laplace log-evidence.
 

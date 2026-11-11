@@ -443,65 +443,68 @@ class Laplace(Sampler):
     resample : str or None
         Resampling method: ``'rejection'`` (default), ``'importance'``, ``'inprior'``,
         ``'smc'``, ``'emcee'``, or ``None`` / ``'None'`` to skip resampling and return
-        raw Laplace-approximation samples.
-    npool : int
+        raw Laplace-approximation samples drawn from the primary-mode Gaussian.
+    seed : int or None
+        Random seed. Pass it as bilby's ``sampling_seed`` (or ``random_seed``),
+        which bilby routes here and uses to reseed its own generator. ``None``
+        (default) draws from OS entropy.
+    npool : int or None
         Number of processes for parallel likelihood evaluation (bilby standard
-        argument, default 1; the aliases ``n_pool``, ``cores``, ``threads`` and
-        ``queue_size`` are accepted too). When ``> 1``, every batch of
-        likelihood evaluations is spread across a ``multiprocessing.Pool``: the
-        proposal batches in the rejection / importance / inprior loops, and the
+        argument; the aliases ``n_pool``, ``cores``, ``threads`` and
+        ``queue_size`` are accepted too). Default None (serial). When ``> 1``,
+        every batch of likelihood evaluations is spread across a
+        ``multiprocessing.Pool``: the MAP search's population, the proposal
+        batches in the rejection / importance / inprior loops, and the
         per-iteration batches aspire requests under ``resample='smc'``. Drawing
         and accept/reject decisions stay in the main process, so a pooled run is
         numerically identical to a serial one. Only worthwhile when a single
         likelihood evaluation is expensive relative to inter-process overhead.
         Alternatively pass a pre-built ``pool`` object.
     target_nsamples : int
-        Target number of posterior samples.
+        Target number of posterior samples (default 10000).
     batch_nsamples : int
         For methods that draw samples in batches, this specifies the number of
-        samples drawn per batch from the proposal distribution.
+        samples drawn per batch from the proposal distribution (default 1000).
     prior_nsamples : int
-        Number of prior draws used in the MAP search (multi-start mode).
+        Number of prior draws used in the MAP search (multi-start mode,
+        default 100).
+    max_iterations : int
+        Proposal draws after which a batched resampling run (rejection /
+        importance / inprior) stops if its acceptance is below 1% (default
+        1e6). Raises ``SamplerError`` or logs, according to ``fail_on_error``.
     minimization_method : str
         Optimization method. Default is ``'differential_evolution'`` (global
-        optimizer; recommended for real data). Set to ``'Nelder-Mead'`` to use
-        a multi-start local optimizer instead.
+        optimizer). Set to ``'Nelder-Mead'`` to use a multi-start local
+        optimizer instead.
     map_restarts : int
-        Independent ``differential_evolution`` restarts in the MAP search, the
-        highest-log-posterior one kept. Default 4; 1 restores the single-shot
-        behaviour. ``differential_evolution`` is not reliable on a GW
-        log-posterior at this dimension -- on GW150914 it returned a MAP in the
-        wrong mode on 25 of 100 seeds -- and because ``mode_search_subspace``
-        pins secondary candidates at the primary, a wrong primary is inherited
-        by the whole mixture. Restarts are the cheapest repair measured: 25% ->
-        0.4% failures at k=4, which at matched cost beats raising ``popsize``
-        (15%) or tightening the tolerance (24%). Ignored unless
+        Number of independent ``differential_evolution`` runs in the MAP
+        search; the one with the highest log-posterior is kept. Default 4.
+        Restarts guard against the optimiser converging to a secondary mode,
+        which would otherwise also be inherited by the mode search (see
+        ``mode_search_subspace``). Ignored unless
         ``minimization_method='differential_evolution'`` and no
         ``use_injection_for_map`` seed is given.
     map_vectorized : bool
         If True (default), hand ``differential_evolution`` its whole population
-        at once so the MAP search uses ``npool``. The MAP search was previously
-        serial regardless of ``npool``, which is what made restarts look
-        expensive. scipy switches to deferred population updating when this is
-        set, so the search trajectory differs from a non-vectorized run; it does
-        *not* differ between a pooled and a serial run, which is the invariant
-        that matters. Set False to reproduce pre-restart MAP results exactly.
+        at once so the MAP search uses ``npool``. scipy switches to deferred
+        population updating when this is set, so the search trajectory differs
+        from a non-vectorized run; it does not differ between a pooled and a
+        serial run.
     map_spike_guard : bool
-        If True (default), test every MAP candidate -- each restart, and a
-        ``use_injection_for_map`` polish -- for a needle spike: a point standing
-        more than a nat above its neighbours ``map_spike_delta`` away along some
-        unit-cube axis, both as measured and once the peak's own curvature is
-        removed (by comparing offsets of delta and 2 delta). Spikes are dropped from the best-of-
-        restarts selection, with a warning; if every candidate is one, the point
-        beside the best is used instead. IMRPhenomXPHM's SpinTaylor precession
-        angles leave such spikes (5 of 400 MAP restarts on GW150914 ended on
-        one); a sampler never lands on them, but an optimiser keeps them, and
-        best-of-restarts selection prefers them. Where nothing is flagged the
-        result is unchanged, at a cost of ``4 * N`` evaluations per candidate.
-        The mode search's own polishes are not guarded.
+        If True (default), test every MAP candidate -- each restart, a
+        ``use_injection_for_map`` polish, and each local polish in the mode
+        search -- for a needle spike: a point standing more than a nat above
+        its neighbours ``map_spike_delta`` away along some unit-cube axis, both
+        as measured and once the peak's own curvature is removed (by comparing
+        offsets of delta and 2 delta). Spikes are dropped from the
+        best-of-restarts selection, with a warning; if every candidate is one,
+        the point beside the best is used instead. Such spikes can come from
+        numerical artefacts in a waveform model; a sampler does not land on
+        them, but an optimiser can. Where nothing is flagged the result is
+        unchanged, at a cost of ``4 * N`` evaluations per candidate.
     map_spike_delta : float
         Neighbour offset of the spike test, in the unit cube (default 1e-3).
-        It must exceed the spikes' widths (measured up to ~2e-4). The peak's
+        It must exceed the width of the spikes to be detected. The peak's
         curvature is removed, so a narrow posterior does not trip the test.
     plot_diagnostic : bool
         If True, produce a corner diagnostic plot after resampling.
@@ -556,7 +559,7 @@ class Laplace(Sampler):
             result = bilby.run_sampler(
                 ..., sampler="laplace", sampling_cov=(parameter_names, C)
             )
-    proposal_covariance : str
+    proposal_covariance : str or None
         How the Laplace Gaussian is turned into the proposal every resampling
         method draws from (``inprior``'s output, ``rejection`` and
         ``importance``'s proposal, ``smc``'s initial cloud, ``emcee``'s
@@ -575,11 +578,9 @@ class Laplace(Sampler):
         ``None`` (default) picks by what the proposal is *for*. ``inprior``
         returns the proposal as the posterior, so it gets ``'full'``, the
         Laplace approximation itself. Every other method uses the proposal as
-        a seed that is then corrected, and there ``'diagonal'`` is the better
-        one: wider than the target in most directions, which is what
-        importance weights and a tempering schedule need. On six BNS
-        injections ``smc`` reached the same posterior from either start, at
-        1.1-1.9x the likelihood calls from ``'full'``. ``inprior`` with
+        a seed that is then corrected, and there ``'diagonal'`` is used: it is
+        wider than the target in most directions, which is what importance
+        weights and a tempering schedule need. ``inprior`` with
         ``prior_parameters`` falls back to ``'diagonal'``, with a log message.
         The choice made is recorded in ``meta_data["proposal_covariance"]``.
     fisher_method : str
@@ -587,13 +588,27 @@ class Laplace(Sampler):
         finite-differences the scalar log-posterior. ``'waveform'`` builds the
         genuine Fisher matrix from gravitational-wave waveform derivatives
         (positive semi-definite by construction). Requires a
-        ``GravitationalWaveTransient``-like likelihood without marginalisation
-        and not a reduced-order (ROQ / relative-binning / multi-band) variant;
-        it works directly in parameter space, so ``use_unit_cube`` and
-        ``jacobian_cap_scale`` are ignored.
+        ``GravitationalWaveTransient``-like likelihood without calibration
+        marginalisation; ROQ and multi-banded likelihoods are refused, while
+        relative binning is supported (the Fisher is built on the full
+        frequency grid). It works directly in parameter space, so
+        ``use_unit_cube`` and ``jacobian_cap_scale`` are ignored.
     fisher_kwargs : dict or None
         Keyword arguments forwarded to the waveform-Fisher computation when
         ``fisher_method='waveform'`` (recognised keys: ``eps``, ``eps_mass``).
+    use_unit_cube : bool
+        If True (default), compute the Hessian in unit-cube coordinates (via
+        the prior CDFs) and floor the precision at the prior precision. If
+        False, compute it directly in parameter space.
+    jacobian_cap_scale : float
+        Unit-cube Hessian path only. When mapping the unit-cube precision back
+        to parameter space, the Jacobian ``p(theta)`` of each parameter is
+        capped at ``jacobian_cap_scale / prior_width`` (default 1.0, the
+        uniform-prior value). Values below 1 widen the covariance of every
+        parameter where the cap applies.
+    hessian_kwargs : dict or None
+        Keyword arguments forwarded to ``scipy.differentiate.hessian`` (e.g.
+        ``initial_step``, ``step_factor``, ``maxiter``).
     use_injection_for_map : bool
         If True and injection_parameters are set, use them as the starting
         point for the MAP search, and (with ``fisher_method='waveform'`` on a
@@ -604,83 +619,57 @@ class Laplace(Sampler):
         If True, raise SamplerError when sampling fails; otherwise just log.
     n_modes : int
         Number of distinct posterior modes to search for.  When ``n_modes > 1``
-        the optimiser is restarted from multiple prior draws and the distinct
-        MAP estimates are combined into a Gaussian mixture proposal.  Modes are
-        deduplicated by requiring a normalised separation of at least
+        the searches in ``mode_searches`` propose secondary modes, and the
+        distinct MAP estimates are combined into a Gaussian mixture proposal.
+        Modes are deduplicated by requiring a normalised separation of at least
         ``mode_separation_sigma`` in some parameter.  Default is 1 (single
-        Gaussian, original behaviour).
+        Gaussian).
 
-        The mixture is the proposal for **every** value of ``resample``:
+        The mixture is the proposal for every resampling method:
         ``inprior`` draws from it, ``rejection`` and ``importance`` weight
-        against its density, and ``smc`` seeds its cloud from it.  Until
-        2026-08 the search ran inside the SMC branch only, so an ``inprior``
-        run silently used a single Gaussian on the primary MAP however many
-        modes were asked for -- which made the cheap methods incomparable with
-        SMC on any multi-modal problem.  Results produced before that change
-        cannot be read as multi-mode except for ``resample='smc'``.
+        against its density, and ``smc`` and ``emcee`` seed from it.
+        ``resample=None`` returns draws from the primary-mode Gaussian only.
 
         ``n_modes <= 1`` skips mode-finding entirely, including
-        ``mode_symmetries`` -- there is no way to keep a symmetry-implied mode
-        while disabling the stochastic search with ``n_modes`` alone. Use
-        ``mode_searches`` for that; ``n_modes`` still has to be at least 2 to
-        reach it, since it is what tells ``_build_proposal`` a mixture is
-        wanted at all.
+        ``mode_symmetries``. To keep only symmetry-implied modes, set
+        ``n_modes >= 2`` and restrict ``mode_searches``.
     mode_searches : tuple of str
-        Which of the two ways to find secondary modes are used, when
-        ``n_modes > 1``: ``'hypercube'`` (the stochastic multi-start search
-        described under ``n_modes``) and ``'symmetric'`` (seeding the modes
-        implied by ``mode_symmetries``, see ``_symmetry_candidates``).  Default
-        ``('hypercube', 'symmetric')`` runs both, matching every prior
-        behaviour.  A third, ``'multistart'``, is available but off by default
-        -- see ``mode_multistart_nstarts``.  Unknown entries raise
+        Which searches propose secondary modes when ``n_modes > 1``. Default
+        ``('hypercube', 'symmetric')``. Unknown entries raise
         ``SamplerError``.
 
-        A fourth, ``'symmetric-polish'``, is ``'symmetric'`` plus a rescue for
-        the mirrors it would otherwise discard: one whose log-posterior falls
-        further than ``mode_symmetry_tol`` below its source is used as a
-        *starting point* for a full-space local optimisation instead of being
-        thrown away, and the polished optimum competes for a slot like any
-        other candidate.  Enabling it implies ``'symmetric'`` -- there is no
-        need to list both.  Off by default because it costs an optimisation
-        plus a Hessian per rescued mirror; capped by
-        ``mode_symmetry_polish_max``.  Use it when a declared symmetry is
-        expected to be *approximate*: higher-order waveform content perturbs an
-        exactly-periodic coordinate rather than removing the second lobe, so the
-        mirrored lobe has moved rather than vanished, and the mirror is still
-        the right place to start looking for it.
+        - ``'hypercube'``: evaluate ``mode_search_nsamples`` Latin hypercube
+          prior draws (optionally restricted to ``mode_search_subspace``), rank
+          them by log-posterior, and polish the best with a local optimiser.
+        - ``'symmetric'``: seed the modes implied by ``mode_symmetries``.
+        - ``'symmetric-polish'``: ``'symmetric'``, plus a mirror whose
+          log-posterior falls further than ``mode_symmetry_tol`` below its
+          source is used as the starting point for a full-space local
+          optimisation instead of being discarded; the polished optimum
+          competes for a slot like any other candidate. Implies
+          ``'symmetric'``. Each rescued mirror costs an optimisation and a
+          Hessian; capped by ``mode_symmetry_polish_max``. Useful when a
+          declared symmetry is approximate, so the mirrored mode has moved
+          rather than vanished.
+        - ``'multistart'``: polish ``mode_multistart_nstarts`` random prior
+          draws with a full-space local optimiser and rank the results
+          afterwards (see ``mode_multistart_nstarts``).
 
-        Exists because the two searches can fail independently in opposite
-        directions.  On a precessing-BBH example most of whose parameters are
-        essentially unconstrained by the data (post/prior sigma ratio above
-        0.7 for 6 of 13 sampled parameters), the *stochastic* search kept
-        finding shallow local maxima that are geometry noise rather than
-        physical modes -- one, 2.76 nats below the primary MAP and holding
-        under 1% of the posterior mass by an independent reference, took 70%
-        of the proposal weight under ``mode_weights='laplace'`` -- while the
-        ``delta_phase`` symmetry on the same problem is essential:
-        without it the run samples one lobe of two.  Neither problem is fixed
-        by re-weighting the mixture (measured: every re-weighting scheme tried
-        left the stochastic search's damage in place, because the damage is
-        which points enter the mixture, not how they are weighted once they
-        are in it). ``mode_searches=['symmetric']`` is the fix: it removes the
-        harmful search while keeping the essential one. On that example it
-        recovered every parameter distorted by the stochastic search (one
-        thirteen-parameter worst-case JSD-to-reference dropped from 12.4 to
-        3.2 millibits) at lower cost (no Latin-hypercube evaluations), with
-        only the symmetry-covered coordinate (correctly) unaffected.
+        The stochastic and symmetry searches can be enabled independently,
+        e.g. ``mode_searches=['symmetric']`` keeps symmetry-implied modes
+        without the Latin hypercube search.
     mode_search_nsamples : int
-        Number of prior draws used when searching for secondary modes
+        Number of prior draws used by the ``'hypercube'`` search
         (``n_modes > 1``).  Higher values make mode discovery more
         reliable in high-dimensional spaces, at the cost of more
         likelihood evaluations.  Uses Latin hypercube sampling for
         even coverage.  Default is 500.
     mode_search_subspace : list of str or None
-        Restrict the search for secondary modes to these parameters, holding
-        the rest at the primary MAP (the polish step still runs in the full
-        space, so a candidate is free to move afterwards).  Use it when the
-        degeneracy lives in known coordinates: a narrow mode is undiscoverable
-        by a Latin hypercube over the full space -- a sky mode a few 0.01 rad
-        across is ~1e-4 of the sky -- but the same budget covers two or three
+        Restrict the ``'hypercube'`` search to these parameters, holding the
+        rest at the primary MAP (the polish step still runs in the full space,
+        so a candidate is free to move afterwards).  Use it when the
+        degeneracy lives in known coordinates: a narrow mode occupies a tiny
+        fraction of the full space, but the same budget covers two or three
         named dimensions densely.  For a GW sky reflection, for example,
         ``["zenith", "azimuth"]``.  Default None (search all parameters).
     smc_prior_flow : str
@@ -691,140 +680,81 @@ class Laplace(Sampler):
 
         ``"learned"`` (default) is aspire's own behaviour -- train a normalising
         flow on samples drawn from the Laplace proposal and use that.
-        ``"laplace"`` hands aspire the Laplace mixture itself, so ``log q`` is
-        analytic and exactly the proposal we constructed, mode weights
-        included, and flow training stops being a source of run-to-run scatter.
-
-        **Measured substantially worse on a precessing-BBH example** than the
-        trained flow, on both divergence-from-reference and tempering-schedule
-        length. The reason is not that the mixture is Gaussian: it is that
-        :class:`GaussianMixtureFlow` is built on plain ``multivariate_normal``
-        and so is *unbounded*, while the trained flow inherits aspire's logit
-        transform on bounded coordinates and so puts no mass outside the prior
-        box. Periodicity is not what separates them: aspire builds the flow's
-        input transform without the periodic parameters, so the trained flow
-        treats a periodic coordinate as bounded (logit) rather than wrapped,
-        and only the SMC preconditioning treats it as an angle. On an example
-        with a mode sitting on the ``phi_12`` boundary, the unbounded mixture
-        makes ``log q`` wrong exactly where ``(1 - beta) log q`` dominates.
-
-        A useful analytic prior flow would need a correlated mixture that is
-        also truncated (and, ideally, wrapped on periodic coordinates).
-        Neither existing class is that:
-        :class:`GaussianMixtureFlow` keeps correlations but ignores the
-        boundaries, and :class:`TruncatedMVNProposal` respects them but is
-        diagonal, which discards the correlation structure a degenerate
-        posterior lives in. Use ``"learned"`` until one exists.
+        ``"laplace"`` hands aspire the Laplace mixture itself
+        (:class:`GaussianMixtureFlow`), so ``log q`` is analytic and exactly
+        the proposal constructed here, mode weights included. That mixture is
+        built on plain ``multivariate_normal`` and so is *unbounded*: it puts
+        mass outside the prior box, whereas the learned flow uses aspire's
+        logit transform on bounded coordinates. Prefer ``"learned"``.
     mode_symmetries : list of (str, float) or None
         Symmetries of the posterior, as ``(parameter, shift)`` pairs, used to
         seed the modes they imply instead of relying on the random multi-start
         search to rediscover them. For a posterior that is pi-periodic in
         ``delta_phase``, pass ``[("delta_phase", np.pi)]``. Requires
-        ``n_modes > 1``, which is what builds a mixture at all. Default None.
+        ``n_modes > 1``. Default None.
 
         The symmetry need not be *exact*. Each implied mode is verified by
         evaluating the log-posterior at the mirrored point, and seeded when it
-        comes within ``mode_symmetry_tol`` of the mode it mirrors -- so an
-        approximate symmetry still contributes, weighted by how well it
-        actually holds, while one declared for a problem that does not have it
-        is skipped. Declaring a wrong symmetry remains safe.
+        is within ``mode_symmetry_tol`` of the mode it mirrors -- so an
+        approximate symmetry still contributes, while one declared for a
+        problem that does not have it is skipped.
     mode_symmetry_tol : float or None
-        How many nats a symmetry-implied mode's log-posterior may fall below
-        the mode it mirrors and still be seeded. The mirror reuses its source's
-        covariance, so under ``mode_weights="laplace"`` an offset of ``d``
-        means the mirror takes a share ``exp(-d)`` of the pair -- this is
-        therefore a floor on how much posterior mass a symmetry-implied mode
-        must carry to be worth having. ``None`` (default) derives it from the
-        same threshold used to discard negligible mixture components, giving
-        ``-log(1e-3)`` ~ 6.9 nats: anything below that would be dropped by the
-        weighting anyway. Set ``0`` to demand an exact symmetry.
+        Largest difference, in nats, between a symmetry-implied mode's
+        log-posterior and that of the mode it mirrors for the mirror to be
+        seeded (the test is on the absolute difference). The mirror reuses its
+        source's covariance, so under ``mode_weights="laplace"`` an offset of
+        ``d`` gives the lower of the pair a share ``exp(-d)``. ``None``
+        (default) uses ``-log(1e-3)``, the same threshold used to discard
+        negligible mixture components. Set ``0`` to demand an exact symmetry.
 
-        That reasoning holds only because the mirror is *not* polished. Under
-        ``mode_searches`` entry ``'symmetric-polish'`` this stops being a gate
-        and becomes a covariance-reuse switch: within the tolerance a mirror is
-        seeded directly and inherits its source's curvature, outside it the
-        mirror is polished and pays for its own Hessian, so the offset measured
-        at the unpolished point no longer fixes its weight.
+        Under ``'symmetric-polish'``, a mirror outside the tolerance is
+        polished (and gets its own Hessian) rather than discarded.
     mode_symmetry_polish_max : int or None
-        Maximum number of broken mirrors ``'symmetric-polish'`` will polish in
-        one mode search; ``None`` (default) uses 4, and ``<= 0`` disables the
+        Maximum number of mirrors ``'symmetric-polish'`` will polish in one
+        mode search; ``None`` (default) uses 4, and ``<= 0`` disables the
         rescue while leaving plain ``'symmetric'`` seeding intact. Ignored
-        unless ``'symmetric-polish'`` is in ``mode_searches``.
-
-        A cap is needed because mirrors are proposed for the primary *and*
-        every candidate the other searches turned up, so the number of
-        candidates to polish scales with the pool size times the number of
-        declared symmetries, and each costs a full-space optimisation (~1.6k
-        likelihood evaluations on the GW240615 example) plus a Hessian if it
-        wins a slot. Sources are tried in the order the pool holds them, which
-        puts the primary mode's mirror first.
+        unless ``'symmetric-polish'`` is in ``mode_searches``. Mirrors are
+        proposed for the primary and every candidate the other searches
+        found, in that order, so the primary mode's mirror is tried first.
     mode_multistart_nstarts : int or None
         Number of random prior draws used by the ``'multistart'`` entry of
         ``mode_searches``; ``None`` (default) uses 10, and ``<= 0`` skips the
         search. Each start is polished by a *full-space* local optimisation and
-        the results are ranked only afterwards.
-
-        That ordering is the whole point, and the difference from
-        ``'hypercube'``: that search ranks its Latin hypercube points by
-        log-posterior *before* polishing, so a mode whose basin is shallow where
-        you land but deep where it leads is discarded before it is ever
-        followed. Measured on GW150914, whose face-on solution needs a
-        correlated move across all thirteen sampled coordinates, that mode is
-        24-51 nats down when reached by freeing any subset of coordinates and
-        37 nats down under a ``theta_jn`` reflection -- unreachable by
-        ``mode_search_subspace`` or ``mode_symmetries`` at any setting -- yet a
-        plain local optimisation from a random prior draw lands in that *region*
-        23% of the time (17 of 73 constraint-satisfying starts).
-
-        **The candidates it produces are not usable, however**, and the "within
-        ~1 nat of its peak" this docstring used to claim does not survive
-        measurement. Over those 73 starts the best result sits 2.7 nats below
-        the face-on peak and the median sits ~130 nats below anything; 1 of 73
-        comes within 5 nats of the best point known. Neither more budget nor a
-        better-conditioned parameterisation repairs it: lifting scipy's
-        ``200 * ndim`` cap by 19x moved the median result 0.02 nats, and
-        polishing in unit-cube coordinates was 39 better against 34 worse.
-        Nelder-Mead from a random prior draw in 13 dimensions converges a long
-        way short of any optimum on this surface. See `bilby-laplace-paper`'s
-        ``map_study``.
-
-        This only supplies *secondary* modes; the primary still comes from
-        ``minimization_method``'s global optimiser. Differential evolution
-        remains the better optimiser for that (-4969.26 against multi-start's
-        -4971.56 on the same example), so this supplements it rather than
-        replacing it.
+        the results are ranked only afterwards. Unlike ``'hypercube'``, which
+        ranks its points *before* polishing, this can follow a basin that is
+        shallow at the starting point. Local optimisation from a random start
+        may converge well short of the mode's peak in high dimensions. It only
+        supplies secondary modes; the primary still comes from
+        ``minimization_method``.
     mode_separation_sigma : float
         How far apart two modes must be, in units of the primary mode's
-        per-parameter sigma, to count as distinct.  A candidate closer than this
-        to a known mode is skipped before polishing, and a polished candidate
-        closer than this is discarded as a duplicate.  Default 3.0.
+        per-parameter sigma (after ``cov_scaling``), to count as distinct.  A
+        candidate closer than this to a known mode is skipped before
+        polishing, and a polished candidate closer than this is discarded as a
+        duplicate.  Default 3.0.
 
-        Lower it when a real secondary mode sits close to the primary -- e.g. a
-        sky-position mode only a few sigma away in some coordinates -- since at
-        the default such a mode is rejected as a duplicate and the search keeps
-        a distant sidelobe instead.  Raise it if one broad mode is
-        being split into several.  This is deliberately per-run rather than a
-        new default -- the right value depends on how well separated the
-        posterior's modes are, which is the thing being discovered.
+        Lower it when a real secondary mode sits close to the primary, since
+        at the default such a mode is rejected as a duplicate.  Raise it if one
+        broad mode is being split into several.
     mode_weights : str
         How to weight the mixture components when ``n_modes > 1``.  ``'equal'``
         (default) gives every mode the same weight.  ``'laplace'`` weights each
         by its Laplace local evidence -- log-posterior at the mode plus half the
         log-determinant of its covariance -- so a broad shallow mode can outweigh
-        a narrow tall one, which weighting by peak height alone would not
-        capture.  The weights set the mixture component weights, and hence how
-        every resampling method draws: the share of ``inprior`` draws from each
-        mode, the density ``rejection``/``importance`` weight against, and the
-        share of the initial SMC cloud.  Every mode keeps at least one particle
-        in the SMC cloud regardless.
+        a narrow tall one.  The weights set the mixture component weights, and
+        hence how every resampling method draws: the share of ``inprior`` draws
+        from each mode, the density ``rejection``/``importance`` weight
+        against, and the share of the initial SMC cloud.  Every mode keeps at
+        least one particle in the SMC cloud regardless.
     smc_kwargs : dict or None
         Configuration for SMC sampling (only used when ``resample='smc'``).
         Recognised keys:
 
         ``sampler`` : str
             Aspire posterior sampler: ``'importance'`` (default), ``'smc'``,
-            or any other strategy accepted by
-            ``aspire.Aspire.sample_posterior``.
+            ``'minipcn_smc'``, or any other strategy accepted by
+            ``aspire.Aspire.sample_posterior``. Checkpointing and the
+            progress callback apply only to SMC-family samplers.
         ``n_initial_samples`` : int
             Number of initial samples drawn from the Laplace proposal and
             passed to ``aspire.fit()`` (default 1000).
@@ -851,15 +781,14 @@ class Laplace(Sampler):
         ``nwalkers`` : int
             Number of ensemble walkers. Defaults to ``max(4 * ndim, 32)``.
 
-            Worth choosing deliberately: an autocorrelation-time estimate is
-            only trustworthy once the chain is ~50 tau long, and at that point
-            the run already holds ``50 * nwalkers`` independent samples. Any
-            ``nwalkers`` much above ``target_nsamples / 50`` therefore *cannot*
-            stop near the target and will oversample by that ratio (a warning
-            is logged). ``nwalkers ~= target_nsamples / 50`` makes the two
-            conditions coincide, which is the cheapest place to sit -- bounded
-            below by needing enough walkers to keep the likelihood pool busy,
-            since each half-ensemble move evaluates ``nwalkers / 2`` points.
+            An autocorrelation-time estimate is only trusted once the chain is
+            ``autocorr_tol`` tau long, at which point the run already holds
+            ``autocorr_tol * nwalkers`` independent samples. An ``nwalkers``
+            much above ``target_nsamples / autocorr_tol`` therefore oversamples
+            the target (a warning is logged); ``nwalkers ~= target_nsamples /
+            autocorr_tol`` makes the two conditions coincide. Each
+            half-ensemble move evaluates ``nwalkers / 2`` points, which bounds
+            how many workers a pool can keep busy.
         ``nsteps`` : int
             Steps per batch, and the length of the first batch. Default 5000.
             Sets the granularity of the convergence check: the check costs no
@@ -871,8 +800,7 @@ class Laplace(Sampler):
             with too few samples logs a warning rather than failing.
         ``target_nsamples`` : int
             Independent samples to collect before stopping. Defaults to the
-            sampler-wide ``target_nsamples``, matching every other resampling
-            mode.
+            sampler-wide ``target_nsamples``.
         ``discard`` : int
             Number of leading steps discarded as burn-in before flattening the
             chain. Default ``nsteps // 2``. Fixed across batches (burn-in does
@@ -880,34 +808,26 @@ class Laplace(Sampler):
         ``autocorr_tol`` : float
             How many autocorrelation times the post-burn-in chain must span
             before its tau estimate is trusted. Default 50 (emcee's own
-            ``tol``), which is conservative -- ~10 already gives a usable if
-            low-biased estimate. Lowering it shortens a slow-mixing run
-            considerably at the cost of a weaker guarantee, so the achieved
-            chain-length/tau ratio is logged every batch and a warning is
-            issued when the value is below emcee's own bar. Note this also
-            rescales the useful walker count (see ``nwalkers``).
+            ``tol``). The achieved chain-length/tau ratio is logged every
+            batch, and a warning is issued when it is below emcee's own bar.
         ``backend_file`` : str, bool, or None
             Persist the full un-thinned chain to HDF5 via
             ``emcee.backends.HDFBackend``. ``True`` writes
             ``{outdir}/{label}_emcee_chain.h5``, a string is used as the path,
             and ``None`` (default) keeps it off. The returned samples are
-            thinned, so this is the only copy of the raw chain -- worth having
-            for analysis the run itself cannot do, above all re-estimating tau
-            at several ``discard`` values, which distinguishes a tau measuring
-            leftover burn-in drift from a genuinely slow mode. The file holds
-            ``nwalkers * nsteps * ndim`` floats, so it is large for a long run,
-            and any chain already in it is cleared at startup.
+            thinned, so this is the only copy of the raw chain (useful, e.g.,
+            for re-estimating tau at several ``discard`` values). The file
+            holds ``nwalkers * nsteps * ndim`` floats, and any chain already in
+            it is cleared at startup.
         ``thin`` : int, optional
             Fixed thinning factor. If omitted (default), the post-burn-in
             chain is thinned automatically by the estimated integrated
             autocorrelation time (the largest across parameters), so the
-            returned samples are approximately independent -- matching every
-            other resampling mode, and what the comparison metrics (JSD/EMD
-            against a reference sampler) assume of their input.
+            returned samples are approximately independent.
 
         Any other keys are forwarded to ``emcee.EnsembleSampler``. Walkers are
         seeded from the Laplace proposal via the same in-prior draw used to seed
-        SMC's initial cloud (:meth:`_draw_inprior_samples`).
+        SMC's initial cloud.
     smc_progress : bool
         If True (default) and ``resample='smc'`` with an SMC-family sampler,
         register a per-iteration callback that logs a one-line progress summary
@@ -924,29 +844,17 @@ class Laplace(Sampler):
         ``plot_diagnostic=True``, which is also what gates the final render.
     smc_prior_fraction : float
         Fraction of SMC's *initial cloud* drawn straight from the prior rather
-        than from the Laplace mixture, in ``[0, 1)``. Default ``0.0`` (off), so
-        no existing run changes.
+        than from the Laplace mixture, in ``[0, 1)``. Default ``0.0`` (off).
 
-        The mixture can only seed SMC where the mode search looked. A mode
-        requiring a *correlated* move across many coordinates is unreachable by
-        a search built on coordinate-pinned candidates, and covariance inflation
-        does not substitute for finding it: widening marginals independently
-        scatters draws across each axis instead of along the ridge. Measured on
-        GW150914, inflating ``theta_jn``/``a_2``/``phi_jl`` enough to cover an
-        8.2-sigma offset put 12 of 3000 draws in the right region, none with
-        usable weight (18 nats below its peak), and cut the cloud's effective
-        sample size to 2.4 of 3000.
-
-        Prior draws sidestep that because SMC begins at ``beta ~ 0``, where the
-        target is the prior: such a particle carries ordinary weight at the
-        first iteration and need only survive until the tempering schedule
-        reaches a ``beta`` that resolves the mode. It is how aspire cold-starts,
-        and aspire recovers the GW150914 mode this sampler's own SMC misses.
+        The mixture can only seed SMC where the mode search looked. SMC begins
+        at ``beta ~ 0``, where the target is the prior, so a prior-drawn
+        particle carries ordinary weight at the first iteration and can
+        populate a mode the search missed once the tempering reaches a
+        ``beta`` that resolves it.
 
         Unlike ``prior_parameters``, which substitutes named *coordinates* in
         every particle, this reserves whole particles: the correlations between
-        coordinates within a prior-drawn particle are the prior's, not a
-        mixture of Laplace marginals and prior marginals.
+        coordinates within a prior-drawn particle are the prior's.
 
         The cost is proposal quality -- a prior draw is a poor sample of a
         peaked posterior, so a large fraction wastes particles and slows the
@@ -965,8 +873,9 @@ class Laplace(Sampler):
         ``{outdir}/{label}_smc_resume.h5`` for SMC (written and read by
         aspire). Set to False to ignore any existing resume file and start
         fresh. Resuming a batched mode skips the MAP search and covariance
-        estimation; resuming SMC currently still re-runs MAP+covariance and
-        restarts aspire from its checkpointed SMC iteration.
+        estimation, and refuses to continue if the configuration has changed;
+        resuming SMC re-runs MAP+covariance and restarts aspire from its
+        checkpointed SMC iteration, without a configuration check.
     checkpoint_signal : int or None
         Optional additional signal number (e.g. ``signal.SIGUSR1``) that, when
         received, triggers a clean checkpoint and exit with ``exit_code``.

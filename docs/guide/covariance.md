@@ -92,8 +92,11 @@ correctly rather than appearing as null directions.
 
     - calibration marginalisation — it integrates a *discrete* calibration index, not
       a continuous Fisher direction;
-    - reduced-order likelihoods (ROQ / relative-binning / multi-band), whose inner
-      product differs from the full-resolution one used here.
+    - ROQ and multi-banded likelihoods, whose inner product differs from the
+      full-resolution one used here.
+
+    Relative-binning likelihoods are supported: the Fisher is built on the full
+    frequency grid.
 
     It works directly in parameter space, so `use_unit_cube` and
     `jacobian_cap_scale` are ignored.
@@ -118,7 +121,7 @@ bounded at prior width rather than left arbitrarily wide.
 |---|---|
 | `cov_scaling` | Multiplies the covariance (each value scales a parameter's *variance*, so `4` widens its sigma by `2x`). Pass a scalar to scale everything uniformly, or a dict like `{'chirp_mass': 4.0}` for per-parameter scaling (unlisted parameters default to `1.0`, or use the reserved `'others'` key to set that default, e.g. `{'chirp_mass': 4.0, 'others': 2.0}`). Off-diagonal terms scale by `sqrt(v_i*v_j)`, preserving correlations. Increase to widen the proposal when acceptance is low or the posterior is wider than the Gaussian predicts. |
 | `sampling_cov` | Bypass estimation entirely and supply a precomputed covariance (see below). |
-| `jacobian_cap_scale` | (Hessian unit-cube path) Caps the Jacobian for prior-dominated parameters; values `<1` widen the proposal for those parameters. |
+| `jacobian_cap_scale` | (Hessian unit-cube path) Caps each parameter's Jacobian `p(θ)` at `jacobian_cap_scale / prior_width` when mapping the unit-cube precision back to parameter space. The cap applies wherever the prior density at the MAP exceeds it, and widens that parameter's covariance; values `<1` widen further. |
 | `prior_parameters` | Replace the proposal for listed parameters with independent prior draws — for parameters whose posterior is essentially the prior and which the Hessian constrains poorly. |
 | `proposal_covariance` | How the Gaussian becomes the proposal. `"diagonal"` draws each parameter independently with its Laplace marginal width, dropping the correlations, which makes a wider, defensive seed. `"full"` draws the full correlated Gaussian, discarding draws outside the prior box. The default (`None`) is `"full"` for `resample="inprior"`, whose output *is* the proposal, and `"diagonal"` for every method that corrects it (`rejection`, `importance`, `smc`, `emcee`). `"full"` is incompatible with `prior_parameters`. |
 | `hessian_kwargs` | Forwarded to `scipy.differentiate.hessian` (e.g. `initial_step`). |
