@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "bilby-laplace"
+abstract: >-
+  A Bilby sampler plugin that builds a Laplace-approximation mixture (MAP
+  search, secondary-mode search, curvature at each mode) and uses it to seed
+  or correct stochastic sampling.
+type: software
+authors:
+  - family-names: Ashton
+    given-names: Gregory
+license: MIT
+repository-code: "https://github.com/GregoryAshton/bilby-laplace"
+url: "https://gregoryashton.github.io/bilby-laplace/"
+keywords:
+  - bayesian inference
+  - laplace approximation
+  - bilby
+  - gravitational waves
+version: 0.2.0
+date-released: 2026-11-11

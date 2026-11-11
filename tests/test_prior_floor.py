@@ -125,7 +125,7 @@ def test_non_finite_prior_width_skips_the_bound(sine_estimator):
 
 def test_uniform_scale_is_exact(gaussian_likelihood):
     """The deterministic grid must reproduce the closed form, not approximate it
-    -- a sampled estimate carried ~0.3% Monte-Carlo error and made the proposal
+    -- a sampled estimate would carry Monte-Carlo error and make the proposal
     covariance jitter between runs."""
     priors = PriorDict(dict(x=Uniform(-5, 5, "x"), y=Uniform(-5, 5, "y")))
     est = LaplacePosteriorEstimator(gaussian_likelihood, priors)

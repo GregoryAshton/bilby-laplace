@@ -205,8 +205,8 @@ def test_subspace_pinning_keeps_other_coordinates_fixed():
 
 
 # --------------------------------------------------------------------------
-# Dropping negligible components.  A mode carrying ~0 of the Laplace mass is in
-# practice a likelihood sidelobe the search turned up; seeding it a token
+# Dropping negligible components.  A mode carrying ~0 of the Laplace mass is
+# typically a likelihood sidelobe the search turned up; seeding it a token
 # particle puts a stray point in the diagnostics that cannot be sampled.
 # --------------------------------------------------------------------------
 
@@ -257,9 +257,8 @@ def test_the_mixture_is_never_emptied(sampler):
 # --------------------------------------------------------------------------
 # Mode separation threshold.  The dedup gate is a `max` over per-parameter
 # normalised separations, applied both before polishing (skip a candidate near a
-# known mode) and after (discard a duplicate).  On the HLV example the real
-# second sky mode is 3.3 sigma out in azimuth and 2 sigma in zenith, so the
-# hard-coded 3.0 rejected it and the search kept a distant sidelobe instead.
+# known mode) and after (discard a duplicate).  A genuine second mode can sit
+# closer than the default 3 sigma, so the threshold is a setting.
 # --------------------------------------------------------------------------
 
 
@@ -269,7 +268,7 @@ def _separation(candidate, mode, std_scale):
 
 
 def test_default_threshold_rejects_the_hlv_second_sky_mode():
-    """Regression for the observed geometry: primary vs the real secondary."""
+    """A secondary between 1.5 and 3 sigma out: rejected at 3, admitted at 1.5."""
     primary = np.array([1.3787, 1.2103])  # azimuth, zenith at the primary MAP
     secondary = np.array([1.3150, 1.1920])  # centre of the real second island
     std_scale = np.array([0.0184, 0.0074])
@@ -305,10 +304,8 @@ def test_invalid_threshold_is_rejected(sampler, estimator, bad):
 
 # --------------------------------------------------------------------------
 # The primary mode must be the one run_sampler already found, not a fresh
-# search.  It used to run its own differential evolution here, ignoring
-# `use_injection_for_map` and skipping the polish secondary candidates get --
-# on the HLV example that landed 59-200 nats below the injection-seeded MAP,
-# lengthening the SMC schedule from ~7 iterations to 15+ purely via the seed.
+# search, so `n_modes > 1` is a superset of `n_modes = 1`: it honours
+# `use_injection_for_map` and runs no global optimisation of its own.
 # --------------------------------------------------------------------------
 
 
@@ -338,7 +335,7 @@ def test_primary_covariance_is_not_re_validated(sampler, estimator):
 
 
 def test_no_global_optimisation_is_run_for_the_primary(sampler, estimator, monkeypatch):
-    """Guards the regression directly: the DE call must be gone."""
+    """No differential evolution is run for the primary mode."""
 
     def _boom(*args, **kwargs):
         raise AssertionError("differential evolution must not run for the primary mode")
@@ -353,14 +350,12 @@ def test_no_global_optimisation_is_run_for_the_primary(sampler, estimator, monke
 # mode_searches: choosing which way(s) to look for secondary modes
 # --------------------------------------------------------------------------
 # The stochastic (`'hypercube'`) and exact (`'symmetric'`) searches can fail
-# in opposite directions on the same problem: on a precessing-BBH example the
-# hypercube search kept finding shallow local maxima that are geometry noise
-# -- one held under 1% of the posterior mass by an independent reference yet
-# took 70% of the proposal weight -- while the exact delta_phase symmetry on
-# the same problem is essential (without it the run samples one lobe of two).
-# No re-weighting of the mixture fixed the first problem, because the damage
-# is which points enter the mixture, not how they are weighted once they do.
-# `mode_searches=['symmetric']` runs only the search that helps.
+# in opposite directions on the same problem: the hypercube search can admit
+# shallow local maxima that carry little posterior mass but a large share of
+# the proposal weight, while an exact symmetry (e.g. delta_phase + pi) can be
+# essential. Re-weighting the mixture does not help the first case, because
+# the damage is which points enter the mixture, not how they are weighted.
+# `mode_searches` selects which searches run.
 
 import bilby  # noqa: E402
 from conftest import MU, TRUE_COV  # noqa: E402
@@ -476,7 +471,7 @@ def test_hypercube_only_does_not_seed_the_symmetry(sampler, periodic_estimator, 
 
 
 def test_symmetric_only_seeds_the_exact_mirror(sampler, periodic_estimator, periodic_mode, monkeypatch):
-    """The fix, end to end: the mirror is found, matches the source mode's
+    """End to end: the mirror is found, matches the source mode's
     log-posterior exactly, and no stochastic evaluation ever ran."""
     mean, cov, logp = periodic_mode
 
@@ -514,11 +509,9 @@ def test_symmetric_only_is_a_real_alternative_to_default(periodic_sampler, perio
 
 # --- Approximate symmetries -------------------------------------------------
 #
-# `mode_symmetries` used to demand an *exact* mirror (0.5 nats), which rejected
-# modes precisely where they matter: on the XPHM BBH_HLV example the delta_phase
-# mirror missed by 1.12 nats and was skipped, yet dynesty and aspire both put
-# 0.22-0.27 of the posterior in that lobe, and losing it cost a 468 mbit JSD.
-# The tolerance is now a floor on how much mass an implied mode must carry.
+# A declared symmetry need not be exact: higher harmonics can make the mirror
+# somewhat lower than its source yet still carry real mass. `mode_symmetry_tol`
+# is a floor on how much mass an implied mode must carry, not an exactness test.
 
 
 class _TiltedPeriodicLikelihood(_PeriodicSymmetricLikelihood):
@@ -531,7 +524,7 @@ class _TiltedPeriodicLikelihood(_PeriodicSymmetricLikelihood):
     by ``2 * TILT`` nats and the mirror's share of the pair is ``exp(-2*TILT)``.
     """
 
-    TILT = 0.56  # -> offset 1.12 nats, matching what BBH_HLV actually showed
+    TILT = 0.56  # -> offset 1.12 nats: above an exactness test, well inside the tolerance
 
     def log_likelihood(self, parameters=None):
         p = parameters if parameters is not None else self.parameters
@@ -569,8 +562,8 @@ def _seed_symmetry(sampler, estimator, monkeypatch, tol=None):
 
 
 def test_approximate_symmetry_is_seeded(sampler, tilted_estimator, monkeypatch):
-    """A mirror that misses by ~1.12 nats -- the BBH_HLV case -- is seeded, and
-    carries its own (lower) log-posterior rather than its source's."""
+    """A mirror that misses by ~1.12 nats is seeded, and carries its own
+    (lower) log-posterior rather than its source's."""
     modes, (mean, logp) = _seed_symmetry(sampler, tilted_estimator, monkeypatch)
 
     assert len(modes) == 2, "the approximate mirror should have been seeded"
@@ -581,7 +574,7 @@ def test_approximate_symmetry_is_seeded(sampler, tilted_estimator, monkeypatch):
 
 
 def test_exact_tolerance_still_rejects_an_approximate_mirror(sampler, tilted_estimator, monkeypatch):
-    """mode_symmetry_tol=0 restores the old exact-only behaviour."""
+    """mode_symmetry_tol=0 demands an exact symmetry."""
     modes, _ = _seed_symmetry(sampler, tilted_estimator, monkeypatch, tol=0.0)
     assert len(modes) == 1, "tol=0 must demand an exact symmetry"
 
@@ -595,9 +588,8 @@ class _DisplacedMirrorLikelihood(bilby.core.likelihood.Likelihood):
     ~6.9-nat default tolerance, so plain ``'symmetric'`` discards it -- while
     B's actual peak is only ``GAP`` = 1 nat down and belongs in the mixture.
 
-    This is the GW240615_113620 geometry in two dimensions: the mirrored lobe
-    has not vanished, it has moved, and reaching it needs a correlated move in a
-    coordinate the mirror itself does not touch. Distinguishes a search that
+    The mirrored lobe has not vanished, it has moved, and reaching it needs a
+    correlated move in a coordinate the mirror itself does not touch. Distinguishes a search that
     judges the mirror where it lands from one that judges it where it leads.
     """
 
@@ -714,9 +706,8 @@ def test_negative_tolerance_is_rejected(sampler, periodic_estimator, periodic_mo
 #
 # 'hypercube' ranks its starts by log-posterior *before* polishing, so a mode
 # whose basin is shallow where you land but deep where it leads is discarded
-# before it is followed. On GW150914 the face-on solution is 24-51 nats down
-# under any coordinate pinning and 37 under a theta_jn reflection, yet a plain
-# local optimisation from a random prior draw reaches it 30% of the time.
+# before it is followed. 'multistart' instead polishes full-space prior draws,
+# reaching modes that need a coordinate outside the subspace to move.
 
 
 class _HiddenBasinLikelihood(bilby.core.likelihood.Likelihood):
@@ -729,17 +720,15 @@ class _HiddenBasinLikelihood(bilby.core.likelihood.Likelihood):
     into the mode it already has and is discarded as a duplicate. The full-space
     multi-start draws ``y`` freely and descends into the secondary directly.
 
-    This is GW150914's geometry in two dimensions: its face-on mode needs
-    ``theta_jn`` to move, ``theta_jn`` is not in the subspace, and pinning it at
-    the primary MAP leaves that mode 24-51 nats down.
+    The GW analogue is a mode that needs ``theta_jn`` to move when
+    ``theta_jn`` is not in the subspace.
     """
 
     A_MU, A_SIG, A_AMP = np.array([1.0, 0.0]), 0.8, 12.0  # primary
     B_MU, B_SIG, B_AMP = np.array([-3.0, 3.0]), 0.30, 10.0  # real secondary, off the subspace line
     # Decoys on the y = 0 line, so a subspace search over x finds them, well
     # separated in x so they survive deduplication, and shallower than the real
-    # secondary so merit-based selection prefers it. These stand in for
-    # GW150914's near-duplicate azimuth modes, which filled every slot.
+    # secondary so merit-based selection prefers it.
     D_MU = (np.array([-1.3, 0.0]), np.array([3.7, 0.0]))
     D_SIG, D_AMP = 0.35, (8.5, 8.3)
 
@@ -807,7 +796,7 @@ def _found_secondary(modes):
 
 
 def test_subspace_hypercube_cannot_reach_a_mode_outside_the_subspace(sampler, hidden_estimator, hidden_primary):
-    """The failure this search exists to fix, reproduced."""
+    """The pinned subspace search cannot reach the off-subspace mode."""
     modes = _run(
         sampler,
         hidden_estimator,
@@ -820,7 +809,7 @@ def test_subspace_hypercube_cannot_reach_a_mode_outside_the_subspace(sampler, hi
 
 
 def test_multistart_reaches_a_mode_outside_the_subspace(sampler, hidden_estimator, hidden_primary):
-    """The fix: full-space starts find what the pinned subspace cannot."""
+    """Full-space starts find what the pinned subspace cannot."""
     modes = _run(
         sampler,
         hidden_estimator,
@@ -873,24 +862,19 @@ def test_multistart_composes_with_the_other_searches(sampler, hidden_estimator, 
 
 # --- Pooled selection ------------------------------------------------------
 #
-# The searches used to append directly, each stopping at n_modes, so the budget
-# was first-come-first-served and the order in `mode_searches` was silently
-# decisive. On GW150914 the hypercube search filled every secondary slot with
-# near-duplicate azimuth modes and multistart, running second, had all of its
-# candidates discarded -- enabling it did nothing, with no error or warning.
+# All searches' candidates are pooled and selected on merit, so the order in
+# `mode_searches` does not decide which search fills the n_modes budget.
 
 
 def test_a_search_that_fills_the_budget_does_not_starve_the_next(
     sampler, hidden_estimator, hidden_primary, monkeypatch
 ):
-    """The regression, tested at the mechanism rather than via geometry.
+    """Tested at the mechanism rather than via geometry.
 
     'hypercube' is made to return exactly n_modes junk candidates -- distinct
-    enough to survive deduplication, all shallower than the real secondary --
-    which is what it did on GW150914 with near-duplicate azimuth modes. Under
-    the old append-as-you-go code those filled every slot and multistart's
-    candidates were all discarded. Selection on merit must now prefer the
-    deeper mode regardless of which search proposed it.
+    enough to survive deduplication, all shallower than the real secondary.
+    Appended first-come-first-served, those would fill every slot. Selection on
+    merit must prefer the deeper mode regardless of which search proposed it.
     """
     junk = [
         dict(mean=np.array([3.5, -2.5]), logp=-40.0, source="hypercube"),
@@ -951,10 +935,9 @@ def test_symmetry_mirrors_a_candidate_not_only_the_primary(sampler, periodic_est
 
 # --- Mixture persistence ---------------------------------------------------
 #
-# The mixture is the mode search's actual output, and it used to exist only in
-# the job log: a finished result carried samples but no record of how many modes
-# were found, where, with what weight, or which search proposed them. That makes
-# a campaign over mode-search settings unanalysable after the fact.
+# The mixture is the mode search's actual output, so the result records how
+# many modes were found, where, with what weight, and which search proposed
+# them, rather than leaving that only in the job log.
 
 
 @pytest.fixture
@@ -1094,10 +1077,9 @@ def test_zero_prior_seed_is_a_no_op(frac_priors):
 # --- hypercube dedup keeps the best polish of a region, not the first -------
 #
 # Starts are polished in order of their *pre*-polish score, so the first polish
-# into a region need not be its best. Discarding later collisions kept the
-# worse copy: on bilby-laplace-paper's mode_study a genuine delta_phase + pi
-# lobe at the primary's own log-posterior was lost at mode_separation_sigma=3
-# because an earlier polish of the same lobe, 9 nats lower, sat inside the gate.
+# into a region need not be its best. Discarding later collisions would keep
+# the worse copy, and a lower first polish of a lobe inside the gate would
+# block that lobe's peak.
 
 
 class _ScriptedEstimator:
@@ -1169,11 +1151,10 @@ def test_hypercube_still_drops_a_worse_later_polish(sampler, monkeypatch):
 
 # --- a declared mirror is not a copy of its own source ------------------------
 #
-# The separation gate is measured in the primary's sigma, so an exact mirror
-# offset by `shift` was rejected as a duplicate of its own source whenever that
-# sigma exceeded shift / mode_separation_sigma. On bilby-laplace-paper's
-# mode_study a delta_phase sigma of 1.34 rad put the pi mirror 2.34 sigma out,
-# and at separation 3 the declared mode was silently dropped.
+# The separation gate is in units of the primary's sigma, so an exact mirror
+# offset by `shift` would look like a duplicate of its own source whenever that
+# sigma exceeds shift / mode_separation_sigma. A mirror is therefore not gated
+# against its own source.
 
 
 def _wide_primary(estimator):

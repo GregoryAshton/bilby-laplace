@@ -28,76 +28,53 @@ DE_ATOL = 1.0
 
 # Independent differential-evolution restarts per MAP search, the best kept.
 #
-# ``differential_evolution`` is not reliable on a GW log-posterior at this
-# dimension.  Measured on GW150914 over 100 seeds (bilby-laplace-paper,
-# ``map_study``): 25 of them returned a MAP in the face-on ``theta_jn ~ 0.35``
-# mode rather than the true one, 2.1-7.0 nats down.  Downstream that is not a
-# small error -- ``mode_search_subspace`` pins every secondary candidate at the
-# primary, so the whole mixture inherits it and SMC starts entirely inside the
-# wrong mode, giving a posterior 70-99% wrong.
-#
-# Restarts work here because the two outcomes are cleanly separated in
-# log-posterior (a 2.14 nat gap, with no overlap over 100 seeds), so simply
-# keeping the best restart cannot pick the wrong one unless *every* restart
-# failed.  Measured over those seeds: 25.2% -> 6.3% -> 1.6% -> 0.4% for k =
-# 1, 2, 3, 4.
-#
-# 4 is chosen because it is the point at which the failure rate drops below the
-# other error sources in the pipeline, and because at matched cost restarts beat
-# every other knob tried by a wide margin: the same evaluation budget spent on
-# ``popsize=60`` instead leaves 15% failures, and on ``atol=0.1`` leaves 24%.
-# The cost is nominally 4x the MAP search, but the MAP search now runs on the
-# pool (see ``map_vectorized``), which more than repays it whenever ``npool > 1``.
+# ``differential_evolution`` can converge to a secondary mode of a multimodal
+# log-posterior.  A wrong MAP is not a small error downstream:
+# ``mode_search_subspace`` pins every secondary candidate at the primary, so the
+# whole mixture inherits it and SMC starts inside the wrong mode.  When the
+# true and secondary outcomes are well separated in log-posterior, keeping the
+# best restart fails only if *every* restart fails, so the failure rate falls
+# geometrically with the number of restarts.  The MAP search runs on the pool
+# (see ``map_vectorized``), which offsets the extra cost when ``npool > 1``.
 MAP_RESTARTS = 4
 
 # The MAP-search spike guard (``map_spike_guard``).
 #
-# IMRPhenomXPHM's SpinTaylor precession angles (``PhenomXPrecVersion`` 310-321)
-# leave needle spikes on a GW log-posterior: points standing 2-7 nats above
-# everything within 1e-9 to 1e-4 of the unit cube around them.  Measured on
-# GW150914 (bilby-laplace-paper, ``spike_study``): 3 of 400 single MAP restarts
-# ended on one, and the highest stood 1.36 nats above the best smooth point any
-# search found, so best-of-restarts selection *prefers* them.  A sampler never
-# sees one -- it weights by volume, and a spike has none (0 of 1000 dynesty
-# points tested) -- but an optimiser keeps any higher point it touches, and the
-# Nelder-Mead polish probes ~1e-6 scales right at the top of the posterior.
-# The Laplace covariance taken at a spike measures the spike, not the posterior.
+# Numerical artefacts in a likelihood (e.g. in a waveform model) can leave
+# needle spikes on the log-posterior: isolated points standing well above
+# everything in a tiny neighbourhood of the unit cube.  A sampler weights by
+# volume and so never sees one, but an optimiser keeps any higher point it
+# touches, and the Nelder-Mead polish probes very small scales at the top of the
+# posterior; best-of-restarts selection can then *prefer* a spike.  The Laplace
+# covariance taken at a spike measures the spike, not the posterior.
 #
 # The test, per unit-cube axis: e(d) is how far the point stands above the
 # *higher* of its two neighbours at +-d.  "Higher" keeps the high side of a
 # genuine step (a feature with volume) from being flagged.  Testing every axis
-# and keeping the worst catches the spikes seen so far, which are sheets:
-# narrow in the masses and spins, unchanged along the extrinsic parameters,
-# which the precession integration does not depend on.
+# and keeping the worst catches spikes that are sheets: narrow in some
+# parameters and unchanged along others.
 #
 # e(d) alone cannot be thresholded: at a smooth peak of conditional width sigma
-# it is d^2 / 2 sigma^2, and a loud signal is narrow -- BNS_3G's chirp mass is
-# 1.7e-4 of the unit cube, so e(1e-4) = 0.18 there and e(1e-3) = 17.  So the
-# test measures e at d and 2d and removes the quadratic by Richardson
+# it is d^2 / 2 sigma^2, which is large for a narrow (loud-signal) posterior.
+# So the test measures e at d and 2d and removes the quadratic by Richardson
 # extrapolation: (4 e(d) - e(2d)) / 3 is exactly zero on a quadratic surface
 # however narrow, about the spike's height for a spike narrower than d, and
 # negative on a slope.
 #
 # The correction assumes the surface is smooth out to 2d, and a step inside
-# that range breaks it: on a slope rising at s nats per d to a step of D nats,
+# that range breaks it: on a slope rising at s per d to a step of height D,
 # with both +d and +2d beyond the step, e(d) = D - s but the correction gives
-# D - 2s/3 -- a nat and more beside GW150914's largest spike, where a ~1.5-nat
-# step lies within d of a smooth slope, at points standing above nothing.  So
-# a point is a spike on an axis only when *both* e(d) and the corrected value
-# exceed MAP_SPIKE_DROP: it must stand above both neighbours by more than a
-# nat, and that must not be the peak's curvature.  A spike passes both; a
-# narrow smooth peak fails the second, and a point beside a step the first.
+# D - 2s/3, so a point beside a step can pass.  So a point is a spike on an axis
+# only when *both* e(d) and the corrected value exceed MAP_SPIKE_DROP: it must
+# stand above both neighbours, and that must not be the peak's curvature.  A
+# spike passes both; a narrow smooth peak fails the second, and a point beside
+# a step the first.
 #
 # MAP_SPIKE_DELTA has only to exceed the spikes' widths, not to stay below the
-# posterior's.  It is 1e-3 rather than 1e-4 because the spikes come in rough
-# patches whose features run from 1e-9 up to ~2e-4 wide (in ``phi_12``, next
-# to GW150914's largest spike); at 1e-4 the test cannot see the wider ones.  At
-# 1e-3 the curvature-free excess stays below 0.22 nats at 400 posterior points
-# of each of seven examples, BNS_3G's 1.7e-4-wide chirp mass included
-# (bilby-laplace-paper, ``spike_study/false_positive``).
+# posterior's; too small a value misses wider spike features.
 #
-# A spike is dropped, not repaired: a re-polish from beside it climbed onto
-# the wider features of the same patch, 0.4-0.9 nats *above* the smooth top.
+# A spike is dropped, not repaired: a re-polish from beside it can climb onto
+# neighbouring spike features rather than the smooth top.
 MAP_SPIKE_DELTA = 1e-3
 MAP_SPIKE_DROP = 1.0
 
@@ -172,18 +149,20 @@ class LaplacePosteriorEstimator:
             for the MAP search (multi-start mode).
         use_unit_cube: bool
             If True (default), compute the Hessian in unit-cube space via the
-            prior CDFs. This avoids boundary clipping when the MAP is near a
-            prior edge, giving unbiased curvature estimates. In this space the
-            precision is floored at the prior precision (the variance of a
+            prior CDFs, which normalises parameter scales. Points of the
+            finite-difference stencil that fall outside the cube are clipped to
+            its edge. In this space the precision is floored at the prior precision (the variance of a
             uniform prior is 1/12) before inversion, so a noisy, indefinite, or
             non-finite curvature estimate can never yield a posterior broader
             than the prior; unconstrained directions default to prior width.
         jacobian_cap_scale: float
             Scales the Jacobian cap applied when transforming the unit-cube
-            Hessian back to parameter space. The cap is
-            ``jacobian_cap_scale / prior_width``. The default of 1.0 caps at
-            the uniform-prior Jacobian. Values < 1 apply a tighter cap,
-            widening the proposal for prior-dominated parameters.
+            Hessian back to parameter space: each parameter's Jacobian
+            ``p(theta)`` is capped at ``jacobian_cap_scale / prior_width``. The
+            default of 1.0 caps at the uniform-prior value. The cap applies to
+            any parameter whose prior density at the MAP exceeds it, whether or
+            not the likelihood constrains that parameter, and widens its
+            covariance. Values < 1 apply a tighter cap.
         hessian_kwargs: dict, optional
             Keyword arguments forwarded to ``scipy.differentiate.hessian``.
             Defaults are ``{"initial_step": 0.5}`` in parameter space and
@@ -394,11 +373,9 @@ class LaplacePosteriorEstimator:
         array; all-``True`` when the prior carries no constraints, without
         touching the conversion function at all.
 
-        Deliberately vectorised over the whole batch.  bilby's dynesty wrapper
-        calls ``evaluate_constraints`` once per likelihood call, which on this
-        BNS prior costs ~23 us a point; the same check across a batch costs
-        ~0.06-0.19 us a point, because the conversion function and the
-        constraint comparisons are pure numpy broadcasts.  Since every
+        Deliberately vectorised over the whole batch: the conversion function
+        and the constraint comparisons are numpy broadcasts, so one batched
+        call is far cheaper per point than one call per sample.  Since every
         resampling mode here already hands the likelihood whole batches, the
         constraint belongs at batch level too.
         """
@@ -418,7 +395,7 @@ class LaplacePosteriorEstimator:
         ``Constraint`` -- return ``-inf`` and are never handed to the
         likelihood.
 
-        ``clip_to_bounds`` clips into the per-parameter box, as before.  It
+        ``clip_to_bounds`` clips into the per-parameter box.  It
         cannot rescue a constraint violation: a constraint bounds a derived
         quantity, so there is no per-parameter projection onto the allowed
         region, and such points still return ``-inf``.
@@ -490,24 +467,18 @@ class LaplacePosteriorEstimator:
 
         No explicit bounds test: ``log_prior`` -> ``PriorDict.ln_prob`` already
         returns ``-inf`` outside a parameter's range *and* on a constraint
-        violation, and the likelihood is never reached for such a column.  The
-        box test this used to carry was both redundant and weaker than what it
-        guarded.
+        violation, and the likelihood is never reached for such a column.
 
         A batch is routed through ``_log_likelihood_for_columns``, so it uses
-        the pool when one is attached.  This used to be ``apply_along_axis``
-        over a scalar ``log_posterior``, which was serial *whatever* ``npool``
-        said -- and since the MAP search is the heaviest consumer of this
-        method, that alone kept the global optimiser single-threaded.  The
-        numbers are unchanged either way: the pool only splits the same
-        independent likelihood calls across processes.
+        the pool when one is attached; the MAP search is the heaviest consumer
+        of this method.  The result does not depend on the pool: it only splits
+        the same independent likelihood calls across processes.
         """
         x = np.asarray(x_array, dtype=float)
         # Any trailing shape is allowed, not just a single batch axis:
         # ``scipy.differentiate.hessian`` evaluates on a ``(N_params, m, n)``
         # grid and expects ``(m, n)`` back. Flatten the trailing axes, evaluate
-        # as one batch, and restore the shape -- which is what the
-        # ``apply_along_axis`` this replaced did implicitly.
+        # as one batch, and restore the shape.
         single = x.ndim == 1
         x2 = x[:, None] if single else x.reshape(x.shape[0], -1)
 
@@ -557,9 +528,7 @@ class LaplacePosteriorEstimator:
 
         A periodic parameter's prior edges are one point, not walls.  Bounded
         there, a local optimiser whose peak lies just across the seam gets
-        pinned against the edge instead of crossing it (map_validation found
-        a polish stuck at phi_12 = 0 and psi = pi/2 while the same hill's top
-        was across the wrap).  Pair with an objective that wraps its input,
+        pinned against the edge instead of crossing it.  Pair with an objective that wraps its input,
         and wrap the result.
         """
         return [(-np.inf, np.inf) if p else b for p, b in zip(self._periodic_mask, self.prior_bounds)]
@@ -659,8 +628,11 @@ class LaplacePosteriorEstimator:
 
         if not marg_names:
             fisher = waveform_fisher_matrix(
-                self.likelihood, self.parameter_names, base,
-                bounds=self._fisher_bounds(self.parameter_names), **self.fisher_kwargs,
+                self.likelihood,
+                self.parameter_names,
+                base,
+                bounds=self._fisher_bounds(self.parameter_names),
+                **self.fisher_kwargs,
             )
             precision = fisher + np.diag(self._prior_precision_diag(sample))
             return self._floor_precision_at_prior(precision)
@@ -890,8 +862,8 @@ class LaplacePosteriorEstimator:
         return precision
 
     # Draws used to bound the prior precision.  Sampling rather than an analytic
-    # variance because bilby priors do not expose one uniformly; 20k keeps the
-    # bound's Monte-Carlo error well under a percent.
+    # variance because bilby priors do not expose one uniformly; enough draws
+    # that the bound's Monte-Carlo error is small.
     _PRIOR_PRECISION_CAP_NSAMPLES = 20000
 
     def _prior_precision_cap(self, key, prior):
@@ -899,7 +871,7 @@ class LaplacePosteriorEstimator:
 
         ``1 / Var(prior)``: a prior cannot pin a parameter down more tightly
         than its own spread.  A prior that cannot be sampled is left unbounded
-        rather than guessed at, which preserves the previous behaviour for it.
+        rather than guessed at.
         """
         if key not in self._prior_precision_cap_cache:
             try:
@@ -1037,10 +1009,9 @@ class LaplacePosteriorEstimator:
         log_l_map = self.log_likelihood(sample)
         # Via `log_prior` (i.e. `PriorDict.ln_prob`), not a hand-rolled product
         # of marginals: on a constrained prior the two differ by
-        # `log(normalize_constraint_factor)` -- 0.50 nats on the BNS_3G prior,
-        # for instance.  The rejection/importance/SMC evidences all come from
-        # `ln_prob` already, so summing marginals here left this estimate on a
-        # different normalisation from every other log Z the sampler reports.
+        # `log(normalize_constraint_factor)`.  The rejection/importance/SMC
+        # evidences all come from `ln_prob`, so this keeps the estimate on the
+        # same normalisation as every other log Z the sampler reports.
         log_pi_map = self.log_prior(sample)
         sign, log_det = np.linalg.slogdet(covariance)
         if sign <= 0:
@@ -1215,7 +1186,7 @@ class LaplacePosteriorEstimator:
         result is identical to it.  A spike is dropped rather than repaired.  If
         every candidate is one, the best is replaced by its off-spike neighbour
         on the worst axis -- a point on the surface beside the spike, not a
-        polished one, since a polish there climbs onto the patch's wider
+        polished one, since a polish there can climb onto the patch's wider
         features.  Returns ``(best, n_spikes)``.
         """
         best = best_raw = None
@@ -1261,8 +1232,7 @@ class LaplacePosteriorEstimator:
 
         Selecting on the log-posterior needs no threshold and no tuning, and it
         cannot do worse than a single search: the winner is by construction at
-        least as good as restart 1, which is what the old single-shot path
-        returned.
+        least as good as restart 1 alone.
         """
         # Counted here rather than taken from scipy's ``nfev``, which means
         # "calls to func" and so undercounts by the batch size as soon as
@@ -1303,11 +1273,9 @@ class LaplacePosteriorEstimator:
                 # whole population be evaluated in one batch.
                 updating="deferred" if self.map_vectorized else "immediate",
                 # scipy's own polish is L-BFGS-B, whose finite-difference
-                # gradients are useless on a likelihood whose parameters span
-                # 1e-2 to 5e3 (it returned the input unchanged after 36
-                # evaluations, and scipy's numdiff warned of invalid
-                # subtractions). Nelder-Mead below does the job, and is the
-                # local method this class uses everywhere else.
+                # gradients are unreliable on a likelihood whose parameters
+                # span many orders of magnitude. Nelder-Mead below does the
+                # job, and is the local method this class uses everywhere else.
                 polish=False,
             )
             polished = minimize(neg_log_post, out.x, bounds=self._local_bounds, method="Nelder-Mead")
@@ -1361,8 +1329,9 @@ class LaplacePosteriorEstimator:
     def get_MAP_sample(self, initial_sample=None):
         """Find the maximum a posteriori (MAP) estimate.
 
-        Maximizes log-likelihood + log-prior. By default uses differential
-        evolution, a global optimizer that searches the full prior-bounded
+        Maximizes log-likelihood + log-prior. With
+        ``minimization_method='differential_evolution'`` (the sampler's
+        default), uses that global optimizer over the full prior-bounded
         space. If ``initial_sample`` is provided, a single local minimization
         is run from that starting point.
 

@@ -10,283 +10,79 @@ Versions correspond to git tags; version numbers follow
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-11
+
 ### Added
 
-- `proposal_covariance` chooses how the Laplace Gaussian becomes the proposal every resampling method
-  draws from. `"diagonal"` samples each parameter independently with its marginal width and ignores the
-  off-diagonal covariance (`TruncatedMVNProposal`, the only behaviour before this). `"full"` samples the
-  full correlated Gaussian and discards draws outside the prior box (`CorrelatedTruncatedMVNProposal`,
-  with the box mass estimated by Monte Carlo for the normalisation). The choice made is recorded in
-  `meta_data["proposal_covariance"]`. Incompatible with `prior_parameters`.
-
-- `map_restarts` (default **4**) — the MAP search now runs that many independent
-  `differential_evolution` restarts and keeps the highest-log-posterior result. `differential_evolution`
-  is not reliable on a GW log-posterior at this dimension: measured on GW150914 over 100 seeds, 25 of
-  them returned a MAP in the face-on `theta_jn ~ 0.35` mode rather than the true one, 2.1–7.0 nats
-  down. That is not a small error downstream — `mode_search_subspace` pins every secondary candidate
-  at the primary, so the whole mixture inherits the wrong mode and SMC starts entirely inside it,
-  giving a posterior 70–99% wrong with nothing in the run's own output flagging it. Restarts work
-  because the two outcomes are separated by a 2.14 nat gap with no overlap over 100 seeds, so keeping
-  the best restart cannot pick wrong unless every restart failed: the failure rate goes
-  25.2% → 6.3% → 1.6% → 0.4% for k = 1, 2, 3, 4. At *matched* evaluation budget this beats every
-  other knob tried — the same spend on `popsize=60` leaves 15% failures and on `atol=0.1` leaves 24%.
-  Set `map_restarts=1` for the previous single-shot behaviour. The failure is not specific to
-  GW150914: over a 100-injection precessing-BBH campaign the returned MAP was provably not the global
-  maximum in 38% of runs.
-- `map_spike_guard` (default **True**) and `map_spike_delta` (default **1e-3**) — every MAP candidate
-  (each `differential_evolution` restart, and a `use_injection_for_map` polish) is tested for a needle
-  spike of the log-posterior, and spikes are dropped from the best-of-restarts selection, with a
-  warning. IMRPhenomXPHM's SpinTaylor precession angles (`PhenomXPrecVersion` 310–321) leave such
-  spikes: on GW150914, 5 of 400 single MAP restarts ended on points standing 1.5–5.5 nats above their
-  surroundings, the highest 1.36 nats above the best smooth point any search found, so best-of-restarts
-  selection *preferred* it — and the Laplace covariance taken there measures the spike, not the
-  posterior. Samplers never land on them (they weight by volume; 0 of 1000 dynesty points tested). The
-  test: along some unit-cube axis, the point stands more than a nat above the higher of its neighbours
-  at ±delta, after the peak's own curvature is removed by comparing ±delta with ±2 delta — so a narrow
-  posterior cannot trip it (BNS_3G's chirp mass is 1.7e-4 of the unit cube wide; at delta = 1e-3 the
-  excess stays below 0.22 nats over 400 posterior points of each of seven examples). Spikes are dropped
-  rather than repaired because they come in rough patches: a re-polish from beside one climbed onto the
-  patch's wider features, 0.4–0.9 nats above the smooth top. If every candidate is a spike, the point
-  beside the best is used and a warning says the MAP is unreliable. Where nothing is flagged the result
-  is unchanged; the cost is `4 * N` evaluations per candidate, and no random numbers are drawn. The mode
-  search's own polishes are not guarded. Set `map_spike_guard=False` for the previous behaviour.
-- `map_vectorized` (default **True**) — `differential_evolution` is handed its whole population in one
-  array, so the MAP search goes through the estimator's batched log-posterior path and therefore uses
-  `npool`. Set False to reproduce pre-restart MAP results exactly.
+- Resampling methods: `resample="smc"` (via [aspire](https://github.com/bilby-dev/aspire)),
+  `"inprior"` (draw from the proposal within the prior support, no reweighting) and `"emcee"`.
+- Multimodal proposals: `n_modes`, with `mode_searches` (`"hypercube"`, `"symmetric"`,
+  `"symmetric-polish"`, `"multistart"`), `mode_search_nsamples`, `mode_search_subspace`,
+  `mode_separation_sigma`, `mode_symmetries`, `mode_symmetry_tol`, `mode_symmetry_polish_max`,
+  `mode_multistart_nstarts` and `mode_weights`. Candidates from all searches are pooled and ranked
+  by log-posterior before selection. The mixture is recorded in `meta_data["mode_mixture"]`,
+  including which search proposed each mode.
+- `proposal_covariance`: `"diagonal"` (independent truncated normals) or `"full"` (the correlated
+  Gaussian restricted to the prior box). Recorded in `meta_data["proposal_covariance"]`.
+- `fisher_method="waveform"`: the waveform Fisher matrix for gravitational-wave likelihoods,
+  including phase/time/distance-marginalised likelihoods (via the Schur complement, with
+  `marginalized_reference` on `LaplacePosteriorEstimator`) and detector-based sky frames.
+- `map_restarts` (default 4): independent `differential_evolution` runs in the MAP search, keeping
+  the best.
+- `map_spike_guard` (default True) and `map_spike_delta`: reject MAP candidates that sit on a
+  needle spike of the log-posterior.
+- `map_vectorized` (default True): evaluate the `differential_evolution` population as one batch,
+  so the MAP search uses `npool`.
+- `smc_prior_flow`, `smc_prior_fraction`, `smc_progress` and `smc_plot_every` for SMC runs.
+- `sampling_cov`: supply a precomputed covariance.
+- `cov_scaling` accepts a per-parameter dict.
+- `jacobian_cap_scale`, `hessian_kwargs`, `use_unit_cube` and `max_iterations` options.
+- Validation of the Hessian-derived covariance along its principal axes; directions wider than
+  the Gaussian predicts are inflated.
+- Checkpoint and resume for the batched resampling methods and SMC.
+- Parallel likelihood evaluation through `npool` / `pool`.
+- `bilby_laplace.comparison`: JSD/EMD comparison of results against a reference, used by the
+  examples.
+- Examples: gaussian, rosenbrock, BBH_HLV, BNS_3G and AntiGlitch.
 
 ### Changed
 
-- **`resample="inprior"` now draws from the full correlated Gaussian by default.** The default
-  `proposal_covariance=None` picks by what the proposal is for: `"full"` for `inprior`, whose output is
-  the proposal, and `"diagonal"` (unchanged) for `rejection`, `importance`, `smc` and `emcee`, which
-  correct it. Neither is better everywhere. On six BNS injections, `inprior`'s chirp-mass width fell from
-  a median 7.0x the SMC reference to 1.3x, and its correlations returned; `smc` reached the same
-  posterior from either start, but used 1.1-1.9x the likelihood calls from `"full"`. On the Rosenbrock
-  banana (Laplace correlation 0.998 at the MAP), `"full"` covers the curved posterior worse than the
-  independent box: importance ESS 0.06% against 4.7%. Pass `proposal_covariance="diagonal"` to recover
-  the old `inprior`. With `prior_parameters`, `inprior` falls back to `"diagonal"` and logs it.
-- **The multiprocessing pool is now created before the MAP search**, not after the covariance stage.
-  It was previously set up immediately before the resampling loops, which meant the single heaviest
-  consumer of the log-posterior — the global MAP search — ran serially no matter what `npool` said
-  (on a 64-core GW150914 run the MAP stage spent 4–6 minutes using one core). This is what makes
-  `map_restarts=4` affordable rather than a 4x cost.
-- `LaplacePosteriorEstimator.log_posterior_from_array` evaluates a column-stacked batch through
-  `_log_likelihood_for_columns` — and so through the pool — instead of `apply_along_axis` over a
-  scalar log-posterior. Values are unchanged; only the work distribution differs.
-- A secondary mode out-scoring the primary MAP now logs a warning. Those candidates are local
-  polishes from perturbed starts, so beating them is the weakest bar the primary has to clear, and
-  nothing downstream would otherwise report it (measured: a distinct secondary out-scored the primary
-  in 32 of 97 runs of a 100-injection campaign, by a median 2.71 nats). Detection only — the primary
-  is not re-designated, because the secondary searches have already pinned their candidates at it.
-
-**Result-changing.** `map_vectorized=True` makes scipy use deferred population updating, so MAP
-results move even at `map_restarts=1` and fixed seed. Pooled and serial runs remain numerically
-identical to each other, which is the invariant that matters. Set `map_vectorized=False` and
-`map_restarts=1` to reproduce earlier campaigns.
+- `resample="inprior"` uses `proposal_covariance="full"` by default; every other method uses
+  `"diagonal"`.
+- The multiprocessing pool is created before the MAP search.
+- A secondary mode with a higher log-posterior than the primary MAP logs a warning.
+- `fail_on_error` defaults to True.
+- Unit-cube Hessian defaults: `initial_step=0.001`, `step_factor=2`, `maxiter=10`; the unit-cube
+  precision is floored at the prior precision.
+- Renamed to reflect that the estimated matrix is the posterior precision, not the Fisher
+  information: `matrix.py` → `laplace.py`, `FisherMatrixPosteriorEstimator` →
+  `LaplacePosteriorEstimator`, `calculate_FIM` → `calculate_posterior_precision`, `calculate_iFIM`
+  → `calculate_posterior_covariance`.
+- The `sample_array`/`sample_dataframe` sentinel for the expansion point is `sample="MAP"` (was
+  `"maxL"`); other strings raise `ValueError`.
 
 ### Fixed
 
-- **The hypercube mode search kept the first polish of a region, not the best.** Its starts are
-  polished in order of their *pre*-polish score, and a polish landing within `mode_separation_sigma`
-  of an earlier proposal was discarded -- so a region was represented by whichever polish reached it
-  first, however much worse. A collision now keeps the higher log-posterior of the two. Found by
-  bilby-laplace-paper's `mode_study` at `mode_separation_sigma=3`: on two of 99 injections a genuine
-  secondary (on one, a `delta_phase + pi` lobe at the primary's own log-posterior, which took 94% of
-  the weight at σ=1) was lost because an earlier polish of the same lobe, 9 nats lower, sat inside the
-  gate and then fell below the weight floor. Every increase in `mode_separation_sigma` made the
-  collision more likely.
-- **The separation gate could reject a declared symmetry mirror as a copy of its own source.** The
-  gate is measured in the primary's sigma, and an exact mirror sits exactly `shift` from its source,
-  so whenever the primary's sigma in the symmetric coordinate exceeded
-  `shift / mode_separation_sigma` the mirror was dropped as a duplicate -- a declared mode silently
-  lost, the same kind of failure `mode_symmetries` exists to prevent. Found by bilby-laplace-paper's
-  `mode_study`: on one of 99 injections a `delta_phase` sigma of 1.34 rad put the pi mirror 2.34 sigma
-  out, inside the gate at `mode_separation_sigma=3` (at σ=1 it was admitted and took 58% of the weight).
-  An exact mirror is now exempt from the gate against its own source only; it is still gated against
-  every other mode, so a mirror landing on a mode the mixture already holds is still a duplicate.
-  Polished mirrors (`'symmetry-polish'`) are unchanged.
-- **The waveform Fisher used the injection even with `use_injection_for_map=False`.** On a
-  phase/distance-marginalised likelihood, `fisher_method='waveform'` reinstates the marginalised
-  parameters at reference values, and the sampler always passed `injection_parameters` as those
-  values -- so a run that deliberately kept the truth out of the MAP search still had its
-  distance/phase Fisher block evaluated at the injected distance and phase. Found in the HLVK BNS
-  P--P campaign, which is meant to use the truth nowhere. The injection is now the reference only
-  under `use_injection_for_map=True` (the default, so seeded runs are unchanged); otherwise the
-  marginalised parameters are reconstructed from the likelihood at the MAP, as on real data.
-- **The MAP search's local steps treated periodic parameters as walls.** The Nelder-Mead polish after
-  each `differential_evolution` restart, and the local search from an initial sample (used by
-  `use_injection_for_map` and the multi-mode restarts), were bounded at every parameter's prior
-  edges, so a peak lying just across a periodic parameter's seam was out of reach: the step pinned
-  against the edge instead. They now wrap periodic parameters (`boundary="periodic"`) and leave them
-  unbounded, and the returned MAP is wrapped back into range. Found in the paper's `map_validation`
-  study, where a polish ended at `phi_12 = 0` and `psi = pi/2` while the same hill's top lay across
-  the wrap. Differential evolution's own population is unaffected (it only samples inside the box).
-
-### Added (earlier, unreleased)
-
-- `fisher_method='waveform'` now supports phase/time/distance-marginalised likelihoods: the
-  marginalised parameters are reinstated in the Fisher (evaluated at the injection, or reconstructed
-  from the likelihood at the MAP) and marginalised out via the Schur complement of that block —
-  equivalent to inverting the full precision and keeping the sampled-parameter sub-block. New
-  `marginalized_reference` argument on `LaplacePosteriorEstimator` supplies the reference point.
-  Calibration marginalisation (a discrete index) remains unsupported. The waveform precision is
-  floored at the prior precision (generalising the unit-cube prior bound to parameter space via
-  rescaling by the prior standard deviation), so unconstrained or phase-degenerate directions —
-  e.g. the polarisation angle under phase marginalisation — fall back to prior width instead of
-  producing a runaway variance. Detector-based sky frames (`reference_frame`, i.e. zenith/azimuth
-  sampling) are supported: the Fisher applies the likelihood's zenith/azimuth-to-ra/dec conversion
-  at each finite-difference point so those parameters are constrained rather than appearing null.
-- `mode_searches` parameter — which of `'hypercube'` (the stochastic multi-start secondary-mode
-  search) and `'symmetric'` (seeding modes implied by `mode_symmetries`) run when `n_modes > 1`.
-  Default `('hypercube', 'symmetric')` matches every prior behaviour. Added because the two can fail
-  in opposite directions on the same problem: on a precessing-BBH example most of whose parameters
-  are essentially unconstrained by the data, the hypercube search kept finding shallow local maxima
-  that are geometry noise rather than physical modes (one, holding under 1% of the posterior mass by
-  an independent reference, took 70% of the proposal weight under `mode_weights='laplace'`), while
-  the exact `delta_phase` symmetry on the same problem is essential (without it the run samples one
-  lobe of two). No re-weighting of the mixture fixed the first problem, because the damage is which
-  points enter the mixture, not how they are weighted once they are in it — `mode_searches=['symmetric']`
-  removes the harmful search while keeping the essential one.
-- The finished mode mixture is persisted to `result.meta_data["mode_mixture"]` — per mode: mean,
-  sigma, full covariance, log-posterior, mixture weight, and **which search proposed it** — alongside
-  the parameter names, `n_modes` requested and found, and the `mode_searches`/`mode_weights` used.
-  Previously this existed only in the job log, so a finished result carried the samples but no record
-  of how many modes were found, where, with what weight, or by which search; a campaign over
-  mode-search settings could not be analysed after the fact without re-reading logs. Stored as
-  columns rather than a list of per-mode dicts, because bilby's hdf5 writer silently drops the
-  latter (the group is simply absent on read-back) and columns are what an analysis wants anyway.
-  Provenance is keyed by the mode's mean rather than its position, so it survives the sort by
-  log-posterior and the `_drop_negligible_modes` filter.
-- Secondary-mode searches now **pool their candidates and compete on merit** instead of appending
-  directly. Each enabled search proposes; a single selection step ranks the pool by log-posterior,
-  deduplicates, and materialises covariances top-down until `n_modes` is reached. Previously each
-  search appended as it went and stopped at `n_modes`, making the budget first-come-first-served and
-  the order in `mode_searches` silently decisive: on GW150914 `'hypercube'` filled every secondary
-  slot with near-duplicate azimuth modes (log-posteriors within 0.5 of the primary) and
-  `'multistart'`, running second, had all of its candidates discarded — enabling it did nothing at
-  all, with no error and no warning. "Up to `n_modes` modes" now means the best `n_modes` found
-  rather than the first `n_modes` proposed, and listing the searches in either order gives the same
-  result. The Hessian is still paid only on acceptance, so a losing candidate costs nothing, and
-  symmetry mirrors continue to inherit their source's covariance rather than computing one.
-  `mode_symmetries` mirrors are now proposed against the whole candidate pool, not only against
-  already-accepted modes, so a symmetry-implied mode can be seeded from a candidate another search
-  turned up.
-- `'multistart'` entry for `mode_searches`, with `mode_multistart_nstarts` (default 10) — a full-space
-  multi-start secondary-mode search that polishes *every* random prior start and ranks only afterwards.
-  The distinction from `'hypercube'` is the ranking, not the sampling: that search scores its Latin
-  hypercube points *before* polishing and descends only from the best, which hides a mode whose basin
-  is shallow where you land but deep where it leads. Measured on GW150914, whose face-on solution needs
-  a correlated move across all thirteen sampled coordinates: it is 24-51 nats down under any coordinate
-  pinning and 37 down under a `theta_jn` reflection — so neither `mode_search_subspace` nor
-  `mode_symmetries` reaches it at any setting — yet a plain local optimisation from a random prior draw
-  lands in it 30% of the time (19/64 starts), within ~1 nat of its peak. Ten starts therefore find it
-  with probability 0.97, for ~2.4k likelihood evaluations each against ~27M for the sampling stage.
-  Off by default, so no existing run changes. It supplies *secondary* modes only: the primary still
-  comes from `minimization_method`'s global optimiser, which remains the better tool for that job
-  (differential evolution reached -4969.26 against multi-start's -4971.56 on the same example).
-- `mode_symmetry_tol` parameter — how many nats a `mode_symmetries`-implied mode's log-posterior may
-  fall below the mode it mirrors and still be seeded. The mirror reuses its source's covariance, so
-  under `mode_weights='laplace'` an offset of `d` means the mirror takes a share `exp(-d)` of the
-  pair; the tolerance is therefore a floor on how much posterior mass an implied mode must carry to
-  be worth having, not a test of whether the symmetry is exact. Default `None` derives it from the
-  same threshold used to drop negligible mixture components (`-log(1e-3)` ~ 6.9 nats), so a symmetry
-  mode is admitted exactly when it would survive the weighting. `0` restores exact-only matching.
-  The previous fixed 0.5-nat tolerance rejected modes precisely where they matter: on an
-  IMRPhenomXPHM precessing-BBH example the `delta_phase` mirror missed by 1.12 nats and was skipped,
-  yet dynesty and aspire independently put 0.22-0.27 of the posterior in that lobe, and losing it
-  left the SMC run sampling one lobe of two — a 468 mbit JSD on `delta_phase` against dynesty. A
-  near-symmetry is still a mode; only a fictitious one should be rejected.
-- SMC resampling via aspire (`resample='smc'`), including multi-mode discovery and Gaussian mixture proposals.
-- `inprior` resampling mode — filters proposal samples to prior support without likelihood evaluation.
-- Aligned initial samples for SMC — uses `_draw_inprior_samples()` helper to match rejection/importance sampling.
-- `jacobian_cap_scale` parameter — caps the Jacobian at user-specified fraction of uniform-prior density, addressing prior-dominated parameters.
-- `hessian_kwargs` parameter — forwards custom kwargs to `scipy.differentiate.hessian` for finer control.
-- `sampling_cov` parameter — pass a precomputed covariance (parameter-named DataFrame or `(names, cov)` tuple) to use in place of the Laplace estimate.
-- `max_iterations` parameter (default 1e6) — aborts rejection/importance sampling if acceptance rate drops below 1%.
-- Unit-cube Hessian computation (`use_unit_cube=True`) — avoids boundary issues when MAP sits near prior edges.
-- Validation of Hessian-derived covariance along principal axes — inflates eigendirections where posterior is wider than Gaussian predicts.
-- `.github/workflows/pre-commit.yml` — automated code quality checks on push and PRs.
-- `.pre-commit-config.yaml` — black, isort, flake8, mypy, trailing-whitespace, end-of-file-fixer hooks.
-- Shared `examples/comparison.py` module — eliminates code duplication across example scripts.
-- Multi-plot support in HLV example — intrinsic vs extrinsic parameter comparisons.
-- Removed GW150914 example (real data download not practical for CI).
-
-### Changed
-
-- `fail_on_error` default changed to `True` (was `False`) — fails fast on sampling issues.
-- Examples restructured: gaussian, rosenbrock, hlv (lorentzian kept from stub).
-- Jacobian cap now scaled by `jacobian_cap_scale` parameter rather than hardcoded at 1.0.
-- SMC pre-scan for rejection sampling uses in-prior-filtered calibration samples.
-- Unit-cube Hessian finite-difference settings: `initial_step=0.001`, `step_factor=2`, `maxiter=10`
-  (all overridable via `hessian_kwargs`).
-- Renamed for terminological precision: the estimated matrix is the negative Hessian of the
-  log-posterior (the posterior precision), not the Fisher information matrix. `matrix.py` →
-  `laplace.py`; `FisherMatrixPosteriorEstimator` → `LaplacePosteriorEstimator`; `calculate_FIM` →
-  `calculate_posterior_precision`; `calculate_iFIM` → `calculate_posterior_covariance`. No
-  backwards-compatible aliases (alpha).
-- The `sample_array`/`sample_dataframe` sentinel for "find the expansion point yourself" is now
-  `sample='MAP'` (was `'maxL'`), and any other string raises `ValueError` instead of being silently
-  treated as a parameter dict.
-
-### Fixed
-
-- **`Constraint` priors were ignored by the whole Laplace setup stage.** A `Constraint` bounds a
-  *derived* quantity (`mass_1`/`mass_2` from a sampled `chirp_mass` and `mass_ratio`), so bilby
-  applies it through the `PriorDict`'s `conversion_function` — and `LaplacePosteriorEstimator` never
-  stored the `PriorDict`, only a plain per-parameter `priors_dict` from which the conversion
-  function, `constraint_keys` and `evaluate_constraints` are all absent. `log_prior` was therefore a
-  hand-rolled product of marginals, and everything built on it was blind to constraints: the MAP
-  search (differential evolution over the raw prior *box*, plus `sample_subset` starting points),
-  the parameter-space Hessian, the mode search and `log_evidence_laplace`. On the BNS_3G prior 39%
-  of the box violates the mass constraint, so the MAP could be found — and the proposal centred and
-  shaped — in a region of zero prior density. `log_prior` now delegates to `PriorDict.ln_prob`,
-  which applies per-parameter support, constraints and the constraint normalisation in one call;
-  MAP starting points come from `sample_subset_constrained`.
-  Note the *sampling* stages were already correct: `rejection`, `importance`, `inprior` and `smc`
-  all filter through `PriorDict.ln_prob` (the last via `aspire_bilby`'s log-prior), so their output
-  samples always satisfied constraints. Only the Laplace stage that seeds them did not.
-- `log_likelihood_from_array` now screens constraints as well as the per-parameter box, once per
-  batch, before dispatching to the pool. Constraint-violating points return `-inf` and are never
-  handed to the likelihood. `clip_to_bounds` still clips into the box but cannot rescue a
-  constraint violation — there is no per-parameter projection onto a non-rectangular region.
-- `log_evidence_laplace` summed marginals directly and so omitted bilby's
-  `normalize_constraint_factor`, leaving it on a different normalisation from the
-  rejection/importance/SMC evidences, which get the factor via `ln_prob`. On the BNS_3G prior the
-  two differed by 0.50 nats. It now goes through `log_prior`.
-- `_draw_initial_smc_samples`/`_draw_inprior_samples` applied the `prior_parameters` substitution
-  *after* filtering to the prior support, so a fresh draw for a substituted parameter could push an
-  already-accepted sample back outside the support — silently reintroducing exactly what the filter
-  removes. The substitution now happens before the test, matching `_run_inprior`.
-- Mode search: Latin hypercube starts that violate a constraint are dropped (after any
-  `mode_search_subspace` pinning, so the configuration tested is the one actually used) rather than
-  spent on a polish from a flat `-inf`.
-- `resample=None` returned raw Gaussian draws with no support test at all; it now reports what
-  fraction falls outside the prior support. The draws are still unfiltered — that is the documented
-  meaning of this mode, and `resample='inprior'` is the filtered variant.
-
-- Laplace covariance could collapse to the prior (posterior widths inflated ~250x). The unit-cube
-  Hessian's `maxiter` had been raised to 20, driving `scipy.differentiate.hessian` into the
-  objective's numerical-noise floor and producing a spurious indefinite curvature. Reverted to
-  `maxiter=10`, and — more robustly — the unit-cube precision is now floored at the prior precision
-  before inversion, so the covariance is bounded by the prior: a noisy, indefinite, or non-finite
-  Hessian degrades to prior width instead of blowing up. A too-large `initial_step` no longer
-  crashes the eigendecomposition.
+- `Constraint` priors are applied in the MAP search, Hessian, mode search and Laplace evidence
+  (`log_prior` delegates to `PriorDict.ln_prob`; MAP starts use `sample_subset_constrained`).
+- `log_evidence_laplace` includes bilby's constraint normalisation factor.
+- `prior_parameters` substitution happens before the prior-support test in the SMC and in-prior
+  draws.
+- Latin hypercube starts that violate a constraint are dropped from the mode search.
+- The hypercube mode search keeps the best polish of a region, not the first.
+- An exact symmetry mirror is not rejected as a duplicate of its own source by the separation gate.
+- The waveform Fisher uses the injection as the marginalised-parameter reference only when
+  `use_injection_for_map=True`.
+- Local MAP polishes wrap periodic parameters instead of treating their bounds as walls.
+- `resample=None` reports the fraction of draws outside the prior support.
+- The sampling seed reaches every stage, including SMC.
 
 ### Removed
 
-- The duplicated prior-bounds test inside `_pool_log_likelihood`, and the `bounds_min`, `bounds_max`
-  and `clip_to_bounds` arguments it needed. Support is now decided once per batch in
-  `log_likelihood_from_array`, so pool workers receive only in-support columns — one vectorised test
-  per batch instead of one scalar test per task, and two fewer arrays bound into every task.
-- The redundant bounds test in `log_posterior_from_array`: `log_prior` → `PriorDict.ln_prob` already
-  returns `-inf` outside a parameter's range, and `log_posterior` short-circuits before the
-  likelihood. The test it replaced was both duplicated and weaker (box only).
-- Manual finite-difference Hessian fallback and the `fd_eps` parameter — `scipy.differentiate.hessian`
-  (scipy ≥ 1.15) is now required and used unconditionally. Dropped the `packaging` dependency.
-- `get_maximum_likelihood_sample()`, a bare alias for `get_MAP_sample()`. It never computed a
-  maximum-*likelihood* point — like the `'maxL'` sentinel it backed, it maximises `log L + log pi`,
-  so with a non-flat prior it returned the MAP, not the MLE. Nothing in the package computes an
-  MLE: the Laplace expansion is about the posterior mode by construction. No alias (alpha).
+- The manual finite-difference Hessian fallback and `fd_eps`; `scipy>=1.15` is required.
+- `get_maximum_likelihood_sample()`, an alias of `get_MAP_sample()`.
+- The bounds arguments of `_pool_log_likelihood`; support is tested once per batch.
+- The GW150914 example (needs a data download).
 
 ---
 
@@ -311,5 +107,6 @@ Initial release.
 - `examples/gaussian_example.py` — minimal runnable demo on a 2-D Gaussian likelihood.
 - Version managed by `setuptools-scm` from git tags.
 
-[Unreleased]: https://github.com/GregoryAshton/bilby-laplace/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/GregoryAshton/bilby-laplace/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/GregoryAshton/bilby-laplace/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/GregoryAshton/bilby-laplace/releases/tag/v0.1.0

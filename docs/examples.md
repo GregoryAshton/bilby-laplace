@@ -24,6 +24,7 @@ make compare          # load all results, print evidence table, plot
 | `examples/rosenbrock` | A strongly non-Gaussian, curved target — a stress test where `resample="smc"` matters. |
 | `examples/BBH_HLV` | A simulated binary-black-hole injection in an H–L–V network (no data download needed). A realistic high-dimensional GW problem. |
 | `examples/BNS_3G` | A binary-neutron-star injection in a 3rd-generation network. |
+| `examples/AntiGlitch` | A simulated anti-glitch in Gaussian noise. |
 
 ## A minimal script
 

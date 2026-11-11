@@ -36,7 +36,7 @@ mkdocs serve
 
 ## Requirements
 
-- Python ≥ 3.9
+- Python ≥ 3.10
 - `scipy ≥ 1.15` (the Hessian is computed with `scipy.differentiate.hessian`)
 - `bilby ≥ 2.7`
 

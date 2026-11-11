@@ -104,10 +104,9 @@ def run_rejection(_common_laplace):
 
 def run_emcee(_common_laplace):
     # The banana curvature of this likelihood mixes far more slowly than the
-    # Laplace-Gaussian proposal it starts from -- tau grows for tens of
-    # thousands of steps before settling near 300 -- so the 5000-sample target
-    # used elsewhere in this repo would need an impractically long chain.
-    # Accept fewer independent samples rather than chase that target.
+    # Laplace-Gaussian proposal it starts from, so the 5000-sample target used
+    # elsewhere in this repo would need an impractically long chain. Accept
+    # fewer independent samples rather than chase that target.
     return bilby.run_sampler(
         **{**_common_laplace, "target_nsamples": 2500},
         label=f"{base_label}_emcee",

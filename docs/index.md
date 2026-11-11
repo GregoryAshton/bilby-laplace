@@ -8,9 +8,7 @@ The method is fast, scales well to moderate dimensions, and produces asymptotica
 exact posterior samples when the true posterior is close to Gaussian. It is useful
 as a cheap cross-check against nested sampling results.
 
-!!! note
-    This project is in active development and derived from
-    [bilby PR #933](https://github.com/bilby-dev/bilby/pull/933) (Gregory Ashton).
+Originally derived from [bilby PR #933](https://github.com/bilby-dev/bilby/pull/933).
 
 ## Where to go next
 

@@ -67,29 +67,22 @@ TARGET_EFFICIENCY_RATE = 0.5
 # `autocorr_tol * nwalkers` independent samples. Picking them so the
 # reliability bar and the sample target coincide is the cheapest place to sit
 # -- `N_EMCEE_TARGET / N_EMCEE_WALKERS == N_EMCEE_AUTOCORR_TOL`, i.e.
-# 2000 / 100 = 20 here. Fixed-length runs at 500-1000 walkers had to
-# overshoot to 25000+ samples to clear the same bar. Fewer walkers is not
-# free either: each half-ensemble move evaluates nwalkers / 2 points, so 100
-# walkers is 50 per batch against npool=64.
+# 2000 / 100 = 20 here. Fewer walkers is not free either: each half-ensemble
+# move evaluates nwalkers / 2 points, so 100 walkers is 50 per batch against
+# npool=64.
 #
-# tol=20 rather than emcee's default 50 is a deliberate, measured compromise.
-# mass_ratio's tau on this posterior is ~3500 and its *estimate is still
-# rising with chain length* (1300 at 15k steps, 2330 at 30k, 3540 at 60k), so
-# the true value is a lower bound and clearing a 50x bar would need ~6.5e6
-# steps, about 40 hours. At 20x it needs ~1.3e5 steps, under an hour. The
-# price is a tau biased low, so "2000 independent samples" is optimistic and
-# the returned draws are mildly correlated; the marginals are still usable
-# for the JSD/EMD comparison, which is what this example is for. The achieved
-# chain/tau ratio is logged every batch, and the sampler warns that the bar
-# is below emcee's own, so the weaker guarantee stays on the record. Verified
-# stationary (not burn-in): tau on length-matched halves of a 60000-step
-# chain was 2327 vs 2357 for mass_ratio, with block means flat.
+# tol=20 is below emcee's default of 50, a compromise for run time: mass_ratio
+# mixes slowly on this posterior, and a 50x bar would need an impractically
+# long chain. The price is a tau biased low, so "2000 independent samples" is
+# optimistic and the returned draws are mildly correlated; the marginals are
+# still usable for comparing samplers, which is what this example is for. The
+# achieved chain/tau ratio is logged every batch, and the sampler warns that
+# the bar is below emcee's own.
 N_EMCEE_WALKERS = 100
 N_EMCEE_TARGET = 2000
 N_EMCEE_AUTOCORR_TOL = 20
 N_EMCEE_STEPS = 1000
-# Ceiling, not a prescription: the loop stops as soon as the bar clears,
-# expected near 1.3e5 steps. The headroom covers the extrapolation's slop.
+# Ceiling, not a prescription: the loop stops as soon as the bar clears.
 N_EMCEE_MAX_STEPS = 250000
 N_EMCEE_DISCARD = 500
 
@@ -168,13 +161,9 @@ def setup(likelihood_type="rb"):
     priors = BNSPriorDict(
         dictionary=dict(
             chirp_mass=UniformInComponentsChirpMass(
-                # 1.399-1.401 was a range of 0.002 about an injection at 1.4:
-                # narrower than a real analysis could justify, and it was
-                # masking a defect. The Laplace proposal for chirp_mass was
-                # being inflated far past the prior and then truncated back to
-                # it, so the "proposal" was the prior and looked merely wide
-                # rather than wrong. Ten times wider keeps the posterior
-                # likelihood-dominated while letting the proposal be seen.
+                # Narrow about the injection to keep the run cheap, but wide
+                # enough that the posterior is likelihood-dominated and the
+                # Laplace proposal is not simply truncated to the prior.
                 name="chirp_mass",
                 minimum=1.39,
                 maximum=1.41,
@@ -316,7 +305,7 @@ def validate_likelihood(variation=0.001):
 
     Agreement means the fast likelihoods are faithful for this event;
     disagreement is the root cause to chase before trusting any posterior built
-    on them.  Ported from ``3G_STM/analysis.py``.
+    on them.
 
     The evaluation point is deliberately perturbed off the injection: relative
     binning is *exact* at its fiducial parameters (the waveform ratio r(f) is
@@ -399,13 +388,9 @@ def run_emcee(_common_laplace, run_prefix):
             # reach here at any practical run length (see the note above).
             target_nsamples=N_EMCEE_TARGET,
             autocorr_tol=N_EMCEE_AUTOCORR_TOL,
-            # `backend_file=True` persists the raw chain (~0.9 GB here) for
-            # analysis the run itself cannot do. Left off now that the
-            # question it was added for is settled: re-estimating tau on
-            # length-matched halves of a 60000-step chain gave 2327 vs 2357
-            # for mass_ratio (ratio 1.01), with block means flat, so the chain
-            # is stationary and tau is not inflated by leftover burn-in. Turn
-            # it back on to redo that kind of sub-range analysis.
+            # `backend_file=True` would persist the raw chain (large here)
+            # for analysis the run itself cannot do, such as re-estimating
+            # tau on sub-ranges of the chain to check stationarity.
         ),
     )
 

@@ -1,10 +1,10 @@
 """The MAP search must not return a needle spike of the log-posterior.
 
-IMRPhenomXPHM's SpinTaylor precession angles leave points that stand several
-nats above everything within ~1e-5 of the unit cube around them, and that are
-unchanged along the parameters the spike does not depend on (sheets).  An
-optimiser keeps any higher point it touches, so best-of-restarts selection
-prefers them.  The guard drops such candidates from the selection.  These tests
+Some likelihoods (e.g. waveform models with numerically evolved precession
+angles) have isolated points that stand well above everything in a tiny
+neighbourhood, and that are unchanged along the parameters the spike does not
+depend on (sheets).  An optimiser keeps any higher point it touches, so
+best-of-restarts selection prefers them.  The guard drops such candidates from the selection.  These tests
 pin it on a synthetic surface with exactly that shape: a smooth Gaussian peak,
 and next to it a sheet 5 nats high that is 1e-6 of the unit cube wide in ``x``
 and unbounded in ``y``.
@@ -15,7 +15,11 @@ import numpy as np
 import pytest
 from scipy.optimize import OptimizeResult
 
-from bilby_laplace.laplace import MAP_SPIKE_DELTA, MAP_SPIKE_DROP, LaplacePosteriorEstimator
+from bilby_laplace.laplace import (
+    MAP_SPIKE_DELTA,
+    MAP_SPIKE_DROP,
+    LaplacePosteriorEstimator,
+)
 
 MU = np.array([1.7, -2.3])
 SIGMA = 0.5  # 0.05 of the unit cube: far wider than MAP_SPIKE_DELTA
@@ -125,8 +129,7 @@ def test_a_point_beside_a_step_is_not_flagged(priors):
     +delta and +2 delta beyond the step, the plain excess is D - s but the
     corrected one is D - 2 s / 3: at s = 1.5, D = 2.2 that is 0.7 against 1.2,
     so the correction alone flags a point that stands above its neighbours by
-    under a nat. This is the shape beside GW150914's largest spike, where a
-    ~1.5-nat step lies within delta of a smooth slope.
+    under a nat.
     """
     likelihood = _SurfaceLikelihood(needle=False, step=False)
     delta_x = MAP_SPIKE_DELTA * 10  # one delta, in parameter units (the prior is 10 wide)
@@ -217,7 +220,7 @@ def test_the_default_offset_is_in_the_unit_cube():
 
 
 class _NarrowPeakLikelihood(bilby.core.likelihood.Likelihood):
-    """A smooth Gaussian peak of width 1 at x = 19, as AntiGlitch's amplitude is."""
+    """A smooth Gaussian peak of width 1 at x = 19, near the bottom of a wide prior."""
 
     def __init__(self):
         super().__init__(parameters=dict(x=None, y=None))
@@ -233,9 +236,8 @@ def test_a_smooth_peak_by_a_prior_bound_is_not_flagged():
     Under ``Uniform(0, 1e5)`` the peak sits 1.9e-4 of the unit cube from the
     lower bound, inside +-2 * MAP_SPIKE_DELTA. The low-side probes were clipped
     to x = 0, both at d and at 2d, so they read the same point: e(d) = e(2d),
-    which is a spike's signature, and a genuine peak ~180 nats above the bound
-    was rejected (bilby-laplace-paper ``prior_volume``, AntiGlitch at
-    ``a_max`` >= 1e4). The high side alone shows the peak's curvature.
+    which is a spike's signature. The high side alone shows the peak's
+    curvature.
     """
     priors = bilby.core.prior.PriorDict(
         dict(x=bilby.core.prior.Uniform(0, 1e5, "x"), y=bilby.core.prior.Uniform(-5, 5, "y"))

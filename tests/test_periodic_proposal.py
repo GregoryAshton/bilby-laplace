@@ -2,11 +2,10 @@
 
 Truncation renormalises a Gaussian inside the prior range and puts *zero* mass
 on the far side of the boundary.  For an angle that is wrong: the mass below the
-lower edge belongs just under the upper edge.  On the precessing BBH example the
-``phi_jl`` MAP sits at 0.835 with a proposal sigma near 1.4, so about a quarter
-of its Gaussian falls below zero; truncating lost that tail, leaving 1.6% of the
-posterior above 0.85*2pi where dynesty and the prior-seeded control both have
-~12%.
+lower edge belongs just under the upper edge.  With a mean near the lower edge
+and a sigma comparable to the range, a large part of the Gaussian falls below
+zero; truncation drops that tail and leaves the region under the upper edge
+nearly empty.
 """
 
 import numpy as np
@@ -29,7 +28,7 @@ def _proposal(periodic):
 
 
 def test_wrapping_puts_mass_beyond_the_far_edge():
-    """The regression: truncation leaves the upper edge empty."""
+    """Truncation leaves the upper edge empty; wrapping fills it."""
     wrapped = _proposal([True, False]).sample(20000)[:, 0]
     truncated = _proposal([False, False]).sample(20000)[:, 0]
 

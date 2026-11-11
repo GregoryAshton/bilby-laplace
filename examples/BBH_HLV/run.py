@@ -125,15 +125,12 @@ def setup():
             mass_2=Constraint(name="mass_2", minimum=10, maximum=80),
             a_1=Uniform(name="a_1", minimum=0, maximum=0.99, latex_label=r"$a_1$"),
             a_2=Uniform(name="a_2", minimum=0, maximum=0.99, latex_label=r"$a_2$"),
-            # cos_tilt_1/cos_tilt_2 were tried here and do not work on this
-            # example. The reparameterisation is prior-preserving as a
-            # *distribution*, but a density mode is not invariant under a change
+            # Sampled in tilt rather than cos(tilt). The two priors agree as
+            # distributions, but a density mode is not invariant under a change
             # of coordinates: the Sine prior suppresses tilt -> 0, while a flat
-            # prior in the cosine does not, and the MAP duly moves to
-            # cos_tilt_1 = +1.000000 exactly (aligned spin). The waveform Fisher
-            # then steps outside [-1, 1], arccos returns NaN and the waveform
-            # call fails. Even with a boundary-safe derivative, centring a
-            # Gaussian proposal on a prior edge is the wrong place to be.
+            # prior in the cosine does not, so the MAP can sit at cos_tilt = 1
+            # exactly. The waveform Fisher would then step outside [-1, 1], and
+            # a Gaussian proposal centred on a prior edge is a poor fit anyway.
             tilt_1=Sine(name="tilt_1", latex_label=r"$\theta_1$"),
             tilt_2=Sine(name="tilt_2", latex_label=r"$\theta_2$"),
             phi_12=Uniform(
@@ -270,18 +267,14 @@ def run_smc(_common_laplace):
         mode_separation_sigma=1,
         mode_search_nsamples=5000,
         mode_search_subspace=["zenith", "azimuth", "delta_phase"],
-        # The log-posterior is exactly pi-periodic in delta_phase -- the two
-        # lobes are degenerate to machine precision -- so the mirror is written
-        # down rather than left to the random multi-start search, which on this
-        # problem returned three candidates all in the same lobe and sampled
-        # half the posterior.
+        # The log-posterior is pi-periodic in delta_phase, so the mirror
+        # is declared rather than left to the random search, which can return
+        # candidates all in the same lobe.
         mode_symmetries=[("delta_phase", np.pi)],
-        # `smc_prior_flow="laplace"` was tried here and is much worse (mean JSD
-        # 86 against 8.8): GaussianMixtureFlow is an *unbounded, non-periodic*
-        # Gaussian mixture, so the log q it supplies is wrong at the prior
-        # edges and across the five periodic coordinates this example declares.
-        # The trained flow gets those right via aspire's bounded/angular
-        # preconditioning. See the note on the kwarg in sampler.py.
+        # `smc_prior_flow` is left at its default: "laplace" supplies an
+        # unbounded, non-periodic Gaussian mixture, whose log q is wrong at the
+        # prior edges and across this example's periodic coordinates. See the
+        # note on the kwarg in sampler.py.
     )
 
 

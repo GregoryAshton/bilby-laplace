@@ -234,14 +234,13 @@ def test_log_evidence_is_exact_for_gaussian(estimator, map_sample):
 
 
 # ---------------------------------------------------------------------------
-# covariance is bounded by the prior (regression guards)
+# covariance is bounded by the prior
 #
 # A bounded posterior can never be broader than its prior.  The unit-cube
 # precision is therefore floored at the prior precision (variance 1/12 in
 # unit-cube coordinates) before inversion.  These tests pin that behaviour so
 # a pathological Hessian -- near-zero, indefinite, or non-finite curvature --
-# can never again produce a runaway, effectively-unconstrained covariance
-# (the bug where the Laplace posterior collapsed to the prior width x ~250).
+# cannot produce a runaway, effectively-unconstrained covariance.
 # ---------------------------------------------------------------------------
 def _fake_hessian_result(ddf):
     """Mimic the scipy.differentiate.hessian return object."""

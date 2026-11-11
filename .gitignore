@@ -43,3 +43,9 @@ CLAUDE.md
 
 # Run logs from `make <sampler> > x.log`
 examples/**/*.log
+
+# Editor settings
+.vscode/
+
+# Example outputs: `make compare` writes a results README and figures here
+examples/*/README.md

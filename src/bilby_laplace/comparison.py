@@ -8,8 +8,8 @@ import bilby
 import numpy as np
 from scipy.stats import entropy, gaussian_kde, wasserstein_distance
 
-# JS divergences are a few thousandths of a nat on these problems, which is
-# unreadable; millibits is the unit the numbers are quoted in.
+# JS divergences between close posteriors are small fractions of a nat, which
+# is unreadable; millibits is the unit the numbers are quoted in.
 MBITS_PER_NAT = 1000.0 / np.log(2)
 
 # The two per-parameter agreement metrics, in the order they appear in the
@@ -29,14 +29,13 @@ METRIC_UNITS = {"jsd": "mbits", "emd": "sigma"}
 MISSING = "—"
 
 # Samples per side of every JS divergence, fixed for every result and every
-# example. The estimator is biased upward at finite N (roughly as 1/N), so a
-# dynesty posterior (~4500 samples) compared with an SMC one (10000) at their
-# natural sizes is penalised by about a factor of two on sample count alone.
+# example. The estimator is biased upward at finite N (roughly as 1/N), so
+# comparing posteriors at their natural, differing sizes would penalise the
+# smaller one on sample count alone.
 #
 # A constant rather than "the smallest posterior present": deriving it from the
-# results made the number depend on which runs happened to be on disk, so a
-# value could not be compared with the same example's value from last week, let
-# alone with another example's.
+# results would make the number depend on which runs happen to be on disk, so a
+# value could not be compared across re-runs or across examples.
 #
 # Chosen small enough to fit inside every posterior these comparisons run
 # against, but large enough that the finite-N bias noted above stays well
@@ -55,7 +54,7 @@ SAMPLER_COLOURS = {
     "inprior": "#CC79A7",  # reddish purple
     "rejection": "#D55E00",  # vermillion
     "importance": "#56B4E9",  # sky blue
-    "smc": "#E69F00",  # orange              - the headline method
+    "smc": "#E69F00",  # orange
     "aspire": "#785EF0",  # violet           - SMC from the prior, no-Laplace control
     "dynesty": "#0072B2",  # blue            - reference nested sampler
 }
@@ -223,8 +222,7 @@ def _format_efficiency(eff):
 def _format_time(seconds):
     """A duration in the largest unit that leaves it above 1, e.g. ``"10.4h"``.
 
-    These runs span four orders of magnitude in cost -- ten seconds for the
-    in-prior draw against ten hours for dynesty -- and quoting all of them in
+    Run costs can span several orders of magnitude, and quoting all of them in
     seconds makes the expensive ones unreadable strings of digits.
     """
     if not np.isfinite(seconds):
@@ -239,9 +237,8 @@ def _format_mevals(n_like):
     """Likelihood evaluations in millions, to three significant figures.
 
     Three significant figures rather than a fixed number of decimals because
-    the same column carries both a 48.3 million evaluation SMC run and a 0.005
-    million in-prior draw, and a fixed ``{:.2f}`` would print the latter as
-    ``0.01``.
+    the same column can carry counts orders of magnitude apart, and a fixed
+    ``{:.2f}`` would round a small one (e.g. 5000 evaluations) to ``0.01``.
     """
     return MISSING if not np.isfinite(n_like) else f"{n_like / 1e6:.3g}"
 
@@ -252,7 +249,7 @@ def _format_metric(value):
 
 
 def _format_worst(summary):
-    """``"tilt_1 (15.81)"`` -- the parameter a metric is worst on, and its value."""
+    """``"tilt_1 (1.23)"`` -- the parameter a metric is worst on, and its value."""
     return MISSING if not summary["worst"] else f"{summary['worst']} ({summary['worst_value']:.2f})"
 
 
@@ -513,7 +510,7 @@ def reference_floor(results, reference_index):
     """The reference posterior compared with itself: what finite N costs.
 
     Two finite draws from the *same* distribution do not give JSD = 0, and that
-    offset is comparable with the divergences measured on the examples that
+    offset can be comparable with the divergence between posteriors that
     agree well. Without it a number in the table reads as a measurement when it
     is the estimator's own noise.
 

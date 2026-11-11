@@ -7,25 +7,23 @@ where the quadratic expansion is valid over the smallest range. So the
 covariance can claim a constraint the likelihood does not have, and only a
 direct probe of the likelihood can catch it.
 
-Two failure modes of a fixed 1-sigma probe are pinned here, both measured on a
-13-parameter precessing-BBH posterior:
+Two failure modes of a fixed 1-sigma probe are pinned here:
 
 * a direction whose sigma is orders of magnitude below the prior width cannot
-  produce a resolvable drop at 1 sigma however wrong it is, and used to be
-  waved through as "unresolved";
-* a 1-sigma step can land outside the prior on *both* sides, and the axis used
-  to be skipped entirely -- five of thirteen axes went unvalidated there.
+  produce a resolvable drop at 1 sigma however wrong it is, so a fixed probe
+  would wave it through as "unresolved";
+* a 1-sigma step can land outside the prior on *both* sides, and a fixed probe
+  would skip that axis entirely.
 """
 
 import bilby
 import numpy as np
 import pytest
 from bilby.core.prior import PriorDict, Uniform
+from conftest import MU, TRUE_COV
 
 from bilby_laplace.laplace import LaplacePosteriorEstimator
 from bilby_laplace.sampler import Laplace
-
-from conftest import MU, TRUE_COV
 
 
 @pytest.fixture
@@ -46,8 +44,8 @@ def test_exact_covariance_is_left_alone(validator):
 def test_a_spuriously_narrow_direction_is_widened(validator):
     """The gap that mattered: a covariance far too narrow must be corrected.
 
-    A 1e-6 shrink in variance is 1e-3 in sigma, comparable to the ~30-50x
-    under-estimate measured on the GW problem but deliberately worse.
+    A 1e-6 shrink in variance is 1e-3 in sigma: a deliberately severe
+    under-estimate.
     """
     validate, estimator, mean = validator
 
@@ -59,10 +57,10 @@ def test_a_spuriously_narrow_direction_is_widened(validator):
 
 
 def test_the_fixed_step_probe_could_not_have_resolved_it(validator):
-    """Why the old code missed it, pinned so the regression cannot come back.
+    """Why a fixed-step probe cannot catch it.
 
     At the *claimed* 1 sigma the drop is far below ``_MIN_VALIDATION_DROP``, so
-    the old fixed-step probe took its "unresolved, leave alone" branch -- which
+    a fixed-step probe would take its "unresolved, leave alone" branch -- which
     is exactly where a wrongly narrow direction hides.
     """
     _, estimator, mean = validator
@@ -82,8 +80,8 @@ def test_the_fixed_step_probe_could_not_have_resolved_it(validator):
 def test_an_out_of_bounds_probe_is_measured_not_skipped(validator, monkeypatch):
     """A 1-sigma step outside the prior must shrink until it fits.
 
-    The old code hit ``if not drops: continue`` and never looked at the axis
-    again. Counting evaluations is the direct way to assert the shrink loop
+    A probe that skipped such an axis would never look at it again. Counting
+    evaluations is the direct way to assert the shrink loop
     runs, since for a too-wide direction the *outcome* is correctly "leave
     alone" either way -- the probe never shrinks a covariance.
     """
@@ -101,9 +99,7 @@ def test_an_out_of_bounds_probe_is_measured_not_skipped(validator, monkeypatch):
 
     probes = [c for c in calls if not np.allclose(c, mean)]
     assert probes, "no probe steps were evaluated at all"
-    assert any(
-        np.all(np.abs(c) <= 5.0) for c in probes
-    ), "every probe stayed outside the prior; the step never shrank"
+    assert any(np.all(np.abs(c) <= 5.0) for c in probes), "every probe stayed outside the prior; the step never shrank"
     assert np.all(np.isfinite(out))
 
 
@@ -129,7 +125,7 @@ def test_a_boundary_shrunk_probe_does_not_narrow_the_axis(validator):
 
 
 def test_a_genuinely_unconstrained_direction_is_not_widened():
-    """The invariant the original guard protected, kept intact.
+    """A direction already at prior width with a flat likelihood is left alone.
 
     A flat likelihood along a direction already at prior width is true but
     uninformative. Widening it anyway would push it past the prior on noise.

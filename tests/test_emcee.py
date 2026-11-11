@@ -161,7 +161,7 @@ def test_the_chain_grows_until_the_target_is_met(emcee_setup, monkeypatch):
 
 
 def test_a_single_batch_is_the_default(emcee_setup, monkeypatch):
-    """`max_nsteps` defaulting to `nsteps` keeps the old fixed-length behaviour."""
+    """`max_nsteps` defaults to `nsteps`, giving a single fixed-length batch."""
     sampler, estimator, proposal = emcee_setup
     sampler.kwargs["target_nsamples"] = 10**9  # unreachable, so only the cap can stop it
     sampler.kwargs["emcee_kwargs"] = dict(nwalkers=16, nsteps=200, discard=50)

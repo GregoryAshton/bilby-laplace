@@ -54,7 +54,7 @@ plugins:
               # the __init__ signature. Don't warn about that mismatch.
               warn_unknown_params: false
             show_root_heading: true
-            show_source: true
+            show_source: false
             members_order: source
             separate_signature: true
             show_signature_annotations: true
