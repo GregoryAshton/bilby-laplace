@@ -10,7 +10,7 @@ Versions correspond to git tags; version numbers follow
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-11-10
+## [0.2.0] — 2026-11-11
 
 ### Added
 
