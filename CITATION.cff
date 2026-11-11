@@ -10,6 +10,14 @@ authors:
   - family-names: Ashton
     given-names: Gregory
 license: MIT
+doi: 10.5281/zenodo.24137164
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.24137164
+    description: This version (0.2.0).
+  - type: doi
+    value: 10.5281/zenodo.24137163
+    description: All versions; resolves to the latest release.
 repository-code: "https://github.com/GregoryAshton/bilby-laplace"
 url: "https://gregoryashton.github.io/bilby-laplace/"
 keywords:
