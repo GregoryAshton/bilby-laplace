@@ -46,3 +46,6 @@ examples/**/*.log
 
 # Editor settings
 .vscode/
+
+# Example outputs: `make compare` writes a results README and figures here
+examples/*/README.md
