@@ -34,7 +34,7 @@ def aligned_spin_estimator(gaussian_likelihood):
 
 
 def test_cusp_does_not_blow_up_the_precision(aligned_spin_estimator):
-    """The regression: at chi = 0 this used to return ~1.5e7."""
+    """At chi = 0 the prior density has a cusp; its precision must stay bounded."""
     est = aligned_spin_estimator
     cap = est._prior_precision_cap("x", est.priors_dict["x"])
 
@@ -42,7 +42,7 @@ def test_cusp_does_not_blow_up_the_precision(aligned_spin_estimator):
 
     assert np.isfinite(precision[0])
     assert precision[0] <= cap * (1.0 + 1e-9)
-    # The bound is ~9 for this prior; the unclamped value was six orders up.
+    # The bound is ~9 for this prior; the unclamped value is orders of magnitude larger.
     assert precision[0] < 1e3
 
 
@@ -118,7 +118,7 @@ def test_cap_is_cached_per_parameter(gaussian_likelihood):
 
 
 def test_unsamplable_prior_is_left_unbounded(gaussian_likelihood):
-    """Rather than guess a bound, fall back to the previous behaviour."""
+    """Rather than guess a bound, leave the precision unbounded."""
     est = _estimator(Uniform(-5, 5, "x"), gaussian_likelihood)
 
     class _Unsamplable:

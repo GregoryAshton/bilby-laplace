@@ -18,7 +18,7 @@ import pytest
 
 from bilby_laplace.laplace import DE_ATOL, LaplacePosteriorEstimator
 
-OFFSET = 2.0e5  # the noise evidence's scale on a 3G BNS
+OFFSET = 2.0e5  # a log-likelihood offset of the order of a GW noise evidence
 
 
 class _OffsetGaussianLikelihood(bilby.core.likelihood.Likelihood):
@@ -72,8 +72,8 @@ def test_the_map_is_found_despite_a_large_constant_offset(offset_priors):
 def test_the_offset_does_not_change_where_the_search_lands(offset_priors):
     """The same problem with and without the constant must give the same MAP.
 
-    This is the regression proper: under a relative tolerance the offset alone
-    decided how hard the optimiser tried.
+    Under a relative tolerance the offset alone would decide how hard the
+    optimiser tried.
     """
     with_offset = _estimator(_OffsetGaussianLikelihood(offset=OFFSET), offset_priors).get_MAP_sample()
     without = _estimator(_OffsetGaussianLikelihood(offset=0.0), offset_priors).get_MAP_sample()

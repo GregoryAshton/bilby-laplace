@@ -57,7 +57,7 @@ def test_step_relative_and_mass_steps_unchanged():
 
 
 def test_waveform_allows_phase_time_distance_marginalization():
-    """Marginalising phase/time/distance is now supported (no error)."""
+    """Marginalising phase/time/distance is supported (no error)."""
     like = _FakeGWLikelihood(
         ["geocent_time", "phase", "luminosity_distance"],
         {
@@ -354,8 +354,8 @@ def test_stencil_shifts_inside_a_prior_bound():
 
     A tidal deformability's MAP can sit at its prior's lower bound of 0, and
     the central point value - dp/2 is then negative, which NRTidalv2 refuses
-    (lalsimulation raises; bilby-laplace-paper ``pp``, injection 34). Shifted,
-    it is a one-sided difference of the same step, taken inside the prior.
+    (lalsimulation raises). Shifted, it is a one-sided difference of the same
+    step, taken inside the prior.
     """
     assert gw_fisher._stencil(0.0, 1e-6, (0.0, 5000.0)) == (0.0, 1e-6)
     lo, hi = gw_fisher._stencil(5000.0, 2.0, (0.0, 5000.0))
@@ -372,7 +372,7 @@ def test_injection_is_fisher_reference_only_when_seeding_with_it(
 ):
     """The injection reaches `marginalized_reference` only under `use_injection_for_map`.
 
-    Otherwise a blind run (e.g. a P--P campaign) would have its marginalised
+    Otherwise a blind run (e.g. a P--P test) would have its marginalised
     distance/phase Fisher block evaluated at the truth.
     """
     from conftest import CorrelatedGaussianLikelihood

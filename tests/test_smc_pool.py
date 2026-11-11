@@ -176,10 +176,10 @@ def test_npool_defaults_to_no_pool(sampler):
 
 
 # --------------------------------------------------------------------------
-# Periodic parameters.  `aspire_bilby`'s own plugin passes these to Aspire; our
-# `_smc_sample` did not, so a wrapping coordinate got the bounded->logit
-# preconditioning instead of angular treatment and the pCN kernel could not
-# step across the boundary.  On the HLV example that affects psi and azimuth.
+# Periodic parameters.  `_smc_sample` passes these to Aspire, as
+# `aspire_bilby`'s own plugin does; without them a wrapping coordinate gets the
+# bounded->logit preconditioning instead of angular treatment and the pCN
+# kernel cannot step across the boundary.
 # The derivation is duplicated here because it is the contract under test.
 # --------------------------------------------------------------------------
 

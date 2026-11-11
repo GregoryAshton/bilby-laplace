@@ -75,7 +75,7 @@ def _full_resolution_waveforms(likelihood):
     full-grid ("fiducial") evaluation.
 
     A ``RelativeBinningGravitationalWaveTransient`` samples with its waveform
-    generator returning strain only at the ~100 frequency bin edges, which is
+    generator returning strain only at the coarse frequency bin edges, which is
     incompatible with the full-resolution inner product (PSD / frequency mask)
     used by :func:`waveform_fisher_matrix`. bilby exposes ``_set_fiducial`` /
     ``_unset_fiducial`` to flip the generator between full-grid (``fiducial=1``)

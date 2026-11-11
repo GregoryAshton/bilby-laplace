@@ -82,8 +82,7 @@ def test_rejection_sampling_resume_reregisters_accumulators(rejection_setup):
     state = sampler._checkpoint_state
     assert state["n_accepted"] >= 500
     assert state["n_accepted"] > accepted_after_first_run
-    # The regression assertion: the samples reachable from the checkpoint must
-    # match the counter. Before the fix the payload still referenced the
-    # pre-resume list, so this count would lag n_accepted.
+    # The samples reachable from the checkpoint must match the counter; a
+    # payload still referencing the pre-resume list would lag n_accepted.
     assert sum(len(a) for a in state["all_samples"]) == state["n_accepted"]
     assert len(samples) >= 500

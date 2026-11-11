@@ -86,8 +86,8 @@ def test_effective_log_proposal_cancels_replaced_dimension(proposal):
     """For a prior-replaced dimension, logpi - log_g must cancel on that dim,
     leaving only the non-replaced dims' importance weight.
 
-    The pre-fix bug used the truncated-normal marginal for the replaced dim,
-    leaving a spurious truncnorm_y/prior_y factor in the weight."""
+    Using the truncated-normal marginal for the replaced dim instead would
+    leave a spurious truncnorm_y/prior_y factor in the weight."""
     import pandas as pd
 
     lap = _bare_laplace(prior_parameters=["y"])
@@ -102,8 +102,8 @@ def test_effective_log_proposal_cancels_replaced_dimension(proposal):
     truncnorm_x = proposal._dists[0].logpdf(x[:, 0])
     np.testing.assert_allclose(weight_term, prior_x - truncnorm_x, atol=1e-9)
 
-    # And this genuinely differs from the buggy (uncorrected) version, which
-    # would carry a non-zero y contribution.
+    # And this genuinely differs from the uncorrected version, which would
+    # carry a non-zero y contribution.
     buggy_term = logpi - proposal.logpdf(x)
     assert not np.allclose(weight_term, buggy_term)
 

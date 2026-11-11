@@ -71,9 +71,8 @@ def test_constraint_keys_are_not_sampled(constrained_estimator):
 
 
 def test_log_prior_rejects_a_constraint_violation(constrained_estimator):
-    """The regression this suite exists for: a hand-rolled product of
-    marginals returns a finite value here, because neither marginal is out of
-    range."""
+    """A point that violates the constraint gets -inf, though each marginal
+    alone is in range (a plain product of marginals would be finite here)."""
     assert np.isfinite(constrained_estimator.log_prior(ALLOWED))
     assert constrained_estimator.log_prior(VIOLATING) == -np.inf
 

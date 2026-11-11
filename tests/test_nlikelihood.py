@@ -1,11 +1,10 @@
 """``run_statistics["nlikelihood"]`` is every likelihood call the run made.
 
-It used to be the resampling stage's count alone (the proposal draws, or the
-count SMC and emcee return), which left out the MAP search, the Hessian,
-covariance validation, the mode search and the Laplace evidence. On a GW
-problem the MAP search alone was ~90x the 5000 draws ``inprior`` reported. The
-estimator now counts every call, whatever stage makes it, and these tests hold
-that count to the likelihood's own tally of how often it was called.
+That includes the MAP search, the Hessian, covariance validation, the mode
+search and the Laplace evidence, not only the resampling stage's count (the
+proposal draws, or the count SMC and emcee return). The estimator counts every
+call, whatever stage makes it, and these tests hold that count to the
+likelihood's own tally of how often it was called.
 """
 
 import datetime

@@ -90,10 +90,10 @@ def test_out_of_prior_mode_is_reported_but_not_fatal(sampler, caplog):
 
 
 # --------------------------------------------------------------------------
-# Diagnostic figure cadence.  The stats and evolution figures used to be
-# produced only from inside the per-iteration callback, so there was no way to
-# get them once at the end -- and re-rendering every iteration is expensive
-# (the evolution figure fits a gaussian_kde per parameter per iteration).
+# Diagnostic figure cadence.  The stats and evolution figures can be made once
+# at the end rather than from the per-iteration callback, since re-rendering
+# every iteration is expensive (the evolution figure fits a gaussian_kde per
+# parameter per iteration).
 # --------------------------------------------------------------------------
 
 

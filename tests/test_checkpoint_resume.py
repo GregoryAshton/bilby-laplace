@@ -1,10 +1,9 @@
-"""Regression tests for checkpoint/resume of the batched resampling loops.
+"""Tests for checkpoint/resume of the batched resampling loops.
 
-These guard against an accumulator-desync bug: on resume the sample
-accumulator lists are rebuilt as fresh copies, so they must be re-registered
-into ``_checkpoint_state`` -- otherwise the checkpoint keeps pointing at the
-loaded (pre-resume) lists and silently drops everything appended after the
-resume, corrupting a subsequent resume's samples and evidence.
+On resume the sample accumulator lists are rebuilt as fresh copies, so they
+must be re-registered into ``_checkpoint_state``; otherwise the checkpoint
+keeps pointing at the loaded (pre-resume) lists and drops everything appended
+after the resume, corrupting a later resume's samples and evidence.
 """
 
 import numpy as np
@@ -64,9 +63,8 @@ def test_inprior_resume_reregisters_accumulators(inprior_setup):
     assert state["n_accepted"] >= 50
     assert state["n_accepted"] > accepted_after_A  # the resume actually drew more
 
-    # The regression assertion: the samples reachable from the checkpoint must
-    # match the counter. Before the fix the payload still referenced the
-    # pre-resume list, so this count would lag n_accepted.
+    # The samples reachable from the checkpoint must match the counter; a
+    # payload still referencing the pre-resume list would lag n_accepted.
     assert _samples_in_state(state) == state["n_accepted"]
 
     # And the returned posterior has the full requested size.

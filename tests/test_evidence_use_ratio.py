@@ -5,12 +5,11 @@ sampler computes is a full log Z.  bilby, however, post-processes what a sampler
 returns according to ``use_ratio``: under ``use_ratio=True`` it treats the
 returned value as a log Bayes factor and adds the noise evidence back on top.
 Returning a full log Z under that convention inflates the result by one whole
-noise evidence -- on a GW likelihood that is ~13000 nats, which silently made
-``log_evidence`` incomparable with dynesty's.
+noise evidence, making ``log_evidence`` incomparable with other samplers'.
 
 These tests run the real ``bilby.run_sampler`` so bilby's own post-processing is
-in the loop; testing the sampler in isolation would miss the half of the
-round-trip where the bug lived.
+in the loop; testing the sampler in isolation would miss that half of the
+round-trip.
 """
 
 import bilby
@@ -83,7 +82,7 @@ def test_log_bayes_factor_is_the_evidence_less_the_noise(noisy_likelihood, gauss
 def test_the_two_conventions_agree(noisy_likelihood, gaussian_priors, tmp_path):
     """The headline invariant: `use_ratio` must not move the evidence.
 
-    Before the fix these differed by exactly one noise evidence.
+    Mishandled, these would differ by exactly one noise evidence.
     """
     full = _run(noisy_likelihood, gaussian_priors, tmp_path, False)
     ratio = _run(noisy_likelihood, gaussian_priors, tmp_path, True)
@@ -113,7 +112,7 @@ def test_stored_log_likelihoods_match_the_convention(noisy_likelihood, gaussian_
 def test_covariance_is_unaffected_by_the_convention(noisy_likelihood, gaussian_priors, tmp_path):
     """A constant offset cannot move the MAP or the curvature.
 
-    This is what licenses the fix being a shift at the end rather than a switch
+    This is what licenses handling the convention as a shift at the end rather than a switch
     to ``log_likelihood_ratio`` throughout the estimator.
     """
     full = _run(noisy_likelihood, gaussian_priors, tmp_path, False)

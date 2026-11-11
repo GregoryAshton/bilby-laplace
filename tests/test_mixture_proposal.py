@@ -1,12 +1,9 @@
 """Tests for the multi-mode proposal every resampling method draws from.
 
-Until 2026-08 the mode search lived inside ``_run_smc``, so ``n_modes`` was in
-practice an SMC-only setting: an ``inprior`` (or ``rejection``, or
-``importance``) run built a single Gaussian on the primary MAP however many
-modes were requested.  On a multi-modal problem that made the cheap methods
-incomparable with SMC -- they were not the same proposal uncorrected, they were
-a *different* proposal.  ``Laplace._build_proposal`` now runs before the
-resampling branch and returns a :class:`TruncatedMVNMixtureProposal`, and these
+``Laplace._build_proposal`` runs before the resampling branch and returns a
+:class:`TruncatedMVNMixtureProposal`, so ``n_modes`` applies to every method
+(``inprior``, ``rejection``, ``importance``, ``smc``, ``emcee``), not only
+SMC: the methods differ only in how they correct one common proposal.  These
 tests pin both the mixture's own behaviour and the fact that every method gets
 it.
 """
@@ -177,8 +174,7 @@ def test_multiple_modes_give_a_mixture(gaussian_likelihood, gaussian_priors, tmp
 
     assert isinstance(proposal, TruncatedMVNMixtureProposal)
     assert len(modes) == 2
-    # Both modes are actually drawn from -- the regression this file exists for
-    # is a proposal that quietly covered only the primary.
+    # Both modes are actually drawn from, not only the primary.
     assert set(np.unique(_nearest_mode(proposal.sample(500)))) == {0, 1}
 
 
@@ -275,9 +271,9 @@ def test_every_resampling_path_is_handed_the_same_proposal(gaussian_likelihood, 
 
     assert set(seen) == {"inprior", "rejection", "importance", "smc", "emcee"}
     reference = seen["inprior"]
-    # "All four agree" is necessary but not sufficient: under the old code they
-    # agreed on the *single* primary Gaussian, and SMC built its mixture
-    # privately afterwards. So demand that what they agree on is the mixture.
+    # "All agree" is necessary but not sufficient: they could all agree on the
+    # *single* primary Gaussian. So demand that what they agree on is the
+    # mixture.
     assert isinstance(reference, TruncatedMVNMixtureProposal)
     assert len(reference.components) == 2
     for name, proposal in seen.items():
